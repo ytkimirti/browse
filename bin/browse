@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# browse — drive a REAL recorded browser step by step (see SKILL.md at the repo
+# root). Every session is captured as a video with an
+# animated cursor + keystroke overlay; on close, static "agent thinking" dead
+# air is cut out into a shareable recording.mp4 (bracket a visibly-progressing
+# wait with `browse speed <n>` … `browse speed off` to fast-forward it instead).
+#
+# Source lives in browse.mjs next to this repo root. Playwright (+ Chromium) lives in
+# data/browse/ — machine-local and gitignored, so the repo stays lean. It
+# installs on the first `browse` use; `browse setup` pre-installs it (bootstrap
+# offers this) and checks for ffmpeg.
+
+set -euo pipefail
+
+# resolve symlinks so this works when invoked via a PATH symlink (~/.local/bin)
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"; SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PW_DIR="$REPO_ROOT/data/browse"
+
+command -v node >/dev/null || { echo "browse: node is required on PATH" >&2; exit 1; }
+
+install_deps() {
+  mkdir -p "$PW_DIR"
+  [[ -f "$PW_DIR/package.json" ]] || printf '{ "name": "browse-deps", "private": true }\n' > "$PW_DIR/package.json"
+  # ffmpeg bundle too: browse.mjs falls back to it for the mp4 finalize when no
+  # system ffmpeg exists (system one still preferred — it can draw speed badges)
+  if command -v bun >/dev/null; then
+    (cd "$PW_DIR" && bun add playwright && bunx playwright install chromium ffmpeg)
+  else
+    (cd "$PW_DIR" && npm install playwright && npx playwright install chromium ffmpeg)
+  fi
+}
+
+if [[ "${1:-}" == "setup" ]]; then
+  if [[ -d "$PW_DIR/node_modules/playwright" ]]; then
+    echo "browse: playwright already installed in data/browse/"
+  else
+    echo "browse: installing playwright + Chromium into data/browse/ (one-time, ~2 min)…"
+    install_deps
+  fi
+  command -v ffmpeg >/dev/null || \
+    echo "browse: • no system ffmpeg — mp4 finalize will use Playwright's bundled copy (brew install ffmpeg for speed-badge overlays)"
+  echo "browse: ready"
+  exit 0
+fi
+
+if [[ ! -d "$PW_DIR/node_modules/playwright" ]]; then
+  echo "browse: first run — installing playwright + Chromium into data/browse/ (one-time, ~2 min)…" >&2
+  install_deps >&2
+fi
+
+# playwright is resolved from data/browse/, not next to the source file
+BROWSE_PW_BASE="$PW_DIR/package.json" exec node "$REPO_ROOT/browse.mjs" "$@"
