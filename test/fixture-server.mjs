@@ -12,11 +12,18 @@
 
 import http from "node:http";
 
+// #done is appended only after every fetch AND the image have settled, so the
+// test can `browse wait "#done"` instead of sleeping a guessed number of ms.
+// A fixed sleep here would be a race on a cold browser (and this machine runs
+// many agents at once), and it would fail as a WRONG VALUE rather than a timeout.
 const PAGE = `<!doctype html><meta charset=utf8><title>mw</title>
 <pre id=out>pending</pre>
-<img id=pic src="/pixel.png" onerror="window.__picFailed=1" onload="window.__picFailed=0">
+<img id=pic src="/pixel.png" onerror="window.__pic='failed';settle()" onload="window.__pic='loaded';settle()">
 <script>
-window.__picFailed = -1;
+window.__pic = null;
+let picDone = null;
+const picSettled = new Promise((r) => { picDone = r; });
+function settle() { picDone(); }
 (async () => {
   const get = async (p) => { try { return await (await fetch(p)).json(); } catch (e) { return {fetchError: String(e)}; } };
   window.__r = {
@@ -25,7 +32,11 @@ window.__picFailed = -1;
     other: await get('/api/other'),
   };
   document.getElementById('out').textContent = JSON.stringify(window.__r);
-  window.__ready = 1;
+  await picSettled;
+  const d = document.createElement('div');
+  d.id = 'done';
+  d.textContent = 'done';
+  document.body.appendChild(d);
 })();
 </script>`;
 

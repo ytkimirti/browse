@@ -373,17 +373,59 @@ const CHAPTERLESS = new Set([
   "close", "stop", "quit",
 ]);
 
+const MW_USAGE = "middleware: needs a pattern AND a handler, e.g.\n" +
+  "  browse middleware '**/api/user' 'route => route.fulfill({json: {ok: true}})'\n" +
+  "Other forms: `browse middleware` (list) · `browse middleware <pattern> --remove` · `browse middleware --clear`";
+
+/** Parse `middleware` args into the one shape both sides agree on.
+ *
+ *  The CLIENT needs this to decide whether a command is worth spawning a whole
+ *  browser for; the DAEMON needs it to act. One parser so they cannot drift — a
+ *  malformed command the client waves through and the daemon rejects is how the
+ *  same typo ends up exiting 0 or 1 depending on whether a browser happened to
+ *  be running. Returns { error } or { action, pattern?, src? }. */
+function parseMiddleware(args) {
+  let remove = false, clear = false;
+  const words = [], unknown = [];
+  for (const a of args) {
+    if (a === "--remove") remove = true;
+    else if (a === "--clear") clear = true;
+    else if (String(a).startsWith("--")) unknown.push(a);
+    else words.push(a);
+  }
+  if (unknown.length) return { error: `middleware: unknown flag '${unknown[0]}'\n${MW_USAGE}` };
+  if (clear && (remove || words.length)) return { error: `middleware: --clear takes nothing else\n${MW_USAGE}` };
+  if (clear) return { action: "clear" };
+  if (remove) {
+    if (words.length !== 1) return { error: `middleware: --remove needs exactly one pattern\n${MW_USAGE}` };
+    return { action: "remove", pattern: words[0] };
+  }
+  if (!words.length) return { action: "list" };
+  // One bare word is ambiguous on purpose: it is either a pattern whose handler
+  // was forgotten or a handler whose pattern was. Refusing it is what lets
+  // logLabel below promise never to echo source.
+  if (words.length < 2) return { error: MW_USAGE };
+  // Joined the same way `eval` joins its expression, so an unquoted handler still
+  // works; a properly quoted one arrives as a single arg anyway.
+  return { action: "register", pattern: words[0], src: words.slice(1).join(" ").trim() };
+}
+
 /** How a command is written down — transcript lines and mp4 chapter titles.
  *  `middleware` carries a JS handler that routinely holds a mocked token, a
  *  fixture with real customer data, or an internal URL, and the transcript is
  *  the artifact people share. So the pattern is recorded and the SOURCE never
- *  is — not here, not in the daemon log, not in the command's own result. */
+ *  is — not here, not in the daemon log, not in the command's own result.
+ *  Anything this can't prove is a pattern is written as <?>, because the one
+ *  path where the caller got the arguments wrong is exactly the path that would
+ *  otherwise dump a handler into the artifact. */
 function logLabel(cmd, args) {
   if (cmd !== "middleware") return `${cmd}${args.length ? " " + args.join(" ") : ""}`;
-  const words = args.filter((a) => !String(a).startsWith("--"));
-  const flags = args.filter((a) => String(a).startsWith("--"));
-  return ["middleware", words[0], words.length > 1 ? "<handler>" : null, ...flags]
-    .filter(Boolean).join(" ");
+  const m = parseMiddleware(args);
+  if (m.action === "register") return `middleware ${m.pattern} <handler>`;
+  if (m.action === "remove") return `middleware ${m.pattern} --remove`;
+  if (m.action === "clear") return "middleware --clear";
+  if (m.action === "list") return "middleware";
+  return "middleware <?>";
 }
 
 /**
@@ -782,7 +824,7 @@ Intercept requests (mock an API, block an asset, rewrite a response):
   browse middleware <pattern> '<playwright route handler>'
                                     pattern is a Playwright glob matched against the FULL url, so
                                     lead with ** (e.g. '**/api/user'). The handler is real JS run in
-                                    the daemon with the real Route, and MUST answer it with
+                                    the daemon with the real Route, and answers it with
                                     fulfill / abort / continue / fallback:
     mock      browse middleware '**/api/user' 'route => route.fulfill({json: {id: 1}})'
     block     browse middleware '**/*.png'    'route => route.abort()'
@@ -790,13 +832,16 @@ Intercept requests (mock an API, block an asset, rewrite a response):
                 const res = await route.fetch(); const json = await res.json();
                 await route.fulfill({response: res, json: {...json, debug: true}}); }'
     inspect   browse middleware '**/api/**' 'route => { console.log(route.request().url()); return route.fallback(); }'
-  browse middleware                 list the patterns + how many requests each handled
+  browse middleware                 list the patterns + how many requests each MATCHED
   browse middleware <pattern> --remove · browse middleware --clear
+  A rule only affects requests made after it exists — register before 'open', or 'reload' after.
   Registering the same pattern REPLACES that rule (no accidental duplicates); newer rules run
-  first. Rules cover the whole context (every tab, frame and worker) and live only for this
-  session. A handler that throws aborts its request and reports the error on your next command;
-  console.* from a handler goes to browsed.log in the session dir. Handler source is never
-  printed or written to the transcript. Intercepted requests still show up in 'browse net'.
+  first. Rules cover the whole context (every tab and frame) and live only for this session.
+  A handler that answers nothing is passed through untouched and says so once, rather than
+  hanging the request. One that throws aborts its request and reports on your next command.
+  console.* from a handler is written VERBATIM to browsed.log in the session dir — it is not
+  redacted, so don't log request headers. Handler source is never printed or written to the
+  transcript. 'browse net' marks what a rule answered: ⟨mock|block|continue <pattern>⟩.
 
 Misc:
   browse eval <js expression>       evaluate JS in the page, print the result
@@ -950,6 +995,10 @@ function netClipUrl(u) {
   return s.length > NET_URL_MAX ? `${s.slice(0, NET_URL_MAX - 1)}…(+${s.length - NET_URL_MAX + 1})` : s;
 }
 
+/** How a `browse middleware` rule answered a request, in the one word that tells
+ *  the reader what to distrust about the row. */
+const NET_MOCK_VERB = { fulfill: "mock", abort: "block", continue: "continue" };
+
 function netLine(e, { fullUrl } = {}) {
   const status = e.error ? "ERR" : e.status == null ? "-" : String(e.status);
   const pad = (s, n) => String(s).padEnd(n);
@@ -963,6 +1012,9 @@ function netLine(e, { fullUrl } = {}) {
     pad(e.ms == null ? "-" : `${e.ms}ms`, 7),
     fullUrl ? e.url : netClipUrl(e.url),
     e.error ? `  ← ${e.error}` : "",
+    // A request one of YOUR middleware rules answered. Without this an abort()
+    // reads as an organic network failure and a mocked 200 as a real one.
+    e.mock ? `  ⟨${NET_MOCK_VERB[e.mockVia] || "middleware"} ${e.mock}⟩` : "",
   ].join(" ").trimEnd();
 }
 
@@ -1261,11 +1313,18 @@ async function client(argv) {
   // Registering middleware BEFORE `open` is the normal flow, so that form has to
   // spawn the browser. Listing/removing/clearing must not: with no live session
   // there are no rules, and launching a whole browser to say so would also start
-  // a recording nobody asked for.
-  if (cmd === "middleware" && argv.filter((a) => !a.startsWith("--")).length < 3
-      && !(await findDaemon())) {
-    process.stdout.write(`(no active browser session${SESSION === "default" ? "" : ` '${SESSION}'`}, so no middleware)\n`);
-    return 0;
+  // a recording nobody asked for. A MALFORMED command is rejected here either
+  // way, so its exit status doesn't depend on whether a browser happened to be up.
+  if (cmd === "middleware") {
+    const m = parseMiddleware(argv.slice(1));
+    if (m.error) {
+      process.stderr.write(`browse: ${m.error}\n`);
+      return 1;
+    }
+    if (m.action !== "register" && !(await findDaemon())) {
+      process.stdout.write(`(no active browser session${SESSION === "default" ? "" : ` '${SESSION}'`}, so no middleware)\n`);
+      return 0;
+    }
   }
   // Never spawn a browser just to close one: if there's no live session, closing
   // is a no-op.
@@ -1834,6 +1893,18 @@ function camoufoxLaunchOptions() {
 }
 
 async function daemon() {
+  // A rejected promise nobody awaited must never take the session down. Node's
+  // default is to kill the process, and this daemon runs with stdio "ignore" —
+  // so the browser, every tab, every cookie and the whole unfinalized recording
+  // would vanish, and the only thing the agent would see is `socket hang up`.
+  // `browse middleware` makes this reachable from agent-authored code, but any
+  // stray Playwright rejection had the same power. Log it and stay up.
+  process.on("unhandledRejection", (e) => {
+    logDaemon(`unhandled rejection (session kept alive): ${e?.stack || e}`);
+  });
+  process.on("uncaughtException", (e) => {
+    logDaemon(`uncaught exception (session kept alive): ${e?.stack || e}`);
+  });
   mkdirSync(OUT, { recursive: true });
   mkdirSync(VIDEO_DIR, { recursive: true });
   mkdirSync(SHOTS_DIR, { recursive: true });
@@ -2114,6 +2185,14 @@ async function daemon() {
   // log live and after close. Purely observational — never fails a command.
   const NET_FILE = netFileIn(OUT);
   const netStart = new WeakMap(); // request → { i, t0 }
+  // Requests a `browse middleware` rule ANSWERED, so the log can say so. Without
+  // this an agent's own `route.abort()` reads as an organic network failure in
+  // `browse net --failed`, and a mocked 200 is indistinguishable from a real one
+  // — the log stops being evidence exactly when it matters most. A rule that
+  // fell back is deliberately NOT recorded: it matched, but the response is
+  // still whatever the origin said, and calling that "mocked" is the same lie in
+  // the other direction.
+  const mwMarks = new WeakMap(); // request → { pattern, via }
   let netSeq = 0;
   const netAppend = (e) => { try { appendFileSync(NET_FILE, JSON.stringify(e) + "\n"); } catch { /* best effort */ } };
   async function netRecord(req, error) {
@@ -2128,6 +2207,8 @@ async function daemon() {
       url: req.url(),
       type: req.resourceType(),
     };
+    const mock = mwMarks.get(req);
+    if (mock) { e.mock = mock.pattern; e.mockVia = mock.via; }
     if (error) e.error = error;
     try { e.reqHeaders = netRedact(await req.allHeaders()); } catch { /* gone */ }
     if (NET.bodies) {
@@ -2171,22 +2252,31 @@ async function daemon() {
   // array is kept in the same order so the listing IS the match order.
   const middleware = []; // { pattern, handler, hits, errs, warned }
   // console.* inside a handler has nowhere to go — the daemon is spawned with
-  // stdio "ignore" — so give it the session log instead of a black hole.
+  // stdio "ignore" — so give it the session log instead of a black hole. A Proxy
+  // rather than a fixed list of levels: console.table/group/time are rare but a
+  // missing one is a TypeError that aborts the request and reads like a browse bug.
   const mwFormat = (v) => {
     if (typeof v === "string") return v;
     try { return JSON.stringify(v) ?? String(v); } catch { return String(v); }
   };
-  const mwConsole = {};
-  for (const level of ["log", "info", "warn", "error", "debug", "trace", "dir"]) {
-    mwConsole[level] = (...a) => logDaemon(`middleware console.${level}: ${a.map(mwFormat).join(" ")}`);
-  }
+  const mwConsole = new Proxy({}, {
+    get: (_t, level) => (...a) => logDaemon(`middleware console.${String(level)}: ${a.map(mwFormat).join(" ")}`),
+  });
 
   /** Compile handler source into a function. `console` is passed as a parameter
    *  so it SHADOWS the global one inside the handler (see mwConsole). */
   function mwCompile(src) {
     let fn;
-    try { fn = new Function("console", `"use strict"; return (${src});`)(mwConsole); }
-    catch (e) { throw new Error(`middleware: that handler didn't compile — ${e.message}\nIt must be a single function expression, e.g. 'route => route.fulfill({json: {ok: true}})'`); }
+    // A trailing `;` is what anyone writes by reflex and would otherwise land
+    // inside `return (…)` as a syntax error pointing at nothing; the newlines
+    // keep a trailing `// comment` from swallowing the closing paren.
+    const clean = String(src).replace(/[\s;]+$/, "");
+    try { fn = new Function("console", `"use strict"; return (\n${clean}\n);`)(mwConsole); }
+    // V8 quotes the offending token ("Unexpected identifier 'apiSecret'"), so the
+    // detail goes on a LATER line: the caller sees all of it on stderr, and the
+    // transcript — which keeps only the first line — can never pick up a
+    // fragment of the source.
+    catch (e) { throw new Error(`middleware: that handler didn't compile.\n  ${e.message}\n  It must be a single function expression, e.g. 'route => route.fulfill({json: {ok: true}})'`); }
     // The example goes on a SECOND line on purpose: the transcript records only
     // the first line of an error, and an arrow function there would be
     // indistinguishable from a leaked handler.
@@ -2195,37 +2285,101 @@ async function daemon() {
     return fn;
   }
 
+  /** The four ways a handler may answer its route. */
+  const MW_ANSWERS = new Set(["fulfill", "abort", "continue", "fallback"]);
+
+  /** Hand the handler the real Route, but notice the MOMENT it answers.
+   *
+   *  `route => { route.fulfill(…) }` — block body, no `return` — is the shape
+   *  everyone writes, and it hands us back a resolved promise while fulfill is
+   *  still mid-IPC. Playwright only clears its internal handling promise once
+   *  that round-trip lands, so asking "is it handled yet?" afterwards answers NO,
+   *  and a safety-net fallback() there would pass the request through untouched
+   *  and then crash the daemon when the real fulfill finally reported in. So
+   *  answering is recorded SYNCHRONOUSLY, at call time, and the promise is kept
+   *  so we can wait for it before deciding anything. */
+  function mwTrack(route, state) {
+    return new Proxy(route, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop, target);
+        if (typeof v !== "function") return v;
+        if (!MW_ANSWERS.has(prop)) return v.bind(target);
+        return (...a) => {
+          state.answered = true;
+          state.via = prop; // fallback() answers the route but changes nothing
+          const p = v.apply(target, a);
+          // Attaching a catch here also ADOPTS the rejection, so an un-awaited
+          // `route.fulfill()` that fails can't take the whole daemon down.
+          state.pending.push(Promise.resolve(p).catch((e) => { state.error ??= e; }));
+          return p;
+        };
+      },
+    });
+  }
+
   /** Wrap a compiled handler so neither an exception nor a forgotten
-   *  fulfill/abort/continue/fallback can wedge the page. */
+   *  fulfill/abort/continue/fallback can wedge the page or the daemon. */
   function mwWrap(entry, fn) {
     return async (route) => {
       entry.hits++;
-      let url = "";
-      try { url = route.request().url(); } catch { /* gone */ }
+      let url = "", req = null;
+      try { req = route.request(); url = req.url(); } catch { /* gone */ }
+      // Record only once the rule has actually ANSWERED, and only when the answer
+      // changed something — see mwMarks.
+      const mark = (via) => { if (req) mwMarks.set(req, { pattern: entry.pattern, via }); };
+      const state = { answered: false, via: null, pending: [], error: null };
       try {
-        await fn(route);
+        await fn(mwTrack(route, state));
+        // An un-awaited answer is still in flight here. Let it land before
+        // judging anything, or we race the handler's own decision.
+        await Promise.all(state.pending);
+        if (state.error) throw state.error;
       } catch (e) {
         entry.errs++;
-        const msg = stripAnsi(e && e.message ? e.message : String(e));
-        note(`middleware '${entry.pattern}' threw on ${url} — request aborted: ${msg}`);
+        // The route is unanswered unless the throw came after it was answered,
+        // in which case abort() just tells us so — and saying "aborted" then
+        // would be a lie about a request that actually went through.
+        let aborted = false;
+        try { await route.abort(); aborted = true; } catch { /* already answered */ }
+        // A request this rule killed must not read as an organic network failure.
+        if (aborted) mark("abort");
+        else if (state.via && state.via !== "fallback") mark(state.via);
+        mwThrew(entry, url, stripAnsi(e && e.message ? e.message : String(e)), aborted);
         logDaemon(`middleware '${entry.pattern}' threw on ${url}: ${e?.stack || e}`);
-        // The route is still unanswered unless the throw came AFTER it was
-        // answered, in which case abort() just tells us so and we drop it.
-        try { await route.abort(); } catch { /* it had already been answered */ }
+        return;
+      }
+      if (state.answered) {
+        if (state.via !== "fallback") mark(state.via);
         return;
       }
       // Playwright waits on a promise only fulfill/abort/continue/fallback
       // resolve, so a handler that answers nothing hangs that request until it
       // times out — with nothing on screen or in the log to explain it. Fall the
       // request through instead, and say so once per rule.
-      try {
-        await route.fallback();
-        if (!entry.warned) {
-          entry.warned = true;
-          note(`middleware '${entry.pattern}' returned without calling fulfill/abort/continue/fallback, so the request was passed through untouched (said once per rule)`);
-        }
-      } catch { /* "Route is already handled" — the normal path */ }
+      try { await route.fallback(); } catch { /* the context is going away */ }
+      if (!entry.warned) {
+        entry.warned = true;
+        note(`middleware '${entry.pattern}' returned without calling fulfill/abort/continue/fallback, so the request was passed through untouched (said once per rule)`);
+      }
     };
+  }
+
+  // A rule matching '**/api/**' on a busy page throws once per REQUEST. Reporting
+  // each one would bury the command's actual result and blow past the 50-note cap
+  // — which then silently eats the dialog/download notes too. So throws are
+  // counted per rule here and collapsed into one line when the next command reports.
+  const mwThrows = new Map(); // entry → { n, url, msg, aborted }
+  function mwThrew(entry, url, msg, aborted) {
+    const agg = mwThrows.get(entry) || { n: 0 };
+    mwThrows.set(entry, { n: agg.n + 1, url, msg, aborted });
+  }
+  function mwFlushThrows() {
+    for (const [entry, a] of mwThrows) {
+      note(a.n === 1
+        ? `middleware '${entry.pattern}' threw on ${a.url}: ${a.msg}${a.aborted ? " — request aborted" : " — the route had already been answered, so it was NOT aborted"}`
+        : `middleware '${entry.pattern}' threw on ${a.n} requests — last, ${a.url}: ${a.msg}`);
+    }
+    mwThrows.clear();
   }
 
   // How many errors we've already shown the caller. New ones past this cursor are
@@ -3094,18 +3248,17 @@ async function daemon() {
         return `loaded ${st.cookies?.length || 0} cookies + ${origins.length} origin(s) from ${path}${clean ? " (cleared first)" : " (merged onto what was there)"} - ${await brief()}`;
       }
       case "middleware": {
-        let remove = false, clear = false;
-        const words = [];
-        for (const a of args) {
-          if (a === "--remove" || a === "--rm") remove = true;
-          else if (a === "--clear") clear = true;
-          else words.push(a);
-        }
+        const mw = parseMiddleware(args);
+        if (mw.error) throw new Error(mw.error);
+        // "matched", not "handled": a rule that ends in fallback() matches the
+        // request and then passes it on, and calling that "handled" would read
+        // as though the mock had applied.
         const list = () => middleware.length
-          ? middleware.map((m) => `  ${m.pattern}   ${m.hits} handled${m.errs ? `, ${m.errs} threw` : ""}`).join("\n")
+          ? middleware.map((m) => `  ${m.pattern}   ${m.hits} matched${m.errs ? `, ${m.errs} threw` : ""}`).join("\n")
             + `\n(${middleware.length} rule${middleware.length > 1 ? "s" : ""}, newest first — that is also the order they run in)`
           : "(no middleware)";
-        if (clear) {
+        if (mw.action === "list") return list();
+        if (mw.action === "clear") {
           const n = middleware.length;
           if (!n) return "(no middleware to clear)";
           for (const m of middleware) {
@@ -3114,21 +3267,14 @@ async function daemon() {
           middleware.length = 0;
           return `cleared ${n} middleware rule${n > 1 ? "s" : ""}`;
         }
-        if (remove) {
-          const pattern = words[0];
-          if (!pattern) throw new Error("middleware --remove: needs the pattern to remove — run `browse middleware` to list them");
-          const i = middleware.findIndex((m) => m.pattern === pattern);
-          if (i < 0) throw new Error(`middleware: nothing registered for '${pattern}'\n${list()}`);
-          await context.unroute(pattern, middleware[i].handler);
+        if (mw.action === "remove") {
+          const i = middleware.findIndex((m) => m.pattern === mw.pattern);
+          if (i < 0) throw new Error(`middleware: nothing registered for '${mw.pattern}'\n${list()}`);
+          await context.unroute(mw.pattern, middleware[i].handler);
           middleware.splice(i, 1);
-          return `removed middleware ${pattern}`;
+          return `removed middleware ${mw.pattern}`;
         }
-        if (!words.length) return list();
-        const pattern = words[0];
-        // Joined the same way `eval` joins its expression, so an unquoted handler
-        // still works; a properly quoted one arrives as a single arg anyway.
-        const src = words.slice(1).join(" ").trim();
-        if (!src) throw new Error(`middleware: needs a handler for '${pattern}', e.g.\n  browse middleware '${pattern}' 'route => route.fulfill({json: {ok: true}})'\nor 'browse middleware ${pattern} --remove' to drop it`);
+        const { pattern, src } = mw;
         const fn = mwCompile(src);
         // Same pattern twice is almost always a REWRITE of the rule, not a second
         // one — silently stacking them would leave the older (now shadowed) rule
@@ -3183,14 +3329,27 @@ async function daemon() {
         const stepAt = now();
         const out = await dispatch(cmd, args);
         if (!CHAPTERLESS.has(cmd)) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
+        // Collapse any middleware faults raised since the last command into the
+        // notes queue, so they ride out on this reply like every other note.
+        mwFlushThrows();
         if (out && out.__close) {
           const saved = await closeSession("closed by client", { keepRaw: out.keepRaw });
           const wantGif = out.gif && saved && saved.mp4;
+          // The mp4 is what gets shared as proof, and mocked data looks exactly
+          // like real data on video. Say which rules were live for the recording
+          // (patterns only — never the handlers), or a demo of a mocked "Pro"
+          // plan is indistinguishable from a demo of a real one.
+          const mocks = middleware.length
+            ? `\n  mock: ${middleware.length} middleware rule${middleware.length > 1 ? "s were" : " was"} active during this recording — ${middleware.map((m) => m.pattern).join(", ")}`
+            : "";
+          // A note queued by the very last interception would otherwise die with
+          // the process: this is its only chance to be said.
+          const lastNotes = notes.length ? `\n${notes.splice(0).map((n) => "  " + n).join("\n")}` : "";
           send({
             ok: true,
-            result: saved && (saved.mp4 || saved.webm)
-              ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (ffmpeg missing/failed - mp4 not written)`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`
-              : "closed - recording flushed (no video captured)",
+            result: (saved && (saved.mp4 || saved.webm)
+              ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (ffmpeg missing/failed - mp4 not written)`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`
+              : "closed - recording flushed (no video captured)") + lastNotes,
           });
           // The gif is a two-pass encode that can outlast the client's 120s
           // timeout on a long session. It runs AFTER the reply, so the mp4 path
@@ -3235,6 +3394,7 @@ async function daemon() {
         // The notes queue must drain on FAILURE too: a download that landed, or a
         // dialog we answered, belongs to the command that caused it - held back,
         // it resurfaces later attached to something unrelated and misleads.
+        mwFlushThrows();
         if (notes.length) msg = `${msg}\n${notes.splice(0).map((n) => "  " + n).join("\n")}`;
         logTranscript(`### · \`${logLabel(cmd, args)}\`\n- ❌ ${msg.split("\n")[0]}\n\n`);
         send({ ok: false, error: msg });

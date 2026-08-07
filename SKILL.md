@@ -103,23 +103,30 @@ browse middleware '**/api/config' 'async route => {
 ```
 
 The pattern is a Playwright glob matched against the **full url**, so lead with
-`**`. Every handler must answer its route with `fulfill` / `abort` / `continue` /
-`fallback`. Rules apply across the whole context (all tabs, frames, workers) and
-last only for this session. Registering the same pattern **replaces** that rule;
-newer rules run first.
+`**`. A handler answers its route with `fulfill` / `abort` / `continue` /
+`fallback`; one that answers nothing passes the request through untouched and says
+so once. Rules apply across the whole context (all tabs and frames) and last only
+for this session. Registering the same pattern **replaces** that rule; newer rules
+run first.
 
 ```bash
-browse middleware                        # list patterns + how many each handled
+browse middleware                        # list patterns + how many each matched
 browse middleware '**/api/user' --remove
 browse middleware --clear
 ```
 
 Set the rules **before** `open` (or `reload` after) — a rule only affects requests
 made after it exists. If a mock seems not to apply, `browse middleware` shows a
-`0 handled` count, which means the pattern never matched. A handler that throws
-aborts its request and reports the error on your next command; `console.*` from a
-handler goes to `browsed.log` in the session dir. Handler source is never printed
-or written to the transcript, so a fixture with real-looking data is safe to use.
+`0 matched` count, meaning nothing has hit that pattern *yet* (wrong glob, or the
+requests fired before you registered it). A handler that throws aborts its request
+and reports the error on your next command. `browse net` marks what a rule
+answered — `⟨mock **/api/user⟩`, `⟨block **/*.png⟩` — so your own aborts don't read
+as real network failures.
+
+Handler source is never printed or written to the transcript, and `close` reports
+which patterns were live so a recording of mocked data can't pass for real. But
+`console.*` from a handler is written **verbatim and unredacted** to `browsed.log`,
+so don't log request headers.
 
 ## Sessions
 
