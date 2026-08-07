@@ -42,9 +42,16 @@ browse setup      # installs playwright + chromium into ~/.browse (one-time, ~2 
 browse open https://example.com
 ```
 
-Everything machine-local — Playwright, Chromium, recordings, profiles — lives in
-`~/.browse` (override with `BROWSE_HOME`). The clone stays a few files, and
-uninstalling is `rm -rf ~/.browse` plus the symlink.
+Everything browse owns — the Playwright install, recordings, profiles — lives in
+`~/.browse` (override with `BROWSE_HOME`), so the clone stays a few files.
+Browser binaries are the exception: they go to Playwright's shared per-user
+cache (`~/Library/Caches/ms-playwright`), so a Chromium you already have for
+another project is reused. Full uninstall:
+
+```bash
+rm -rf ~/.browse ~/.local/bin/browse
+npx playwright uninstall --all      # only if nothing else on the box uses playwright
+```
 
 `browse help` and `browse version` work before setup and never download
 anything. If you skip `browse setup`, the first real command installs for you.
@@ -58,7 +65,8 @@ It is the default engine when present:
 ```bash
 uv tool install camoufox
 ~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch
-browse setup      # links camoufox to the playwright build it needs
+browse setup      # links camoufox to the playwright build it needs, and
+                  # patches that copy so camoufox sessions actually record
 ```
 
 Without it, browse falls back to Chromium and says so on the first `browse open`.

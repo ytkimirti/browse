@@ -42,9 +42,13 @@
  *                                    installs deps on first run and points
  *                                    BROWSE_PW_BASE at the data home
  *   ~/.browse/                       runtime data home (BROWSE_HOME). NOTHING
- *                                    machine-local lives in the clone:
- *   ~/.browse/node_modules/          playwright + chromium (~400MB)
- *   ~/.browse/camoufox-pw/           playwright-core pinned to camoufox's build
+ *                                    browse owns lives in the clone:
+ *   ~/.browse/node_modules/          the playwright npm package (browser
+ *                                    binaries go to playwright's own shared
+ *                                    cache, ~/Library/Caches/ms-playwright)
+ *   ~/.browse/camoufox-pw/           playwright-core pinned to camoufox's build,
+ *                                    patched by the launcher so camoufox can
+ *                                    record video (see bin/browse)
  *   ~/.browse/sessions/<stamp>/      transcript.md, recording.mp4, feedback.md,
  *                                    browsed.log, shots/step-*.png (video/*.webm
  *                                    only while live)
@@ -2174,8 +2178,16 @@ async function daemon() {
     // Report the EXACT saved path so the caller gets the file it just recorded.
     // The .webm is finalized by context.close() above, so page.video().path()
     // now points at a real file.
+    // video.path() returns the path the engine was ASKED to write, which exists
+    // only if the engine actually recorded. An engine that took the recordVideo
+    // option and then wrote nothing (camoufox with an unpatched playwright-core)
+    // otherwise reported a path to a missing file, and `close` blamed ffmpeg.
     let webm = null;
     try { webm = video ? await video.path() : null; } catch { /* no video */ }
+    if (webm && !existsSync(webm)) {
+      logDaemon(`engine '${engine}' recorded no video (expected ${webm})`);
+      webm = null;
+    }
     const mp4 = webm ? finalizeRecording(webm, { speedMarks, keepMarks, cutMarks, stepMarks }) : null;
     if (mp4 && !keepRaw) {
       // The mp4 is the deliverable — the raw .webm is just its temp source.

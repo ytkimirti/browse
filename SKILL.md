@@ -207,6 +207,13 @@ one it uses for Chromium — that third step is what installs the pinned copy
 (the launcher also installs it automatically the first time it sees camoufox).
 If browse ever falls back to Chromium it says so in the `browse open` output.
 
+That pinned copy is also **patched** at install time so camoufox can record at
+all. Camoufox's Juggler wants a `screencastId` on every frame ack and sends
+frames without a `timestamp`; stock Playwright does neither, so the ack is
+rejected, the stream stalls, and the session ends with an empty video dir and a
+`close` that blames ffmpeg. `browse setup` re-applies the patch whenever it is
+missing, and says so if it ever stops applying.
+
 Switch back with `BROWSE_ENGINE=chromium` when you need:
 
 - `browse emulate` (timezone/locale/cpu/network) — CDP-only
@@ -233,10 +240,11 @@ per engine.
 - Daemon won't start → read `browsed.log` in the session dir it printed.
 - A missing selector fails in ~4-12s by design and the error now lists the closest
   matches from the a11y tree - use those instead of retrying blindly.
-- `browse` needs Node 18+ on PATH; Playwright (+ Chromium) auto-installs on the
-  first run into `~/.browse/` (one-time, ~2 min — pre-install with
-  `browse setup`, which is also the repair command; `rm -rf ~/.browse/node_modules`
-  forces a reinstall). `browse help` / `browse version` never trigger it. The
+- `browse` needs Node 18+ on PATH; Playwright auto-installs on the first run
+  into `~/.browse/` and Chromium into playwright's shared cache (one-time,
+  ~2 min — pre-install with `browse setup`, which is also the repair command;
+  `rm -rf ~/.browse/node_modules` forces a reinstall).
+  `browse help` / `browse version` never trigger it. The
   mp4 finalize uses system `ffmpeg`, falling back to Playwright's bundled copy.
 - The `10x` badge needs an ffmpeg built with `drawtext` (libfreetype), which
   homebrew's current bottle lacks - the region is still sped up but unlabelled,
