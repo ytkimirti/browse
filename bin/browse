@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
 # browse — drive a REAL recorded browser step by step (see SKILL.md at the repo
-# root). Every session is captured as a video with an
-# animated cursor + keystroke overlay; on close, static "agent thinking" dead
-# air is cut out into a shareable recording.mp4 (bracket a visibly-progressing
-# wait with `browse speed <n>` … `browse speed off` to fast-forward it instead).
+# root). Every session is captured as a video with an animated cursor +
+# keystroke overlay; on close, static "agent thinking" dead air is cut out into
+# a shareable recording.mp4 (bracket a visibly-progressing wait with
+# `browse speed <n>` … `browse speed off` to fast-forward it instead).
 #
-# Source lives in browse.mjs next to this repo root. Playwright (+ Chromium) lives in
-# data/browse/ — machine-local and gitignored, so the repo stays lean. It
-# installs on the first `browse` use; `browse setup` pre-installs it (bootstrap
-# offers this) and checks for ffmpeg.
+# Source lives in browse.mjs at the repo root. Everything machine-local —
+# Playwright, Chromium, sessions, profiles — lives under ~/.browse (override
+# with BROWSE_HOME), so the clone stays a few files and `git clean` can't nuke
+# a 400MB browser download. Deps install on first use; `browse setup`
+# pre-installs them and checks the optional extras.
 
 set -euo pipefail
+
+# Pinned rather than floating: browse drives a lot of Playwright surface (video
+# capture, init scripts, CDP) and a silent minor bump has broken it before.
+# Bump deliberately, then re-run `browse setup`.
+PW_VERSION="1.61.1"
+# camoufox is BUILT AGAINST playwright 1.60.0 and its Firefox speaks that exact
+# protocol — 1.61 sends `viewport.isMobile`, which the build rejects at launch.
+# So the stealth engine gets its own pinned playwright-core alongside the main
+# install; browse.mjs prefers it when driving camoufox.
+CAMOU_PW_VERSION="1.60.0"
 
 # resolve symlinks so this works when invoked via a PATH symlink (~/.local/bin)
 SOURCE="${BASH_SOURCE[0]}"
@@ -20,39 +31,96 @@ while [[ -L "$SOURCE" ]]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PW_DIR="$REPO_ROOT/data/browse"
+HOME_DIR="${BROWSE_HOME:-$HOME/.browse}"
+PW_DIR="$HOME_DIR"                       # main Playwright + Chromium install
+CAMOU_PW_DIR="$HOME_DIR/camoufox-pw"     # pinned playwright-core for camoufox
 
-command -v node >/dev/null || { echo "browse: node is required on PATH" >&2; exit 1; }
+command -v node >/dev/null || {
+  echo "browse: node is required on PATH (need v18+; https://nodejs.org)" >&2; exit 1; }
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+if (( NODE_MAJOR < 18 )); then
+  echo "browse: node v18+ required (found v$(node -p process.versions.node))" >&2; exit 1
+fi
 
-install_deps() {
-  mkdir -p "$PW_DIR"
-  [[ -f "$PW_DIR/package.json" ]] || printf '{ "name": "browse-deps", "private": true }\n' > "$PW_DIR/package.json"
-  # ffmpeg bundle too: browse.mjs falls back to it for the mp4 finalize when no
-  # system ffmpeg exists (system one still preferred — it can draw speed badges)
-  if command -v bun >/dev/null; then
-    (cd "$PW_DIR" && bun add playwright && bunx playwright install chromium ffmpeg)
-  else
-    (cd "$PW_DIR" && npm install playwright && npx playwright install chromium ffmpeg)
-  fi
+# `help` must never trigger a 400MB download — it is the first thing anyone runs
+# after cloning. Same for version/setup, which either need no browser or do the
+# installing themselves.
+case "${1:-help}" in
+  help|-h|--help|version|-v|--version)
+    exec node "$REPO_ROOT/browse.mjs" "$@" ;;
+esac
+
+# Is camoufox (the optional stealth engine) actually installed on this machine?
+have_camoufox() {
+  [[ -x "$HOME/.local/share/uv/tools/camoufox/bin/python" ]] && return 0
+  python3 -c 'import camoufox' >/dev/null 2>&1
 }
 
+pkg_install() { # <dir> <spec…> — bun if present, else npm; both are quiet-ish
+  local dir="$1"; shift
+  mkdir -p "$dir"
+  [[ -f "$dir/package.json" ]] || printf '{ "name": "browse-deps", "private": true }\n' > "$dir/package.json"
+  if command -v bun >/dev/null; then (cd "$dir" && bun add "$@")
+  else (cd "$dir" && npm install --no-fund --no-audit "$@"); fi
+}
+
+install_main() {
+  # ffmpeg bundle too: browse.mjs falls back to it for the mp4 finalize when no
+  # system ffmpeg exists (system one still preferred — it can draw speed badges)
+  pkg_install "$PW_DIR" "playwright@$PW_VERSION"
+  if command -v bun >/dev/null; then (cd "$PW_DIR" && bunx playwright install chromium ffmpeg)
+  else (cd "$PW_DIR" && npx --yes playwright install chromium ffmpeg); fi
+}
+
+# Only worth the download once camoufox itself is on the machine — playwright-core
+# alone can't do anything useful. Cheap (~10MB, no browser binaries).
+install_camoufox_pw() { pkg_install "$CAMOU_PW_DIR" "playwright-core@$CAMOU_PW_VERSION"; }
+
+main_installed()    { [[ -d "$PW_DIR/node_modules/playwright" ]]; }
+camoufox_pw_ready() { [[ -d "$CAMOU_PW_DIR/node_modules/playwright-core" ]]; }
+
 if [[ "${1:-}" == "setup" ]]; then
-  if [[ -d "$PW_DIR/node_modules/playwright" ]]; then
-    echo "browse: playwright already installed in data/browse/"
+  echo "browse: data home is $HOME_DIR"
+  if main_installed; then
+    echo "browse: ✓ playwright + chromium already installed"
   else
-    echo "browse: installing playwright + Chromium into data/browse/ (one-time, ~2 min)…"
-    install_deps
+    echo "browse: installing playwright $PW_VERSION + chromium (one-time, ~2 min)…"
+    install_main
+    echo "browse: ✓ playwright + chromium"
   fi
-  command -v ffmpeg >/dev/null || \
-    echo "browse: • no system ffmpeg — mp4 finalize will use Playwright's bundled copy (brew install ffmpeg for speed-badge overlays)"
-  echo "browse: ready"
+  if have_camoufox; then
+    if camoufox_pw_ready; then
+      echo "browse: ✓ camoufox stealth engine ready"
+    else
+      echo "browse: camoufox found — installing its pinned playwright-core ${CAMOU_PW_VERSION}…"
+      install_camoufox_pw
+      echo "browse: ✓ camoufox stealth engine ready"
+    fi
+  else
+    echo "browse: • camoufox not installed — the default engine will be chromium."
+    echo "browse:   For headless bot-wall bypass:"
+    echo "browse:     uv tool install camoufox"
+    echo "browse:     ~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch"
+    echo "browse:   then re-run 'browse setup' to link it."
+  fi
+  command -v ffmpeg >/dev/null \
+    && echo "browse: ✓ system ffmpeg" \
+    || echo "browse: • no system ffmpeg — mp4 finalize uses playwright's bundled copy (brew install ffmpeg for speed badges)"
+  echo "browse: ready — try 'browse open https://example.com'"
   exit 0
 fi
 
-if [[ ! -d "$PW_DIR/node_modules/playwright" ]]; then
-  echo "browse: first run — installing playwright + Chromium into data/browse/ (one-time, ~2 min)…" >&2
-  install_deps >&2
+if ! main_installed; then
+  echo "browse: first run — installing playwright $PW_VERSION + chromium into $HOME_DIR (one-time, ~2 min)…" >&2
+  install_main >&2
+fi
+# camoufox can be installed long after browse was; pick it up without a manual
+# setup re-run, since silently falling back to chromium is exactly the failure
+# mode this is here to prevent.
+if have_camoufox && ! camoufox_pw_ready; then
+  echo "browse: camoufox detected — installing its pinned playwright-core $CAMOU_PW_VERSION (one-time)…" >&2
+  install_camoufox_pw >&2
 fi
 
-# playwright is resolved from data/browse/, not next to the source file
+# playwright is resolved from the data home, not next to the source file
 BROWSE_PW_BASE="$PW_DIR/package.json" exec node "$REPO_ROOT/browse.mjs" "$@"

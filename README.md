@@ -25,30 +25,50 @@ new to learn. `browse help` lists everything.
 
 ## Install
 
-Needs `node` on PATH (`ffmpeg` optional but better).
+Needs **Node 18+** on PATH. `ffmpeg` is optional (`brew install ffmpeg`) but
+gives you nicer videos.
 
 ```bash
-git clone git@github.com:ytkimirti/browse.git
+git clone https://github.com/ytkimirti/browse.git
+mkdir -p ~/.local/bin
 ln -s "$PWD/browse/bin/browse" ~/.local/bin/browse
-browse setup      # installs playwright + chromium into data/ (one-time, ~2 min)
 ```
 
-Stealth engine (default, optional but recommended) — camoufox is a Firefox build
-with C++-level fingerprint patches that clears Cloudflare's managed challenge
-headlessly:
+Make sure `~/.local/bin` is on your PATH (`echo $PATH | tr : '\n' | grep -q "$HOME/.local/bin" || echo 'add it'`),
+then:
+
+```bash
+browse setup      # installs playwright + chromium into ~/.browse (one-time, ~2 min)
+browse open https://example.com
+```
+
+Everything machine-local — Playwright, Chromium, recordings, profiles — lives in
+`~/.browse` (override with `BROWSE_HOME`). The clone stays a few files, and
+uninstalling is `rm -rf ~/.browse` plus the symlink.
+
+`browse help` and `browse version` work before setup and never download
+anything. If you skip `browse setup`, the first real command installs for you.
+
+### Stealth engine (optional, recommended)
+
+camoufox is a Firefox build with C++-level fingerprint patches that clears
+Cloudflare's managed challenge *headlessly*, which Chromium cannot do at all.
+It is the default engine when present:
 
 ```bash
 uv tool install camoufox
 ~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch
+browse setup      # links camoufox to the playwright build it needs
 ```
 
-Without it, browse logs a note and falls back to Chromium. `BROWSE_ENGINE=chromium`
-switches back explicitly (needed for `browse emulate` and PDF export, both CDP-only).
+Without it, browse falls back to Chromium and says so on the first `browse open`.
+`BROWSE_ENGINE=chromium` switches back explicitly (needed for `browse emulate`
+and PDF export, both CDP-only).
 
 ## Use it as an agent skill
 
-`SKILL.md` at the repo root is a Claude Code skill. Symlink or copy it into your
-skills directory:
+`SKILL.md` at the repo root is a Claude Code skill. Symlink or copy the repo
+into your skills directory:
 
 ```bash
 ln -s "$PWD/browse" ~/.claude/skills/browse
@@ -57,3 +77,7 @@ ln -s "$PWD/browse" ~/.claude/skills/browse
 Then read `SKILL.md` for the full command surface: tabs and iframes, dialogs,
 downloads, `wait` as an assertion, `emulate` (dark mode / timezone / throttling),
 saved auth state, network log querying, video speed control and toasts.
+
+## License
+
+MIT

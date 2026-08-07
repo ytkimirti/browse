@@ -198,11 +198,14 @@ unsolved `cf_clearance`, and headed Chrome can't be hidden on macOS because
 `--window-position` is clamped onto the nearest real display. If camoufox isn't
 installed, browse logs it and falls back to Chromium on its own.
 
-Setup (one time): `uv tool install camoufox` then
-`~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch`. Camoufox is
-built against a specific Playwright (0.5.4 → 1.60.0) and its Firefox speaks that
-exact protocol, so browse loads Firefox from a pinned `playwright-core@1.60.0`
-in `~/.browse/camoufox-pw` rather than the newer one it uses for Chromium.
+Setup (one time): `uv tool install camoufox`, then
+`~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch`, then
+`browse setup`. Camoufox is built against a specific Playwright (0.5.4 → 1.60.0)
+and its Firefox speaks that exact protocol, so browse loads Firefox from a
+pinned `playwright-core@1.60.0` in `~/.browse/camoufox-pw` rather than the newer
+one it uses for Chromium — that third step is what installs the pinned copy
+(the launcher also installs it automatically the first time it sees camoufox).
+If browse ever falls back to Chromium it says so in the `browse open` output.
 
 Switch back with `BROWSE_ENGINE=chromium` when you need:
 
@@ -230,9 +233,10 @@ per engine.
 - Daemon won't start → read `browsed.log` in the session dir it printed.
 - A missing selector fails in ~4-12s by design and the error now lists the closest
   matches from the a11y tree - use those instead of retrying blindly.
-- `browse` needs `node` on PATH; Playwright (+ Chromium) auto-installs on the
-  first run into `<repo>/data/browse/` (one-time, ~2 min —
-  pre-install with `browse setup`; delete that dir to force a reinstall). The
+- `browse` needs Node 18+ on PATH; Playwright (+ Chromium) auto-installs on the
+  first run into `~/.browse/` (one-time, ~2 min — pre-install with
+  `browse setup`, which is also the repair command; `rm -rf ~/.browse/node_modules`
+  forces a reinstall). `browse help` / `browse version` never trigger it. The
   mp4 finalize uses system `ffmpeg`, falling back to Playwright's bundled copy.
 - The `10x` badge needs an ffmpeg built with `drawtext` (libfreetype), which
   homebrew's current bottle lacks - the region is still sped up but unlabelled,
