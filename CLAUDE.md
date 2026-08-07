@@ -1,6 +1,6 @@
 # browse
 
-`browse` is a deterministic, agent-first browser CLI plus one agent skill: the fewest commands and least context needed to drive a real browser, verify UI behavior, diagnose failures, and produce recorded proof.
+`browse` is a deterministic, agent browser CLI plus agent skill: the fewest commands and least context needed to drive a real browser, verify UI behavior, diagnose failures, and produce recorded proof.
 
 ## Before changing the command surface
 
