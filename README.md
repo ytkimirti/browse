@@ -56,4 +56,12 @@ ln -s "$PWD/browse" ~/.claude/skills/browse
 
 Then read `SKILL.md` for the full command surface: tabs and iframes, dialogs,
 downloads, `wait` as an assertion, `emulate` (dark mode / timezone / throttling),
-saved auth state, network log querying, video speed control and toasts.
+saved auth state, network log querying, request interception (`middleware`), video
+speed control and toasts.
+
+## Tests
+
+```bash
+node test/middleware.test.mjs                        # chromium
+BROWSE_ENGINE=camoufox node test/middleware.test.mjs
+```

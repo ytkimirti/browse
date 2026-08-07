@@ -45,6 +45,7 @@ browse target                      # list tabs; popups are switched to AUTOMATIC
 browse target 0 | new [url] | close | "iframe#checkout" | top
 browse emulate dark=1 tz=Europe/Istanbul net=3g    # off = reset all
 browse state --save auth.json      # …then --load auth.json (+ --clean to switch accounts)
+browse middleware '**/api/me' 'route => route.fulfill({json: {plan: "pro"}})'   # mock/block/rewrite
 ```
 
 Dialogs are auto-accepted and reported inline; add `--dialog dismiss` /
@@ -85,6 +86,40 @@ browse net --json | jq 'select(.ms > 500) | .url'  # escape hatch: every field, 
 Typical use: note the last `#`, act, then `browse net --since <#> --failed`. Secret
 header/cookie VALUES are stored as a sha256 prefix + length, so you can tell
 credentials apart and spot rotation without the secret landing in a log.
+
+## Intercepting requests
+
+`browse middleware <pattern> '<handler>'` registers a real Playwright route
+handler, run in the daemon against the real `Route`. Use it to reach a state the
+UI can't get you to: an error path, an empty list, a slow endpoint, a paid tier.
+
+```bash
+browse middleware '**/api/user'   'route => route.fulfill({json: {id: 1, plan: "pro"}})'
+browse middleware '**/api/orders' 'route => route.fulfill({status: 500, json: {error: "boom"}})'
+browse middleware '**/*.png'      'route => route.abort()'
+browse middleware '**/api/config' 'async route => {
+  const response = await route.fetch(); const json = await response.json();
+  await route.fulfill({response, json: {...json, debug: true}}); }'
+```
+
+The pattern is a Playwright glob matched against the **full url**, so lead with
+`**`. Every handler must answer its route with `fulfill` / `abort` / `continue` /
+`fallback`. Rules apply across the whole context (all tabs, frames, workers) and
+last only for this session. Registering the same pattern **replaces** that rule;
+newer rules run first.
+
+```bash
+browse middleware                        # list patterns + how many each handled
+browse middleware '**/api/user' --remove
+browse middleware --clear
+```
+
+Set the rules **before** `open` (or `reload` after) — a rule only affects requests
+made after it exists. If a mock seems not to apply, `browse middleware` shows a
+`0 handled` count, which means the pattern never matched. A handler that throws
+aborts its request and reports the error on your next command; `console.*` from a
+handler goes to `browsed.log` in the session dir. Handler source is never printed
+or written to the transcript, so a fixture with real-looking data is safe to use.
 
 ## Sessions
 
