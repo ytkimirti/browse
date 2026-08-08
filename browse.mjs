@@ -38,14 +38,21 @@
  *
  * Layout (github.com/ytkimirti/browse):
  *   <repo>/browse.mjs                this file (+ SKILL.md next to it)
- *   <repo>/bin/browse                launcher (symlink it onto your PATH)
- *                                    — auto-installs playwright on
- *                                    first run into <repo>/data/browse/
- *                                    (gitignored) and points BROWSE_PW_BASE there
- *   ~/.browse/                       runtime data home (BROWSE_HOME):
+ *   <repo>/bin/browse                launcher (symlink it onto your PATH) —
+ *                                    installs deps on first run and points
+ *                                    BROWSE_PW_BASE at the data home
+ *   ~/.browse/                       runtime data home (BROWSE_HOME). NOTHING
+ *                                    browse owns lives in the clone:
+ *   ~/.browse/node_modules/          the playwright npm package (browser
+ *                                    binaries go to playwright's own shared
+ *                                    cache, ~/Library/Caches/ms-playwright)
+ *   ~/.browse/camoufox-pw/           playwright-core pinned to camoufox's build,
+ *                                    patched by the launcher so camoufox can
+ *                                    record video (see bin/browse)
  *   ~/.browse/sessions/<stamp>/      transcript.md, recording.mp4, feedback.md,
  *                                    browsed.log, shots/step-*.png (video/*.webm
  *                                    only while live)
+ *   ~/.browse/{profiles,state,run}/  persistent logins, saved auth, live daemons
  *
  * Config via env (all optional):
  *   BROWSE_OUT         override the session artifacts dir
@@ -104,6 +111,12 @@ const HOST = "127.0.0.1";
 // publishes it in a run file the clients look up by session name.
 const FIXED_PORT = Number(process.env.BROWSE_PORT || 0); // 0 = any free port
 const BROWSE_HOME = process.env.BROWSE_HOME || join(homedir(), ".browse");
+/** Version from the repo's package.json — read lazily so `--version` is the only
+ *  path that pays for it and a missing/edited file degrades to "unknown". */
+function pkgVersion() {
+  try { return JSON.parse(readFileSync(join(SELF, "..", "package.json"), "utf8")).version || "unknown"; }
+  catch { return "unknown"; }
+}
 const RUN_DIR = join(BROWSE_HOME, "run"); // one <session>.json per live daemon
 const sanitizeName = (s) => String(s).replace(/[^\w.-]+/g, "-");
 // Default session name. Two agents that both omit `-s` would otherwise share one
@@ -867,6 +880,8 @@ Parallel sessions (e.g. one browser per agent — fully isolated):
                                     their own -s <name>.
   browse sessions                   list live sessions (name, port, artifacts dir)
   browse whoami                     print the session name these commands resolve to
+  browse setup                      install/repair deps (playwright, chromium, camoufox link)
+  browse version                    print the version
 
 Persistent profile (keep cookies + localStorage across close→open, e.g. stay logged in):
   browse -p <name> <cmd> …          drive on a persistent profile (own user-data dir). Prefix
@@ -1241,6 +1256,10 @@ async function client(argv) {
   const cmd = argv[0];
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
     process.stdout.write(HELP + "\n");
+    return 0;
+  }
+  if (cmd === "version" || cmd === "--version" || cmd === "-v") {
+    process.stdout.write(`browse ${pkgVersion()}\n`);
     return 0;
   }
   // List every live daemon across all session names (and sweep stale run files).
@@ -1920,12 +1939,18 @@ async function daemon() {
   // fails at launch — 1.61 sends `viewport.isMobile`, which the build rejects
   // outright. So load Firefox from the pinned copy in ~/.browse/camoufox-pw
   // when it exists, and only fall back to the main install.
+  // `browse setup` (and the launcher, on first sight of camoufox) installs that
+  // pinned copy. Without it we still TRY the main install, but the launch almost
+  // certainly fails — so remember why, to turn the eventual chromium fallback
+  // from a mystery into one actionable line.
+  let pinnedMissing = false;
   const firefoxFor = () => {
     const pinned = join(BROWSE_HOME, "camoufox-pw", "package.json");
     if (existsSync(pinned)) {
       try { return createRequire(pinned)("playwright-core").firefox; }
       catch (e) { logDaemon(`pinned camoufox playwright unusable: ${e.message}`); }
     }
+    pinnedMissing = true;
     return require("playwright").firefox;
   };
 
@@ -1936,12 +1961,21 @@ async function daemon() {
   // Resolve the engine. camoufox is the default but must degrade gracefully:
   // if its Python package or browser build is missing we log and fall back to
   // Chromium rather than leaving the agent with a dead daemon.
+  // A fallback used to be visible ONLY in browsed.log, so a user who had
+  // installed camoufox got silently downgraded to Chromium with no way to tell.
+  // Whatever lands here is echoed on the first `open`.
+  let engineNote = null;
+  // Playwright's launch errors are a multi-KB protocol dump — useless inline,
+  // so the note stays one actionable line and the full text goes to browsed.log.
+  const fallback = (note, detail) => { engineNote = note; logDaemon(detail ? `${note} :: ${detail}` : note); };
   let engine = ENGINE, camouOpts = null;
   if (engine === "camoufox") {
     camouOpts = camoufoxLaunchOptions();
     if (!camouOpts) {
-      logDaemon("camoufox unavailable — falling back to chromium. Install with " +
-                "`uv tool install camoufox` (or pip) then `python -m camoufox fetch`.");
+      fallback("camoufox not installed — using chromium. Set it up with " +
+               "`uv tool install camoufox` then " +
+               "`~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch`, " +
+               "and re-run `browse setup`.");
       engine = "chromium";
     }
   }
@@ -1991,11 +2025,14 @@ async function daemon() {
     ({ browser, context } = await launchWith(engine));
   } catch (e) {
     if (engine !== "camoufox") throw e;
-    logDaemon(`camoufox launch failed (${e.message}) — falling back to chromium`);
+    fallback("camoufox failed to launch — using chromium. " + (pinnedMissing
+      ? "Its pinned playwright-core is missing: run `browse setup`."
+      : "See browsed.log in the session dir."), e.message);
     engine = "chromium";
     ({ browser, context } = await launchWith(engine));
   }
   context.__engine = engine; // read by the CDP-only guards below
+  context.__engineNote = engineNote; // surfaced once, on the first `open`
   // Draw the animated cursor + keystroke overlay into every page (before the
   // page's own scripts run, and re-run on each navigation) so the recording shows
   // the pointer moving and the keys being pressed, like screen-recording software.
@@ -2406,8 +2443,16 @@ async function daemon() {
     // Report the EXACT saved path so the caller gets the file it just recorded.
     // The .webm is finalized by context.close() above, so page.video().path()
     // now points at a real file.
+    // video.path() returns the path the engine was ASKED to write, which exists
+    // only if the engine actually recorded. An engine that took the recordVideo
+    // option and then wrote nothing (camoufox with an unpatched playwright-core)
+    // otherwise reported a path to a missing file, and `close` blamed ffmpeg.
     let webm = null;
     try { webm = video ? await video.path() : null; } catch { /* no video */ }
+    if (webm && !existsSync(webm)) {
+      logDaemon(`engine '${engine}' recorded no video (expected ${webm})`);
+      webm = null;
+    }
     const mp4 = webm ? finalizeRecording(webm, { speedMarks, keepMarks, cutMarks, stepMarks }) : null;
     if (mp4 && !keepRaw) {
       // The mp4 is the deliverable — the raw .webm is just its temp source.
@@ -2809,7 +2854,11 @@ async function daemon() {
     if (cmd === "open") {
       const url = args[0] || APP_DEFAULT;
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-      return `opened ${await brief()}`;
+      // Report the engine we ACTUALLY got, once. A camoufox→chromium fallback
+      // otherwise looked identical to a working stealth session.
+      let note = "";
+      if (context.__engineNote) { note = `\nnote: ${context.__engineNote}`; context.__engineNote = null; }
+      return `opened ${await brief()}${note}`;
     }
     if (cmd === "drag") {
       // Real mouse moves rather than page.dragAndDrop, so the recording SHOWS the

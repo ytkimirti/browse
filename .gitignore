@@ -1,2 +1,2 @@
-# playwright + chromium install, machine-local, ~400MB
-/data/
+node_modules/
+.DS_Store
