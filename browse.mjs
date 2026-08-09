@@ -31,9 +31,9 @@
  *       markdown transcript + a per-step screenshot.
  *
  * The subcommands MIRROR Playwright's page API — goto/click/dblclick/fill/type/
- * press/check/uncheck/hover/selectOption/focus/reload/goBack/goForward/
- * waitForSelector/waitForTimeout — plus observation helpers (snapshot/text/title/
- * url/content/errors/screenshot/eval). Selectors are Playwright selector strings
+ * press/check/uncheck/hover/selectOption/focus/reload/goBack/goForward — plus
+ * observation helpers (snapshot/text/title/url/content/errors/screenshot/eval)
+ * and one `wait` verb. Selectors are Playwright selector strings
  * (text=, role=…[name="…"], css, xpath=…), so there is nothing new to learn.
  *
  * Layout (github.com/ytkimirti/browse):
@@ -370,20 +370,20 @@ function netClip(s) {
 
 /** Page methods that change state → we auto-screenshot after them. */
 const MUTATING = new Set([
-  "goto", "click", "dblclick", "tap", "fill", "type", "press", "drag",
+  "goto", "click", "dblclick", "fill", "type", "press", "drag",
   "check", "uncheck", "hover", "selectOption", "setInputFiles",
   "focus", "reload", "goBack", "goForward",
 ]);
-/** Everything we forward straight to page[method](...args). `waitForSelector` /
- *  `waitForTimeout` are retired into `wait` but stay accepted forever: old
- *  transcripts and habits shouldn't break (they're just gone from the help). */
-const PAGE_METHODS = new Set([...MUTATING, "waitForSelector", "waitForTimeout"]);
+/** Everything we forward straight to page[method](...args). `waitForTimeout` is
+ *  retired into `wait <ms>` but stays accepted: it is by far the most-reached-for
+ *  spelling (Playwright muscle memory), so rejecting it would only buy a failed
+ *  call and a retry. It is gone from the help. */
+const PAGE_METHODS = new Set([...MUTATING, "waitForTimeout"]);
 /** Commands that do NOT deserve a chapter marker in the final mp4 - reading the
  *  page changes nothing on screen, so a chapter there points at nothing. */
 const CHAPTERLESS = new Set([
   "snapshot", "text", "title", "url", "content", "errors", "eval",
-  "screenshot", "dir", "video", "speed", "state", "net", "middleware",
-  "close", "stop", "quit",
+  "screenshot", "dir", "speed", "state", "net", "middleware", "close",
 ]);
 
 const MW_USAGE = "middleware: needs a pattern AND a handler, e.g.\n" +
@@ -457,11 +457,11 @@ const CURSOR = USING_CAMOUFOX ? process.env.BROWSE_CURSOR === "1"
                               : process.env.BROWSE_CURSOR !== "0";
 /** Commands whose first arg is a selector we glide the cursor to before acting. */
 const ELEMENT_TARGETED = new Set([
-  "click", "dblclick", "tap", "fill", "type", "press", "drag",
+  "click", "dblclick", "fill", "type", "press", "drag",
   "check", "uncheck", "hover", "selectOption", "setInputFiles", "focus",
 ]);
 /** Element-targeted commands that should also flash a click ripple. */
-const CLICK_LIKE = new Set(["click", "dblclick", "tap", "check", "uncheck"]);
+const CLICK_LIKE = new Set(["click", "dblclick", "check", "uncheck"]);
 
 /**
  * Injected into every page (via addInitScript, so it survives navigations) BEFORE
@@ -815,8 +815,8 @@ Tabs, frames, emulation, saved logins:
 Network (every request of the session is logged to network.jsonl by default — works
 while the browser is live AND after close; queries never spawn a browser):
   browse net [pattern] [flags]      pattern = url substring, or /regex/i
-    --host <d1,d2>                  filter by domain: 'upstash.com' also matches its subdomains,
-      (alias --domain, -d)          'localhost' matches any port, '.foo.com' = subdomains only,
+    --host <d1,d2>  (alias -d)      filter by domain: 'upstash.com' also matches its subdomains,
+                                    'localhost' matches any port, '.foo.com' = subdomains only,
                                     '!segment.io' excludes (mix: --host "upstash.com,!cdn.upstash.com")
     --method get,post               filter by method            --type xhr,fetch,document,script,image,…
     --status 5xx | 404 | ">=400"    filter by status            --failed      network errors + status >= 400
@@ -863,7 +863,6 @@ Misc:
                                     (~reading time); [--for <sec>] [--sticky] [--color yellow|blue|green|red|neutral]
                                     [--pos top|bottom]; --clear removes a sticky one
   browse dir                        print THIS session's artifacts dir
-  browse video                      print the file path of THIS session's raw in-progress recording (.webm)
   browse close [--gif] [--keep-raw] end the session, finalize the recording, print the mp4 path.
                                     --gif also writes a looping recording.gif; --keep-raw keeps the
                                     raw .webm (BROWSE_KEEP_WEBM=1 too) so you can re-cut it yourself
@@ -963,7 +962,7 @@ function netMatcher(pattern) {
 
 function netHost(url) { try { return new URL(url).host; } catch { return ""; } }
 /**
- * `--host` / `--domain`: comma-separated hosts. A bare domain also matches its
+ * `--host` (`-d`): comma-separated hosts. A bare domain also matches its
  * subdomains (`upstash.com` → `api.upstash.com`), the port is optional
  * (`localhost` matches `localhost:3000`, `localhost:3000` matches only that),
  * and a leading `.` or `*.` means subdomains ONLY. Prefix with `!` to exclude.
@@ -1079,7 +1078,7 @@ function netCommand(argv) {
     if (a === "-m" || a === "--method") method = String(next() || "").toLowerCase();
     else if (a === "-t" || a === "--type") type = String(next() || "").toLowerCase();
     else if (a === "--status") status = next(); // not `-s`: that's the global session flag
-    else if (a === "-d" || a === "--host" || a === "--domain") host = next();
+    else if (a === "-d" || a === "--host") host = next();
     else if (a === "--grep") grep = next();
     else if (a === "--since") since = Number(next());
     else if (a === "-n" || a === "--last") last = Number(next());
@@ -1237,7 +1236,21 @@ function post(port, body) {
   });
 }
 
-const CLOSERS = new Set(["close", "stop", "quit"]);
+const CLOSERS = new Set(["close"]);
+
+/** Commands that USED to exist, mapped to what to run instead. Only worth an
+ *  entry when the old spelling is something an agent plausibly still reaches
+ *  for; everything else gets the generic "unknown command".
+ *
+ *  Null-prototype: a plain literal would make `RETIRED[cmd]` truthy for
+ *  `toString`/`constructor`/`__proto__`, so `browse toString` would answer with
+ *  native-code source instead of "unknown command — run: browse help". */
+const RETIRED = Object.assign(Object.create(null), {
+  stop: "`browse close`", quit: "`browse close`",
+  waitForSelector: "`browse wait <selector>`",
+  video: "`browse dir` for the artifacts dir, or `browse close` for the finished mp4",
+  tap: "`browse click` (there is no touch model)",
+});
 
 async function client(argv) {
   // Leading flags (any order): `-s <name>` selects a named parallel session,
@@ -1344,6 +1357,12 @@ async function client(argv) {
       process.stdout.write(`(no active browser session${SESSION === "default" ? "" : ` '${SESSION}'`}, so no middleware)\n`);
       return 0;
     }
+  }
+  // A retired spelling is knowably wrong here — answering in the client keeps it
+  // from LAUNCHING a browser (and a recording) only to reject the command.
+  if (RETIRED[cmd]) {
+    process.stderr.write(`browse: '${cmd}' was removed — use ${RETIRED[cmd]}\n`);
+    return 1;
   }
   // Never spawn a browser just to close one: if there's no live session, closing
   // is a no-op.
@@ -2169,7 +2188,7 @@ async function daemon() {
   // Playwright writes one .webm per PAGE and this is the one we finalize.
   const primaryPage = page;
   // The recording handle for this page. recordVideo is on the CONTEXT, so the
-  // whole session lands in ONE .webm; we surface its EXACT path on `close`/`video`
+  // whole session lands in ONE .webm; we surface its EXACT path on `close`
   // so the caller gets the file it just recorded — never a guessed glob or a
   // stale/leftover .webm sitting in the artifacts dir.
   const video = page.video();
@@ -2497,7 +2516,6 @@ async function daemon() {
   function coerce(cmd, args) {
     if (cmd === "goto") return [args[0], { waitUntil: "domcontentloaded", timeout: 20000 }];
     if (cmd === "waitForTimeout") return [Number(args[0] || 1000)];
-    if (cmd === "waitForSelector") return [args[0], { timeout: Number(args[1] || 10000) }];
     return args;
   }
 
@@ -2847,7 +2865,7 @@ async function daemon() {
   }
 
   async function dispatchCmd(cmd, args) {
-    if (cmd === "close" || cmd === "stop" || cmd === "quit") {
+    if (cmd === "close") {
       return { __close: true, gif: args.includes("--gif"), keepRaw: KEEP_WEBM || args.includes("--keep-raw") };
     }
 
@@ -2934,8 +2952,12 @@ async function daemon() {
         let name = null, full = false, sel = null;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
-          if (a === "--full" || a === "--fullpage") full = true;
-          else if (a === "--sel" || a === "--selector") sel = args[++i];
+          if (a === "--full") full = true;
+          else if (a === "--sel") sel = args[++i];
+          // Without this a retired spelling (--fullpage, --selector) would be
+          // taken as the FILENAME and silently save an unwanted screenshot. One
+          // dash counts too: `-full` would otherwise land as a file named _full.
+          else if (a.startsWith("-")) throw new Error(`screenshot: unknown flag '${a}' - try [name] [--full] [--sel <selector>]`);
           else if (name == null) name = a;
         }
         name = (name || `shot-${Date.now()}.png`).replace(/[^\w.-]/g, "_");
@@ -2975,9 +2997,12 @@ async function daemon() {
         let sel = null, gone = false, url = null, timeout = 10000;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
-          if (a === "--gone" || a === "--hidden") gone = true;
+          if (a === "--gone") gone = true;
           else if (a === "--url") url = args[++i];
-          else if (a === "--timeout" || a === "-t") timeout = Number(args[++i]) || timeout;
+          else if (a === "--timeout") timeout = Number(args[++i]) || timeout;
+          // Without this a retired spelling (--hidden, -t) would be taken as the
+          // SELECTOR and fail ten seconds later as a mystery timeout.
+          else if (a.startsWith("-")) throw new Error(`wait: unknown flag '${a}' - try [selector|ms] [--gone] [--url <pattern>] [--timeout <ms>]`);
           else if (sel == null) sel = a;
         }
         if (url) {
@@ -3067,14 +3092,21 @@ async function daemon() {
         // but visibly-progressing wait. Pure timeline annotation: it does NOT
         // wait, act on the page, or screenshot — just records a mark against the
         // recording clock. `browse speed <n>` (n>=2) opens/re-opens the region;
-        // `browse speed off|end|stop|1|0` closes it; bare `browse speed` uses the
-        // default factor. See finalizeRecording / forcedIntervals.
+        // `browse speed off` closes it; bare `browse speed` uses the default
+        // factor. See finalizeRecording / forcedIntervals.
         const a = String(args[0] ?? "").trim().toLowerCase();
         const t = (Date.now() - recStartMs) / 1000;
         let factor;
-        if (a === "off" || a === "end" || a === "stop" || a === "1" || a === "0") factor = 1;
+        if (a === "off") factor = 1;
         else if (a === "") factor = IDLE.speed;
-        else { const n = Number(a); factor = Number.isFinite(n) && n >= 2 ? n : IDLE.speed; }
+        else {
+          // A bare word here used to mean "end the region" (end/stop/1/0). Those
+          // spellings are gone, so fall through to a hard error rather than
+          // silently OPENING a fast-forward the caller meant to close.
+          const n = Number(a);
+          if (!Number.isFinite(n) || n < 2) throw new Error(`speed: expected a factor >= 2, or 'off' - got '${args[0]}'`);
+          factor = n;
+        }
         speedMarks.push({ t, factor });
         // The "Nx" badge needs a drawtext-capable ffmpeg AND a TTF on disk, and
         // homebrew's current core bottle has no drawtext. Without it the region
@@ -3162,7 +3194,7 @@ async function daemon() {
           const k = (eq < 0 ? kv : kv.slice(0, eq)).toLowerCase();
           const v = eq < 0 ? "" : kv.slice(eq + 1);
           const on = /^(1|true|on|yes|dark)$/i.test(v);
-          if (k === "off" || k === "reset") {
+          if (k === "off") {
             await page.emulateMedia({ colorScheme: null });
             await page.setViewportSize(VIEWPORT);
             const s = await emuCdp();
@@ -3173,17 +3205,17 @@ async function daemon() {
               ["Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }],
             ]) { try { await s.send(m, p); } catch { /* not overridden in the first place */ } }
             applied.push("off (everything back to default)");
-          } else if (k === "dark" || k === "colorscheme" || k === "scheme") {
+          } else if (k === "dark") {
             const scheme = v === "light" ? "light" : on ? "dark" : "light";
             await page.emulateMedia({ colorScheme: scheme });
             applied.push(`dark=${scheme === "dark" ? 1 : 0}`);
-          } else if (k === "geo" || k === "geolocation") {
+          } else if (k === "geo") {
             const [lat, lon] = v.split(",").map(Number);
             if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error(`emulate geo: expected lat,lon - got '${v}'`);
             await context.grantPermissions(["geolocation"]);
             await context.setGeolocation({ latitude: lat, longitude: lon });
             applied.push(`geo=${lat},${lon}`);
-          } else if (k === "viewport" || k === "size") {
+          } else if (k === "viewport") {
             const m = /^(\d+)\s*[x×]\s*(\d+)$/.exec(v);
             if (!m) throw new Error(`emulate viewport: expected WxH - got '${v}'`);
             await page.setViewportSize({ width: +m[1], height: +m[2] });
@@ -3196,10 +3228,10 @@ async function daemon() {
             if (+m[1] < VIEWPORT.width || +m[2] < VIEWPORT.height) {
               applied.push(`(the video frame stays ${VIEWPORT.width}x${VIEWPORT.height} - for a phone-shaped RECORDING, close and respawn with BROWSE_VIEWPORT=${m[1]}x${m[2]})`);
             }
-          } else if (k === "tz" || k === "timezone") {
+          } else if (k === "tz") {
             await (await emuCdp()).send("Emulation.setTimezoneOverride", { timezoneId: v });
             applied.push(`tz=${v}`);
-          } else if (k === "locale" || k === "lang") {
+          } else if (k === "locale") {
             await (await emuCdp()).send("Emulation.setLocaleOverride", { locale: v });
             applied.push(`locale=${v}`);
           } else if (k === "cpu") {
@@ -3207,7 +3239,7 @@ async function daemon() {
             if (!Number.isFinite(rate) || rate < 1) throw new Error(`emulate cpu: expected a slowdown factor >= 1 - got '${v}'`);
             await (await emuCdp()).send("Emulation.setCPUThrottlingRate", { rate });
             applied.push(`cpu=${rate}x slower`);
-          } else if (k === "net" || k === "network") {
+          } else if (k === "net") {
             const key = v.toLowerCase().replace(/[^a-z0-9]/g, "");
             const s = await emuCdp();
             try { await s.send("Network.enable"); } catch { /* already on */ }
@@ -3346,12 +3378,9 @@ async function daemon() {
         return `middleware ${prev >= 0 ? "replaced" : "+"} ${pattern}${middleware.length > 1 ? ` (${middleware.length} rules, this one runs first)` : ""}${hint}`;
       }
       case "dir": return OUT;
-      case "video": {
-        if (!video) return "(no video for this session)";
-        try { return await video.path(); }
-        catch { return "(video path not available yet)"; }
-      }
       default:
+        // Retired spellings never reach here — the client answers them (see
+        // RETIRED) so they don't cost a browser launch.
         throw new Error(`unknown command '${cmd}' — run: browse help`);
     }
   }
