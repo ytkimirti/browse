@@ -27,5 +27,6 @@ Read `SKILL.md`, run `browse help`, and read `browse.mjs`. Verify Playwright API
 
 - Every new command and every bug fix gets integration coverage, testing success and failure output including exit status.
 - Test Chromium and Camoufox separately where behavior is engine-dependent; fail loudly when a feature cannot work on an engine.
-- Update `browse help`, `SKILL.md`, and `README.md` only for behavior that exists.
+- `browse help` (and `browse help --env`) is the single source of truth for commands, flags, defaults and env vars. `SKILL.md` and `skill/*.md` carry only what help cannot state: when to reach for something, hazards, judgment. Never restate a flag, a default or a syntax rule there; point at help instead.
+- Update docs only for behavior that exists.
 - Bounded output must say it was truncated and offer a continuation or narrower query.

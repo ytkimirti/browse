@@ -146,7 +146,7 @@ try {
   gone("--hidden is gone, points at --gone", ["wait", "body", "--hidden"], /'--hidden' was removed.*--gone/);
   gone("-t is gone, points at --timeout", ["wait", "body", "-t", "2000"], /'-t' was removed.*--timeout/);
 
-  // --- net --domain retired; -d and --host both stay (SKILL.md teaches -d).
+  // --- net --domain retired; -d and --host both stay (help teaches -d).
   console.log("\nnet flags");
   works("--host works", ["net", "--host", "127.0.0.1"], /./);
   works("-d works", ["net", "-d", "127.0.0.1"], /./);
