@@ -368,6 +368,16 @@ function netClip(s) {
   return s.length > NET.bodyMax ? `${s.slice(0, NET.bodyMax)}…[truncated, ${s.length} bytes total]` : s;
 }
 
+/** Cap what a read command prints. Silently slicing is the failure mode this
+ *  exists to stop: the agent can't tell a short page from a cut one, so it acts
+ *  on half an answer. Every cut SAYS it was cut and names a narrower query. */
+const READ_MAX = 8000;
+function clipForRead(text, cmd, howToNarrow, max = READ_MAX) {
+  const s = String(text);
+  if (s.length <= max) return s;
+  return `${s.slice(0, max)}\n…[${cmd} truncated: ${max} of ${s.length} chars. ${howToNarrow}]`;
+}
+
 /** Page methods that change state → we auto-screenshot after them. */
 const MUTATING = new Set([
   "goto", "click", "dblclick", "fill", "type", "press", "drag",
@@ -750,6 +760,7 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
   browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser + recording
   browse goto <url>                 navigate
   browse click <selector>           click an element
+  browse dblclick <selector>        double-click an element
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
   browse type <selector> <text>     type into an element without clearing it (key by key)
   browse press [selector] <key>     e.g. browse press "input[name=todo]" Enter · browse press Escape
@@ -767,14 +778,17 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     hold until an element appears (or --gone: disappears), a
                                     navigation matches --url, or just pause N ms. This is also your
                                     ASSERTION: it exits non-zero if the thing never happens.
-  browse speed <factor|off>         fast-forward the recording from here (e.g. 'speed 10') until
+  browse speed [factor|off]         fast-forward the recording from here (e.g. 'speed 10') until
                                     'speed off' — for a long but visibly-progressing wait (spinner,
                                     deploy log). Dead "thinking" time is cut automatically; this is
                                     for waits you still want SHOWN, just faster (badged "Nx" — the
                                     badge needs an ffmpeg built with drawtext/libfreetype, which
                                     homebrew's core bottle is NOT; without it the stretch is still
                                     sped up but unlabelled, so it reads as a jump cut. 'browse speed'
-                                    says so once per session when that is the case).
+                                    says so once per session when that is the case). Bare 'browse speed'
+                                    opens a region at the default factor (${IDLE.speed}x); 'speed off' with
+                                    nothing open is an error. A 'toast' inside the region is
+                                    fast-forwarded with it, so show captions OUTSIDE it.
 
 Observe (do these often — this is your "check" step):
   browse snapshot                   accessibility tree of the page (what a user/AT sees)
@@ -897,8 +911,9 @@ change) out of the clip (BROWSE_IDLE_MODE=speed keeps+fast-forwards it instead,
 =keep leaves it). A region you bracket with 'browse speed <n>' … 'browse speed
 off' is instead fast-forwarded at n× — badged "n×" top-right — so a
 visibly-progressing wait still shows. Time spent on a popup is cut too (only the
-main tab is recorded). It writes a shareable recording.mp4 with one chapter per
-command plus a poster.jpg; the temp raw .webm is then deleted (kept only if
+main tab is recorded). It writes a shareable recording.mp4 with a chapter per
+acting command (reads don't get one, and neighbours closer than a quarter second
+merge into 'first (+N more)') plus a poster.jpg; the temp raw .webm is then deleted (kept only if
 ffmpeg is missing/fails, or with --keep-raw / BROWSE_KEEP_WEBM=1).`;
 
 /* ========================================================= network queries */
@@ -1250,6 +1265,28 @@ const RETIRED = Object.assign(Object.create(null), {
   waitForSelector: "`browse wait <selector>`",
   video: "`browse dir` for the artifacts dir, or `browse close` for the finished mp4",
   tap: "`browse click` (there is no touch model)",
+  evaluate: "`browse eval <expression>`",
+});
+
+/** Every command the daemon answers, so an UNKNOWN one is refused here instead
+ *  of launching a browser and starting a recording just to be told no. Kept
+ *  next to RETIRED because both exist for the same reason; `browse help` is the
+ *  user-facing list and this is the machine one. */
+const DAEMON_COMMANDS = new Set([
+  ...MUTATING, ...PAGE_METHODS, "open", "snapshot", "text", "title", "url",
+  "content", "errors", "screenshot", "wait", "scroll", "eval", "toast", "speed",
+  "target", "emulate", "state", "middleware", "dir", "close",
+]);
+/** Flags a command used to accept, refused in the CLIENT so a stale spelling
+ *  costs an error instead of a browser launch. The daemon validates these too
+ *  (it is the one that knows the full flag set); this only front-runs the
+ *  spellings we KNOW are dead. */
+const RETIRED_FLAGS = Object.assign(Object.create(null), {
+  "--fullpage": "`browse screenshot [name] --full`",
+  "--selector": "`browse screenshot [name] --sel <selector>`",
+  "--hidden": "`browse wait <selector> --gone`",
+  "-t": "`browse wait <selector> --timeout <ms>`",
+  "--domain": "`browse net --host <d1,d2>` (or -d)",
 });
 
 async function client(argv) {
@@ -1362,6 +1399,21 @@ async function client(argv) {
   // from LAUNCHING a browser (and a recording) only to reject the command.
   if (RETIRED[cmd]) {
     process.stderr.write(`browse: '${cmd}' was removed — use ${RETIRED[cmd]}\n`);
+    return 1;
+  }
+  // Everything the client answers itself has returned by now, so anything not on
+  // the daemon's list is a typo. Refusing it here is the difference between an
+  // error and a browser + recording spun up for nothing.
+  if (!DAEMON_COMMANDS.has(cmd)) {
+    process.stderr.write(`browse: unknown command '${cmd}' — run: browse help\n`);
+    return 1;
+  }
+  // fill/type/press carry arbitrary text (and key names), so a word that merely
+  // LOOKS like a dead flag there is content, not a flag.
+  const deadFlag = ["fill", "type", "press"].includes(cmd)
+    ? null : argv.slice(1).find((a) => RETIRED_FLAGS[a]);
+  if (deadFlag) {
+    process.stderr.write(`browse: '${deadFlag}' was removed — use ${RETIRED_FLAGS[deadFlag]}\n`);
     return 1;
   }
   // Never spawn a browser just to close one: if there's no live session, closing
@@ -1872,6 +1924,17 @@ function finalizeRecording(webmPath, marks = {}) {
 function logTranscript(entry) {
   try { appendFileSync(TRANSCRIPT, entry); } catch { /* best-effort */ }
 }
+/** The transcript is the PROOF artifact, so a cut result must show as cut: three
+ *  silent lines turned a 45-line snapshot into something that read like the whole
+ *  answer, mid-sentence. Keep enough to be evidence, and name where the rest is. */
+const TRANSCRIPT_LINES = 12;
+function transcriptBody(result) {
+  const lines = String(result).split("\n");
+  const kept = lines.slice(0, TRANSCRIPT_LINES).map((l) => "- " + l).join("\n");
+  return lines.length > TRANSCRIPT_LINES
+    ? `${kept}\n- _…${lines.length - TRANSCRIPT_LINES} more lines (the command printed them in full; re-run it to see the rest)_`
+    : kept;
+}
 function logDaemon(msg) {
   try { appendFileSync(DAEMON_LOG, `[${new Date().toISOString()}] ${msg}\n`); } catch { /* ignore */ }
 }
@@ -2211,6 +2274,17 @@ async function daemon() {
    *  be thought about - including the cursor glide, since a Locator's
    *  boundingBox() is already in main-frame (i.e. video) coordinates. */
   const L = (sel) => (activeFrame ?? page).locator(sel);
+
+  /** The same scope as L(), but as a Frame — `eval` needs a real execution
+   *  context and a FrameLocator has none. Resolved per call: the iframe element
+   *  can be replaced between commands, and a stale handle would evaluate against
+   *  a detached document. */
+  async function frameForEval() {
+    const h = await page.locator(activeFrameSel).first().elementHandle({ timeout: 8000 });
+    const f = h && (await h.contentFrame());
+    if (!f) throw new Error(`eval: the frame scope '${activeFrameSel}' is no longer on the page - run 'browse target top' to leave it, or re-scope`);
+    return f;
+  }
 
   // `browse emulate` overrides (timezone, locale, cpu, network) live on a CDP
   // session and die with it, so we keep ONE session per page rather than opening
@@ -2884,26 +2958,48 @@ async function daemon() {
       const [from, to] = args;
       if (!from || !to) throw new Error("drag: needs a source and a target selector");
       const center = async (sel) => {
-        const b = await L(sel).first().boundingBox({ timeout: 5000 });
+        // Same timeout as every other element command: a drop target that is
+        // still rendering shouldn't fail faster here than a click on it would.
+        const b = await L(sel).first().boundingBox({ timeout: 12000 });
         if (!b) throw new Error(`drag: '${sel}' has no box on screen`);
         return [b.x + b.width / 2, b.y + b.height / 2];
       };
+      // BOTH boxes are resolved BEFORE the button goes down. Resolving the target
+      // mid-press meant a bad target selector threw with the mouse still held: on
+      // a draggable="true" source that leaves the browser inside a native drag
+      // session which swallows every later click and hover, while each one still
+      // reports ok. Nothing between down() and up() is allowed to throw, and the
+      // `finally` covers what a future edit might add.
+      let side = from;
+      let sx, sy, tx, ty;
       try {
         await cursorGlideTo(from);
-        const [sx, sy] = await center(from);
-        await page.mouse.move(sx, sy);
-        await page.mouse.down();
+        [sx, sy] = await center(from);
+        side = to;
+        [tx, ty] = await center(to);
+      } catch (e) { throw await withSelectorHint(e, side); }
+      await page.mouse.move(sx, sy);
+      await page.mouse.down();
+      try {
         await cursorGlideTo(to);
-        const [tx, ty] = await center(to);
         // Several intermediate moves: HTML5 drop zones often only arm after a few
         // dragover events, and one jump can also miss a sortable list's threshold.
         for (let i = 1; i <= 8; i++) await page.mouse.move(sx + ((tx - sx) * i) / 8, sy + ((ty - sy) * i) / 8);
-        await page.mouse.up();
-      } catch (e) { throw await withSelectorHint(e, from); }
+      } finally { await page.mouse.up().catch(() => { /* page gone */ }); }
       return `dragged ${from} → ${to}`;
     }
     if (PAGE_METHODS.has(cmd)) {
       const typing = cmd === "fill" || cmd === "type";
+      // Extra args go into Playwright's options slot as plain strings, where they
+      // are DROPPED - so `click x --timeout 3000` used to wait the default 12s
+      // and exit 0 as if the flag had been honoured. `wait` and `screenshot`
+      // reject unknown flags for the same reason; act commands must too.
+      // `fill`/`type` are exempt: their text is arbitrary and may start with a
+      // dash. `press` is exempt for the same reason (a key can be "-").
+      if (!typing && cmd !== "press") {
+        const flag = args.find((a) => typeof a === "string" && a.startsWith("--"));
+        if (flag) throw new Error(`${cmd}: unknown flag '${flag}' - ${cmd} takes only a selector. Per-command timeouts live on 'browse wait <selector> --timeout <ms>'`);
+      }
       if (ELEMENT_TARGETED.has(cmd)) {
         // `browse press Escape` - one arg, so there is no selector: send the key
         // to the page itself (Escape, Tab, "Meta+k" …).
@@ -2918,15 +3014,36 @@ async function daemon() {
         // press shows its key chip up front; typing shows its overlay inside
         // humanType, once the field is confirmed (so a bad selector shows nothing).
         if (cmd === "press") await keylogKey(args[1]);
+        // A link that opens a new tab hands the session to a popup, but the
+        // page event lands after the click resolves - so the click reported the
+        // OLD tab and the "switched to popup" note only showed up on the NEXT
+        // command. Asked BEFORE the click (the element is still there) and only
+        // for an explicit target=_blank, so an ordinary click pays nothing.
+        let expectPopup = false;
+        if (CLICK_LIKE.has(cmd)) {
+          try {
+            expectPopup = await L(args[0]).first().evaluate(
+              (el) => { const a = el.closest?.("a"); return !!(a && a.target === "_blank"); });
+          } catch { /* detached, cross-origin: fall back to the late note */ }
+        }
         // Everything past the selector goes through a Locator, which is what makes
         // an iframe scope (see L) work without any per-command handling.
         try {
           if (typing) await humanType(args[0], args.slice(1).join(" "), cmd === "fill");
           // setInputFiles takes ONE array argument - spreading it would silently
           // drop every file but the first.
-          else if (cmd === "setInputFiles") await L(args[0]).first().setInputFiles(args.slice(1));
+          else if (cmd === "setInputFiles") {
+            // Checked here so a typo'd path says so, instead of surfacing a raw
+            // "ENOENT: stat" that reads like a browse fault.
+            const missing = args.slice(1).filter((f) => !existsSync(f));
+            if (missing.length) throw new Error(`setInputFiles: no such file: ${missing.join(", ")} (paths are resolved from the directory browse runs in)`);
+            await L(args[0]).first().setInputFiles(args.slice(1));
+          }
           else await L(args[0]).first()[cmd](...args.slice(1));
         } catch (e) { throw await withSelectorHint(e, args[0]); }
+        // Let the popup land (context.on("page") switches to it) so this command
+        // reports where the session actually IS, with its note attached.
+        if (expectPopup) await context.waitForEvent("page", { timeout: 3000 }).catch(() => { /* never opened */ });
         return `ok - ${await brief()}`;
       }
       if (typeof page[cmd] !== "function") throw new Error(`page has no method '${cmd}'`);
@@ -2938,15 +3055,16 @@ async function daemon() {
         let snap = "";
         try { snap = await L("body").ariaSnapshot(); }
         catch { snap = JSON.stringify(await page.accessibility.snapshot(), null, 1) || ""; }
-        return `${await brief()}\n\n${snap.slice(0, 6000)}`;
+        return `${await brief()}\n\n${clipForRead(snap, "snapshot", "run 'browse snapshot' again scoped by 'browse target <iframe>', or read a region with 'browse text <selector>'", 6000)}`;
       }
       case "text": {
         const loc = L(args[0] || "body");
-        return (await loc.first().innerText()).slice(0, 6000);
+        const t = await loc.first().innerText();
+        return clipForRead(t, "text", `pass a narrower selector than '${args[0] || "body"}'`, 6000);
       }
       case "title": return await page.title();
       case "url": return page.url();
-      case "content": return (await page.content()).slice(0, 8000);
+      case "content": return clipForRead(await page.content(), "content", "use 'browse text <selector>' or 'browse eval' for the part you need");
       case "errors": return errors.length ? errors.join("\n") : "(no console/page errors)";
       case "screenshot": {
         let name = null, full = false, sel = null;
@@ -2961,6 +3079,10 @@ async function daemon() {
           else if (name == null) name = a;
         }
         name = (name || `shot-${Date.now()}.png`).replace(/[^\w.-]/g, "_");
+        // Playwright picks its encoder from the extension, so a bare name like
+        // `checkout` failed with a raw 'unsupported mime type "null"'. The name
+        // is a label, not a path - default the extension instead of erroring.
+        if (!/\.(png|jpe?g|pdf)$/i.test(name)) name += ".png";
         const path = `${OUT}/${name}`;
         // A .pdf name means print the page, not screenshot it (headless only).
         // page.pdf() is Chromium-only — Firefox/camoufox has no equivalent.
@@ -3022,9 +3144,13 @@ async function daemon() {
         let target = null, x = 0;
         for (let i = 0; i < args.length; i++) {
           if (args[i] === "--x") x = Number(args[++i]) || 0;
+          else if (args[i].startsWith("--")) throw new Error(`scroll: unknown flag '${args[i]}' - try <n|-n|top|bottom|<selector>> [--x <n>]`);
           else if (target == null) target = args[i];
         }
         const a = String(target ?? "").trim();
+        // A bare `scroll` used to "scroll 0px" at exit 0 and still burn a step
+        // number on a screenshot of an unmoved page.
+        if (!a && !x) throw new Error("scroll: needs <n|-n|top|bottom|<selector>> (or --x <n> for horizontal)");
         const named = a.toLowerCase() === "top" || a.toLowerCase() === "bottom";
         if (a && !named && !/^-?\d+$/.test(a)) {
           // A selector: let Playwright put it on screen (it also handles nested
@@ -3039,8 +3165,22 @@ async function daemon() {
         return `scrolled ${named ? a.toLowerCase() : `${dy}px`}${x ? ` · x ${x}px` : ""} - ${await brief()}`;
       }
       case "eval": {
-        const out = await page.evaluate(args.join(" "));
-        return typeof out === "string" ? out : JSON.stringify(out);
+        let src = args.join(" ");
+        if (!src.trim()) throw new Error("eval: needs a js expression, e.g. `browse eval \"document.title\"`");
+        // `await fetch(...)` is the reflex spelling and page.evaluate rejects it
+        // as a SyntaxError (the string is an expression, not an async body).
+        // Wrap it rather than making every caller remember the difference.
+        if (/(^|[^.\w])await\s/.test(src)) src = `(async () => (${src}))()`;
+        // An iframe scope from `browse target <iframe>` steers click/text/wait
+        // through L(); eval bypassed it and silently ran in the TOP frame, so a
+        // scoped session read the wrong document.
+        const target = activeFrame ? await frameForEval() : page;
+        const out = await target.evaluate(src);
+        // `undefined` is what a void expression returns, and printing nothing at
+        // exit 0 is indistinguishable from a command that produced no output.
+        if (out === undefined) return "undefined";
+        const text = typeof out === "string" ? out : JSON.stringify(out);
+        return clipForRead(text, "eval", "narrow the expression (e.g. .slice(0, 2000), .length, or a specific field)");
       }
       case "toast": {
         // NOTE overlay for demo videos — for context the viewer can't get from
@@ -3052,16 +3192,31 @@ async function daemon() {
         //   browse toast --clear     remove a sticky toast (animated out)
         let color = "yellow", pos = "top", clear = false, sticky = false, forMs = 0;
         const words = [];
+        // A caption is a deliverable: a mistyped --color or --pos used to fall
+        // back silently and ship the wrong accent (or the wrong corner) in a
+        // video nobody re-renders. Validate rather than guess.
+        const COLORS = ["yellow", "blue", "green", "red", "neutral"], POS = ["top", "bottom"];
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
           if (a === "--clear" || a === "-c") clear = true;
           else if (a === "--sticky") sticky = true;
-          else if (a === "--for") forMs = Math.round(Number(args[++i] || 0) * 1000) || 0;
-          else if (a === "--color") color = args[++i] || color;
-          else if (a === "--pos") pos = args[++i] || pos;
+          else if (a === "--for") {
+            const secs = Number(args[++i]);
+            if (!Number.isFinite(secs) || secs <= 0) throw new Error(`toast: --for expects seconds - got '${args[i]}'`);
+            forMs = Math.round(secs * 1000);
+          } else if (a === "--color") {
+            color = String(args[++i] ?? "").toLowerCase();
+            if (!COLORS.includes(color)) throw new Error(`toast: unknown --color '${color}' - try ${COLORS.join("|")}`);
+          } else if (a === "--pos") {
+            pos = String(args[++i] ?? "").toLowerCase();
+            if (!POS.includes(pos)) throw new Error(`toast: unknown --pos '${pos}' - try ${POS.join("|")}`);
+          } else if (a.startsWith("--")) throw new Error(`toast: unknown flag '${a}' - try [--for <sec>] [--sticky] [--color ${COLORS.join("|")}] [--pos ${POS.join("|")}] | --clear`);
           else words.push(a);
         }
         const text = words.join(" ");
+        // Without text there is nothing to show, but it used to report success,
+        // take a transcript line and earn an mp4 chapter pointing at nothing.
+        if (!clear && !text) throw new Error("toast: needs the caption text, e.g. `browse toast \"this data is mocked\"` (or --clear to remove a sticky one)");
         const t = (Date.now() - recStartMs) / 1000;
         // A new toast (or --clear) ends the previous one's protection early -
         // nobody is still reading it once it has been replaced.
@@ -3096,9 +3251,14 @@ async function daemon() {
         // factor. See finalizeRecording / forcedIntervals.
         const a = String(args[0] ?? "").trim().toLowerCase();
         const t = (Date.now() - recStartMs) / 1000;
+        const open = speedMarks.length && speedMarks[speedMarks.length - 1].factor > 1;
         let factor;
-        if (a === "off") factor = 1;
-        else if (a === "") factor = IDLE.speed;
+        if (a === "off") {
+          // Closing nothing used to answer "back to real time", which reads as
+          // confirmation that a region you thought was open has just ended.
+          if (!open) throw new Error("speed: no fast-forward region is open - 'browse speed <factor>' opens one");
+          factor = 1;
+        } else if (a === "") factor = IDLE.speed;
         else {
           // A bare word here used to mean "end the region" (end/stop/1/0). Those
           // spellings are gone, so fall through to a hard error rather than
@@ -3204,6 +3364,10 @@ async function daemon() {
               ["Emulation.setLocaleOverride", {}],
               ["Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }],
             ]) { try { await s.send(m, p); } catch { /* not overridden in the first place */ } }
+            // geo= lives on the CONTEXT, not CDP, so the four resets above left a
+            // spoofed position in place while claiming everything was default.
+            try { await context.setGeolocation(null); } catch { /* never set */ }
+            try { await context.clearPermissions(); } catch { /* never granted */ }
             applied.push("off (everything back to default)");
           } else if (k === "dark") {
             const scheme = v === "light" ? "light" : on ? "dark" : "light";
@@ -3234,6 +3398,11 @@ async function daemon() {
           } else if (k === "locale") {
             await (await emuCdp()).send("Emulation.setLocaleOverride", { locale: v });
             applied.push(`locale=${v}`);
+            // CDP moves Intl (dates, number formats) but NOT navigator.language(s)
+            // or Accept-Language, which are fixed at context creation. An app that
+            // branches on navigator.language keeps rendering English, so a bare
+            // "locale=tr-TR" would read as a lie.
+            applied.push("(Intl only - navigator.language(s) and Accept-Language keep the browser default, so an app that branches on navigator.language will NOT switch)");
           } else if (k === "cpu") {
             const rate = Number(v);
             if (!Number.isFinite(rate) || rate < 1) throw new Error(`emulate cpu: expected a slowdown factor >= 1 - got '${v}'`);
@@ -3285,7 +3454,17 @@ async function daemon() {
         // into the live context; localStorage needs its origin to be loaded, so
         // it is written into the current page now and re-applied on every later
         // navigation by ONE init script.
-        const st = JSON.parse(readFileSync(path, "utf8"));
+        // A raw ENOENT here reads as a browse crash. Name the file, and list what
+        // IS saved - the usual cause is a typo or a state saved under another name.
+        let st;
+        try { st = JSON.parse(readFileSync(path, "utf8")); }
+        catch (e) {
+          if (e.code !== "ENOENT") throw new Error(`state --load ${file}: ${path} is not readable state JSON (${e.message})`);
+          let saved = [];
+          try { saved = readdirSync(join(BROWSE_HOME, "state")); } catch { /* none saved yet */ }
+          throw new Error(`state --load: no saved state '${file}' at ${path}` +
+            (saved.length ? `\nsaved states: ${saved.join(", ")}` : "\nnothing is saved yet - run `browse state --save <file>` while logged in"));
+        }
         if (clean) await context.clearCookies();
         if (st.cookies?.length) await context.addCookies(st.cookies);
         const origins = st.origins || [];
@@ -3455,7 +3634,7 @@ async function daemon() {
         if (notes.length) {
           result = `${result}\n${notes.splice(0).map((n) => "  " + n).join("\n")}`;
         }
-        logTranscript(`### ${step || "·"} · \`${logLabel(cmd, args)}\`\n${String(result).split("\n").slice(0, 3).map((l) => "- " + l).join("\n")}\n\n`);
+        logTranscript(`### ${step || "·"} · \`${logLabel(cmd, args)}\`\n${transcriptBody(result)}\n\n`);
         send({ ok: true, result });
       } catch (e) {
         let msg = stripAnsi(e && e.message ? e.message : String(e));

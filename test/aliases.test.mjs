@@ -106,6 +106,13 @@ try {
   gone("`tap` is gone, points at click", ["tap", "#x"], /'tap' was removed.*browse click/);
   gone("`video` is gone, points at dir/close", ["video"], /'video' was removed.*browse dir/);
   gone("`waitForSelector` is gone, points at wait", ["waitForSelector", "#x"], /'waitForSelector' was removed.*browse wait/);
+  gone("`evaluate` is gone, points at eval", ["evaluate", "1+1"], /'evaluate' was removed.*browse eval/);
+  // Retired FLAGS were validated in the daemon, so each one used to launch a
+  // browser and start a recording purely to be refused.
+  gone("retired --fullpage is refused before any browser", ["screenshot", "x.png", "--fullpage"], /'--fullpage' was removed/);
+  gone("retired --hidden is refused before any browser", ["wait", "body", "--hidden"], /'--hidden' was removed/);
+  // An unknown command is knowably wrong client-side too.
+  gone("a typo'd command is refused before any browser", ["clcik", "#x"], /unknown command 'clcik'/);
   check("none of that spawned a browser", browse("whoami").out.includes("not running"), browse("whoami").out);
   // The retired-command table is keyed by command name, so it must not answer
   // for Object.prototype members: `browse toString` used to print native-code
@@ -125,8 +132,8 @@ try {
   console.log("\nscreenshot flags");
   works("--full works", ["screenshot", "full.png", "--full"], /saved/);
   works("--sel works", ["screenshot", "sel.png", "--sel", "body"], /saved/);
-  gone("--fullpage is gone", ["screenshot", "x.png", "--fullpage"], /unknown flag '--fullpage'/);
-  gone("--selector is gone", ["screenshot", "x.png", "--selector", "body"], /unknown flag '--selector'/);
+  gone("--fullpage is gone, points at --full", ["screenshot", "x.png", "--fullpage"], /'--fullpage' was removed.*--full/);
+  gone("--selector is gone, points at --sel", ["screenshot", "x.png", "--selector", "body"], /'--selector' was removed.*--sel/);
   gone("a single-dash typo is a flag, not a filename", ["screenshot", "-full"], /unknown flag '-full'/);
   const shots = readdirSync(OUT);
   check("no screenshot was saved under a flag-shaped name",
@@ -136,8 +143,8 @@ try {
   console.log("\nwait flags");
   works("--gone works", ["wait", "#never-exists", "--gone", "--timeout", "2000"], /^gone:/);
   works("--timeout works", ["wait", "body", "--timeout", "2000"], /^visible:/);
-  gone("--hidden is gone", ["wait", "body", "--hidden"], /unknown flag '--hidden'/);
-  gone("-t is gone", ["wait", "body", "-t", "2000"], /unknown flag '-t'/);
+  gone("--hidden is gone, points at --gone", ["wait", "body", "--hidden"], /'--hidden' was removed.*--gone/);
+  gone("-t is gone, points at --timeout", ["wait", "body", "-t", "2000"], /'-t' was removed.*--timeout/);
 
   // --- net --domain retired; -d and --host both stay (SKILL.md teaches -d).
   console.log("\nnet flags");

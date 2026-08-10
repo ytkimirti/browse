@@ -44,5 +44,8 @@ tab is not in it at all. Park tab 0 on a STATIC page before working in another o
 
 On `close`, ffmpeg trims the blank white lead-in/out, cuts static dead air,
 fast-forwards `speed` regions with an `n×` badge pinned top-right, and writes a
-shareable `recording.mp4` with one chapter per command plus `poster.jpg`. The temp
+shareable `recording.mp4` with a chapter per acting command (observation commands
+get none, and chapters closer than 0.25s merge into `first (+N more)`) plus
+`poster.jpg`. A `toast` shown inside a `speed` region is fast-forwarded with it,
+so put captions outside the region. The temp
 raw webm in `video/` is deleted once the mp4 exists (kept with `--keep-raw`).
