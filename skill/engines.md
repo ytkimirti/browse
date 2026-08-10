@@ -26,7 +26,7 @@ missing, and says so if it ever stops applying.
 Use `--chromium` when you need:
 
 - a polished demo recording (see below)
-- `browse emulate` (timezone/locale/cpu/network) — CDP-only
+- `browse emulate tz= locale= cpu= net=` — CDP-only
 - saving a `.pdf` — `page.pdf()` is Chromium-only
 
 Both raise a clear error under camoufox rather than a Playwright stack trace.
