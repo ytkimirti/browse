@@ -375,7 +375,13 @@ const READ_MAX = 8000;
 function clipForRead(text, cmd, howToNarrow, max = READ_MAX) {
   const s = String(text);
   if (s.length <= max) return s;
-  return `${s.slice(0, max)}\n…[${cmd} truncated: ${max} of ${s.length} chars. ${howToNarrow}]`;
+  // slice() counts UTF-16 units, so a cut that lands between an astral char's
+  // two surrogates (emoji, CJK ext) would emit a lone one and print as U+FFFD.
+  // Drop the orphan rather than corrupt the last character.
+  let end = max;
+  const c = s.charCodeAt(end - 1);
+  if (c >= 0xd800 && c <= 0xdbff) end -= 1;
+  return `${s.slice(0, end)}\n…[${cmd} truncated: ${end} of ${s.length} chars. ${howToNarrow}]`;
 }
 
 /** Page methods that change state → we auto-screenshot after them. */
@@ -1280,13 +1286,15 @@ const DAEMON_COMMANDS = new Set([
 /** Flags a command used to accept, refused in the CLIENT so a stale spelling
  *  costs an error instead of a browser launch. The daemon validates these too
  *  (it is the one that knows the full flag set); this only front-runs the
- *  spellings we KNOW are dead. */
+ *  spellings we KNOW are dead.
+ *
+ *  Keyed BY COMMAND, not globally: `-t` is a dead `wait` flag but a perfectly
+ *  good screenshot name or `selectOption` value, and a global scan rejected
+ *  those too. */
 const RETIRED_FLAGS = Object.assign(Object.create(null), {
-  "--fullpage": "`browse screenshot [name] --full`",
-  "--selector": "`browse screenshot [name] --sel <selector>`",
-  "--hidden": "`browse wait <selector> --gone`",
-  "-t": "`browse wait <selector> --timeout <ms>`",
-  "--domain": "`browse net --host <d1,d2>` (or -d)",
+  screenshot: { "--fullpage": "`browse screenshot [name] --full`", "--selector": "`browse screenshot [name] --sel <selector>`" },
+  wait: { "--hidden": "`browse wait <selector> --gone`", "-t": "`browse wait <selector> --timeout <ms>`" },
+  net: { "--domain": "`browse net --host <d1,d2>` (or -d)" },
 });
 
 async function client(argv) {
@@ -1307,6 +1315,15 @@ async function client(argv) {
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
     process.stdout.write(HELP + "\n");
     return 0;
+  }
+  // Before ANY command handler runs: a retired flag is knowably wrong whether
+  // the command is answered here (net) or by the daemon, and answering it here
+  // is what keeps it from launching a browser to be refused.
+  const dead = RETIRED_FLAGS[cmd];
+  const deadFlag = dead && argv.slice(1).find((a) => dead[a]);
+  if (deadFlag) {
+    process.stderr.write(`browse: '${deadFlag}' was removed — use ${dead[deadFlag]}\n`);
+    return 1;
   }
   if (cmd === "version" || cmd === "--version" || cmd === "-v") {
     process.stdout.write(`browse ${pkgVersion()}\n`);
@@ -1406,14 +1423,6 @@ async function client(argv) {
   // error and a browser + recording spun up for nothing.
   if (!DAEMON_COMMANDS.has(cmd)) {
     process.stderr.write(`browse: unknown command '${cmd}' — run: browse help\n`);
-    return 1;
-  }
-  // fill/type/press carry arbitrary text (and key names), so a word that merely
-  // LOOKS like a dead flag there is content, not a flag.
-  const deadFlag = ["fill", "type", "press"].includes(cmd)
-    ? null : argv.slice(1).find((a) => RETIRED_FLAGS[a]);
-  if (deadFlag) {
-    process.stderr.write(`browse: '${deadFlag}' was removed — use ${RETIRED_FLAGS[deadFlag]}\n`);
     return 1;
   }
   // Never spawn a browser just to close one: if there's no live session, closing
@@ -1931,8 +1940,10 @@ const TRANSCRIPT_LINES = 12;
 function transcriptBody(result) {
   const lines = String(result).split("\n");
   const kept = lines.slice(0, TRANSCRIPT_LINES).map((l) => "- " + l).join("\n");
+  // Says only what is true HERE: the reply itself may already have been capped
+  // by clipForRead, so promising the full text was printed would be a lie.
   return lines.length > TRANSCRIPT_LINES
-    ? `${kept}\n- _…${lines.length - TRANSCRIPT_LINES} more lines (the command printed them in full; re-run it to see the rest)_`
+    ? `${kept}\n- _…${lines.length - TRANSCRIPT_LINES} more lines not kept in this transcript_`
     : kept;
 }
 function logDaemon(msg) {
@@ -2280,9 +2291,13 @@ async function daemon() {
    *  can be replaced between commands, and a stale handle would evaluate against
    *  a detached document. */
   async function frameForEval() {
-    const h = await page.locator(activeFrameSel).first().elementHandle({ timeout: 8000 });
+    // elementHandle THROWS a raw locator timeout when the iframe is gone, so the
+    // guidance has to hang off the catch, not off a null check.
+    let h;
+    try { h = await page.locator(activeFrameSel).first().elementHandle({ timeout: 8000 }); }
+    catch { h = null; }
     const f = h && (await h.contentFrame());
-    if (!f) throw new Error(`eval: the frame scope '${activeFrameSel}' is no longer on the page - run 'browse target top' to leave it, or re-scope`);
+    if (!f) throw new Error(`eval: the frame scope '${activeFrameSel}' is no longer on the page - run 'browse target top' to leave it, or re-scope with 'browse target <iframe selector>'`);
     return f;
   }
 
@@ -2957,6 +2972,9 @@ async function daemon() {
       // element being carried across - an instant teleport reads as a glitch.
       const [from, to] = args;
       if (!from || !to) throw new Error("drag: needs a source and a target selector");
+      // drag returns before the PAGE_METHODS flag check, so it needs its own:
+      // `drag a b --timeout 3000` used to drop the flag and report success.
+      if (args.length > 2) throw new Error(`drag: unexpected argument '${args[2]}' - drag takes a source and a target selector only`);
       const center = async (sel) => {
         // Same timeout as every other element command: a drop target that is
         // still rendering shouldn't fail faster here than a click on it would.
@@ -2970,14 +2988,19 @@ async function daemon() {
       // session which swallows every later click and hover, while each one still
       // reports ok. Nothing between down() and up() is allowed to throw, and the
       // `finally` covers what a future edit might add.
-      let side = from;
+      let side = "source", failed = from;
       let sx, sy, tx, ty;
       try {
         await cursorGlideTo(from);
         [sx, sy] = await center(from);
-        side = to;
+        side = "target"; failed = to;
         [tx, ty] = await center(to);
-      } catch (e) { throw await withSelectorHint(e, side); }
+      } catch (e) {
+        // Both sides raise the same shape of locator timeout, so without this the
+        // message names a selector and leaves you to work out which end it was.
+        const hinted = await withSelectorHint(e, failed);
+        throw new Error(`drag: ${side} '${failed}' - ${hinted && hinted.message ? hinted.message : String(hinted)}`);
+      }
       await page.mouse.move(sx, sy);
       await page.mouse.down();
       try {
@@ -2994,11 +3017,23 @@ async function daemon() {
       // are DROPPED - so `click x --timeout 3000` used to wait the default 12s
       // and exit 0 as if the flag had been honoured. `wait` and `screenshot`
       // reject unknown flags for the same reason; act commands must too.
-      // `fill`/`type` are exempt: their text is arbitrary and may start with a
-      // dash. `press` is exempt for the same reason (a key can be "-").
-      if (!typing && cmd !== "press") {
-        const flag = args.find((a) => typeof a === "string" && a.startsWith("--"));
-        if (flag) throw new Error(`${cmd}: unknown flag '${flag}' - ${cmd} takes only a selector. Per-command timeouts live on 'browse wait <selector> --timeout <ms>'`);
+      //
+      // Only where an extra arg is MEANINGLESS. Commands whose trailing args are
+      // DATA are exempt: fill/type text, a press key, a selectOption value
+      // (`<option value="--">-- pick one --</option>` is a real pattern) and a
+      // setInputFiles path may all legitimately start with a dash.
+      const DATA_ARGS = typing || cmd === "press" || cmd === "selectOption" || cmd === "setInputFiles";
+      if (!DATA_ARGS && ELEMENT_TARGETED.has(cmd) && args.length > 1) {
+        // These take exactly ONE selector, so ANYTHING after it is a mistake -
+        // a single-dash flag (`-timeout 3000`) and a stray word are both dropped
+        // into Playwright's options slot and ignored, which is the exit-0 lie
+        // this rejects. `wait` and `screenshot` reject any leading dash too.
+        const extra = args[1];
+        if (extra === "--dialog") {
+          throw new Error(`${cmd}: --dialog needs a value: accept | dismiss | "accept:my answer"`);
+        }
+        throw new Error(`${cmd}: unexpected argument '${extra}' - ${cmd} takes only a selector` +
+          `${String(extra).startsWith("-") ? ". Per-command timeouts live on 'browse wait <selector> --timeout <ms>'" : ""}`);
       }
       if (ELEMENT_TARGETED.has(cmd)) {
         // `browse press Escape` - one arg, so there is no selector: send the key
@@ -3082,7 +3117,12 @@ async function daemon() {
         // Playwright picks its encoder from the extension, so a bare name like
         // `checkout` failed with a raw 'unsupported mime type "null"'. The name
         // is a label, not a path - default the extension instead of erroring.
-        if (!/\.(png|jpe?g|pdf)$/i.test(name)) name += ".png";
+        // The extension is lowercased rather than merely ACCEPTED case-insensitively:
+        // Playwright's mime lookup and the .pdf branch below are both
+        // case-sensitive, so `REPORT.PDF` would otherwise fail the same way.
+        const ext = /\.(png|jpe?g|pdf)$/i.exec(name);
+        if (ext) name = name.slice(0, -ext[0].length) + ext[0].toLowerCase();
+        else name += ".png";
         const path = `${OUT}/${name}`;
         // A .pdf name means print the page, not screenshot it (headless only).
         // page.pdf() is Chromium-only — Firefox/camoufox has no equivalent.
@@ -3148,9 +3188,11 @@ async function daemon() {
           else if (target == null) target = args[i];
         }
         const a = String(target ?? "").trim();
-        // A bare `scroll` used to "scroll 0px" at exit 0 and still burn a step
-        // number on a screenshot of an unmoved page.
-        if (!a && !x) throw new Error("scroll: needs <n|-n|top|bottom|<selector>> (or --x <n> for horizontal)");
+        // A bare `scroll` (or an explicit `scroll 0`) used to "scroll 0px" at
+        // exit 0 and still burn a step number on a screenshot of an unmoved page.
+        if (!x && (!a || /^-?0+$/.test(a))) {
+          throw new Error(`scroll: ${a ? `'${a}' moves nothing` : "needs a target"} - try <n|-n|top|bottom|<selector>> (or --x <n> for horizontal)`);
+        }
         const named = a.toLowerCase() === "top" || a.toLowerCase() === "bottom";
         if (a && !named && !/^-?\d+$/.test(a)) {
           // A selector: let Playwright put it on screen (it also handles nested
@@ -3170,15 +3212,28 @@ async function daemon() {
         // `await fetch(...)` is the reflex spelling and page.evaluate rejects it
         // as a SyntaxError (the string is an expression, not an async body).
         // Wrap it rather than making every caller remember the difference.
-        if (/(^|[^.\w])await\s/.test(src)) src = `(async () => (${src}))()`;
+        const wrapped = /(^|[^.\w])await\s/.test(src);
+        if (wrapped) src = `(async () => (${src}))()`;
         // An iframe scope from `browse target <iframe>` steers click/text/wait
         // through L(); eval bypassed it and silently ran in the TOP frame, so a
         // scoped session read the wrong document.
         const target = activeFrame ? await frameForEval() : page;
-        const out = await target.evaluate(src);
+        let out;
+        try { out = await target.evaluate(src); }
+        catch (e) {
+          // The wrap only takes a single EXPRESSION, so `const r = await f(); r.x`
+          // fails on a token the caller never typed. Say who rewrote it.
+          if (wrapped && /SyntaxError/.test(e.message)) {
+            throw new Error(`${e.message}\nnote: browse wrapped this in an async IIFE so top-level 'await' works, which only accepts ONE expression. For statements, write it yourself: '(async () => { const r = await f(); return r.x })()'`);
+          }
+          throw e;
+        }
         // `undefined` is what a void expression returns, and printing nothing at
         // exit 0 is indistinguishable from a command that produced no output.
+        // An empty string reads the same way (the client drops empty replies), so
+        // it is quoted rather than sent as nothing.
         if (out === undefined) return "undefined";
+        if (out === "") return '""';
         const text = typeof out === "string" ? out : JSON.stringify(out);
         return clipForRead(text, "eval", "narrow the expression (e.g. .slice(0, 2000), .length, or a specific field)");
       }
@@ -3196,8 +3251,13 @@ async function daemon() {
         // back silently and ship the wrong accent (or the wrong corner) in a
         // video nobody re-renders. Validate rather than guess.
         const COLORS = ["yellow", "blue", "green", "red", "neutral"], POS = ["top", "bottom"];
+        // A caption is free text and may legitimately start with a dash, so `--`
+        // ends the flags and everything after it is the caption.
+        let endOfFlags = false;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
+          if (endOfFlags) { words.push(a); continue; }
+          if (a === "--") { endOfFlags = true; continue; }
           if (a === "--clear" || a === "-c") clear = true;
           else if (a === "--sticky") sticky = true;
           else if (a === "--for") {

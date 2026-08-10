@@ -53,6 +53,9 @@ button{display:block;margin:8px 0}</style>
 <div id=drop>drop here</div>
 <button id=btn>click me</button>
 <a id=blank href="/ui?popup=1" target="_blank">open a tab</a>
+<input id=in>
+<input id=file type=file>
+<select id=sel><option value="a">a</option><option value="--">-- pick one --</option></select>
 <iframe id=frame src="/frame" width=200 height=80></iframe>
 <div id=clicks>0</div>
 <div id=dropped>no</div>

@@ -150,7 +150,7 @@ try {
   console.log("\nnet flags");
   works("--host works", ["net", "--host", "127.0.0.1"], /./);
   works("-d works", ["net", "-d", "127.0.0.1"], /./);
-  gone("--domain is gone", ["net", "--domain", "127.0.0.1"], /unknown flag '--domain'/);
+  gone("--domain is gone, points at --host", ["net", "--domain", "127.0.0.1"], /'--domain' was removed.*--host/);
 
   // --- speed: the retired closers must not silently OPEN a fast-forward.
   console.log("\nspeed");

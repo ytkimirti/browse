@@ -95,6 +95,9 @@ try {
   fails("an unknown command is refused", ["clcik", "#x"], /unknown command 'clcik'/);
   fails("`evaluate` points at eval", ["evaluate", "1+1"], /'evaluate' was removed.*browse eval/);
   fails("a retired flag is refused", ["screenshot", "x.png", "--fullpage"], /'--fullpage' was removed/);
+  // The retired-flag table is keyed by COMMAND: `net --domain` is answered in
+  // the client before the daemon is ever reached, so it needs its own pointer.
+  fails("net --domain points at --host", ["net", "--domain", "example.com"], /'--domain' was removed.*--host/);
   check("none of that spawned a browser", browse("whoami").out.includes("not running"), browse("whoami").out);
 
   console.log("\nlive session");
@@ -107,12 +110,16 @@ try {
   console.log("\ndrag leaves no button held");
   works("a click registers before any drag", ["click", "#btn"]);
   check("...and the page saw it", read("document.getElementById('clicks').textContent") === "1", read("document.getElementById('clicks').textContent"));
-  fails("a drag with a bad TARGET fails", ["drag", "#src", "#no-such-target"], /no-such-target/);
+  fails("a drag with a bad TARGET fails, naming the target",
+    ["drag", "#src", "#no-such-target"], /drag: target '#no-such-target'/);
+  fails("drag rejects a stray flag", ["drag", "#src", "#drop", "--timeout", "3000"],
+    /unexpected argument '--timeout'/);
   works("a click still works after that", ["click", "#btn"]);
   check("...and the page really saw it (mouse not stuck)",
     read("document.getElementById('clicks').textContent") === "2",
     `clicks = ${read("document.getElementById('clicks').textContent")} (1 means input is dead)`);
-  fails("a drag with a bad SOURCE fails", ["drag", "#no-such-source", "#drop"], /no-such-source/);
+  fails("a drag with a bad SOURCE fails, naming the source",
+    ["drag", "#no-such-source", "#drop"], /drag: source '#no-such-source'/);
   works("a click still works after that too", ["click", "#btn"]);
   check("...and the page saw that one",
     read("document.getElementById('clicks').textContent") === "3",
@@ -126,20 +133,47 @@ try {
   works("a bare name is saved as .png", ["screenshot", "checkout"], /checkout\.png/);
   check("...and the file is on disk", existsSync(join(OUT, "checkout.png")), readdirSync(OUT).join(" "));
   works("an explicit .png still works", ["screenshot", "explicit.png"], /explicit\.png/);
+  // Playwright's mime lookup is case-SENSITIVE, so accepting .PNG without
+  // lowercasing it reproduced the exact raw error this fix removed.
+  works("an uppercase extension is normalised", ["screenshot", "UPPER.PNG"], /UPPER\.png/);
+  check("...and that file exists", existsSync(join(OUT, "UPPER.png")), readdirSync(OUT).join(" "));
+  works("a name with dots keeps them", ["screenshot", "v1.2-checkout"], /v1\.2-checkout\.png/);
   works("--sel with a bare name works", ["screenshot", "region", "--sel", "#btn"], /region\.png/);
 
   /* ----------------------------------------------------- act command flags */
   // Extras used to land in Playwright's options slot as strings and be dropped,
   // so `click x --timeout 3000` waited the default and exited 0 regardless.
   console.log("\nact commands reject unknown flags");
-  fails("click rejects an unknown flag", ["click", "#btn", "--bogus"], /unknown flag '--bogus'/);
-  fails("click rejects --timeout (it is a wait flag)", ["click", "#btn", "--timeout", "3000"], /unknown flag '--timeout'.*browse wait/s);
-  fails("hover rejects an unknown flag", ["hover", "#btn", "--nope"], /unknown flag '--nope'/);
-  check("no stray flag reached the page as a click",
+  fails("click rejects an unknown flag", ["click", "#btn", "--bogus"], /unexpected argument '--bogus'/);
+  fails("click rejects --timeout (it is a wait flag)", ["click", "#btn", "--timeout", "3000"], /unexpected argument '--timeout'.*browse wait/s);
+  fails("hover rejects an unknown flag", ["hover", "#btn", "--nope"], /unexpected argument '--nope'/);
+  // A single dash was the hole: `wait`/`screenshot` reject any leading dash, so
+  // act commands must too, and a stray bare word is the same silent drop.
+  fails("click rejects a SINGLE-dash flag", ["click", "#btn", "-timeout", "3000"], /unexpected argument '-timeout'/);
+  fails("click rejects a stray bare argument", ["click", "#btn", "junk"], /unexpected argument 'junk'/);
+  fails("--dialog with no value says the value is missing", ["click", "#btn", "--dialog"], /--dialog needs a value/);
+  check("no rejected click reached the page",
     read("document.getElementById('clicks').textContent") === "3",
     read("document.getElementById('clicks').textContent"));
-  // fill/type/press carry arbitrary text, so a dashed VALUE is content.
-  works("fill still accepts a dashed value", ["fill", "#long", "--not-a-flag"]);
+  works("--dialog with a good value still works", ["click", "#btn", "--dialog", "accept"]);
+  check("the one accepted click did reach the page",
+    read("document.getElementById('clicks').textContent") === "4",
+    read("document.getElementById('clicks').textContent"));
+  // Commands whose trailing args are DATA must still accept a dashed value -
+  // rejecting those was the over-correction this section guards against.
+  works("fill still accepts a dashed value", ["fill", "#in", "--not-a-flag"]);
+  check("...and the value really landed", read("document.getElementById('in').value") === "--not-a-flag",
+    read("document.getElementById('in').value"));
+  works("type still accepts a dashed value", ["type", "#in", "-t"]);
+  works("selectOption accepts a '--' option value", ["selectOption", "#sel", "--"], /ok/);
+  check("...and the select really changed", read("document.getElementById('sel').value") === "--",
+    read("document.getElementById('sel').value"));
+  // A dash-leading screenshot NAME stays refused on purpose (a mistyped flag
+  // must never become a filename), but the message has to say which flag set is
+  // valid rather than pointing at a retired `wait` flag.
+  fails("a dash-shaped screenshot name is refused as a flag", ["screenshot", "-t"], /screenshot: unknown flag '-t'.*--full/);
+  works("text accepts a selector that looks like a dead flag", ["text", "#in"], /.?/);
+  fails("setInputFiles still names a missing dashed path", ["setInputFiles", "#file", "--nope.txt"], /no such file: --nope\.txt/);
 
   /* ------------------------------------------------------------------ eval */
   console.log("\neval");
@@ -154,6 +188,15 @@ try {
     `${big.out.length} bytes · tail: ${big.out.slice(-120)}`);
   const small = browse("eval", "'short'");
   check("a small result is untouched", small.out === "short", small.out);
+  works("an empty string prints as \"\" rather than nothing", ["eval", "''"], /^""$/);
+  // The cap counts UTF-16 units, so a cut landing inside a surrogate pair used
+  // to emit a lone one and print as U+FFFD.
+  const emoji = browse("eval", "'a'.repeat(7999) + '\\u{1F600}'.repeat(5)");
+  check("truncation does not split a surrogate pair", !emoji.out.includes("�"),
+    `tail: ${JSON.stringify(emoji.out.slice(7990, 8010))}`);
+  fails("a rejected promise still fails", ["eval", "Promise.reject(new Error('boom'))"], /boom/);
+  fails("an await STATEMENT says browse rewrote it",
+    ["eval", "const r = await fetch('/ui'); r.status"], /async IIFE/);
 
   /* ---------------------------------------------------------- read clipping */
   console.log("\nbounded reads say they are bounded");
@@ -170,10 +213,18 @@ try {
   fails("an unknown --pos is an error", ["toast", "x", "--pos", "middle"], /unknown --pos 'middle'.*top/);
   fails("a non-numeric --for is an error", ["toast", "x", "--for", "abc"], /--for expects seconds/);
   works("--clear with no toast is still fine", ["toast", "--clear"], /toast cleared/);
+  // Validating flags must not cost a caption its leading dashes.
+  works("-- ends the flags so a caption can start with one",
+    ["toast", "--", "--important: read this"], /--important: read this/);
+  check("...and it really rendered",
+    read("document.querySelector('[id*=toast]')?.textContent || ''").includes("--important"),
+    read("document.querySelector('[id*=toast]')?.textContent || ''"));
+  works("clear it again", ["toast", "--clear"], /toast cleared/);
 
   /* ---------------------------------------------------------------- scroll */
   console.log("\nscroll needs a target");
-  fails("a bare scroll is an error", ["scroll"], /needs <n\|-n\|top\|bottom/);
+  fails("a bare scroll is an error", ["scroll"], /needs a target/);
+  fails("an explicit scroll 0 is an error too", ["scroll", "0"], /moves nothing/);
   fails("an unknown scroll flag is an error", ["scroll", "100", "--nope"], /unknown flag '--nope'/);
   works("scroll bottom still works", ["scroll", "bottom"], /scrolled bottom/);
   const shotsAfterScroll = readdirSync(join(OUT, "shots"));
@@ -243,8 +294,12 @@ try {
   console.log("\ntranscript");
   works("a long read for the transcript", ["snapshot"], /./);
   const tr = readFileSync(join(OUT, "transcript.md"), "utf8");
-  check("a cut result says it was cut", /more lines \(the command printed them in full/.test(tr),
+  // The marker must not claim the command printed everything: the reply itself
+  // may already have been capped by clipForRead.
+  check("a cut result says it was cut", /more lines not kept in this transcript/.test(tr),
     tr.split("\n").slice(-6).join("\n"));
+  check("...without claiming the command printed it all",
+    !/printed them in full/.test(tr), "transcript still promises the full output");
   check("...and keeps more than three lines of it",
     tr.split("\n### ").some((s) => s.split("\n").filter((l) => l.startsWith("- ")).length > 3),
     "no block kept more than 3 lines");
