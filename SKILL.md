@@ -141,6 +141,31 @@ With no `-s`, the name is auto-derived from the calling agent: a collision safet
 net, not the intended path. `browse whoami` prints the name in effect;
 `browse sessions` lists what's live.
 
+## Staying logged in (`-p <name>`)
+
+`-p <name>` gives the session a persistent user-data dir, so cookies and
+localStorage survive `close` → `open`. Log in by hand once, then reuse it:
+
+```
+browse --headful -p google open https://accounts.google.com   # log in yourself
+browse -p google close
+browse -p google goto <site>                                  # already signed in
+```
+
+Prefix **every** command with the same `-p`. One live **browser** per profile
+(tabs are unlimited — the dir is locked while open, so a second session can't
+share it). A profile is stored **per engine**: log in on the engine you'll drive
+with, and see `skill/engines.md`. `browse profiles` lists what exists;
+`browse -p <name> clear` deletes it.
+
+## Launch flags
+
+`--headful`, `--chromium` / `--camoufox`, `--viewport WxH`, `--no-cursor`,
+`--no-keylog`, `--popups`, `--no-net`, `--type-delay <ms>`, `--idle <ms>`. They
+configure the browser at start-up, so put them on the command that **opens** the
+session — on a live one browse refuses rather than ignoring them. Full table in
+`skill/config.md`.
+
 ## Artifacts
 
 Each session gets `~/.browse/sessions/<timestamp>/` with `transcript.md`,
@@ -162,5 +187,6 @@ be candid and specific, a few bullets is enough.
 - `skill/recording.md` — recording craft, when the video is the deliverable
 - `skill/engines.md` — camoufox (default, clears bot walls) vs chromium (needed for
   `emulate`, PDF, and polished demos)
-- `skill/config.md` — every `BROWSE_*` env var
+- `skill/config.md` — every launch flag (`--headful`, `--chromium`, `--viewport`, …)
+  and every `BROWSE_*` env var
 - `skill/troubleshooting.md` — daemon won't start, selector misses, install, ffmpeg

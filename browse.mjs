@@ -54,7 +54,18 @@
  *                                    only while live)
  *   ~/.browse/{profiles,state,run}/  persistent logins, saved auth, live daemons
  *
- * Config via env (all optional):
+ * Config (all optional). The knobs you reach for by hand are LAUNCH FLAGS —
+ * --headful, --chromium/--camoufox, --viewport, --cursor, --keylog, --popups,
+ * --net, --type-delay, --idle — placed before the command, e.g.
+ * `browse --headful --chromium -p google open …`. They configure the browser at
+ * start-up, so they only apply to the command that opens the session (browse
+ * refuses one aimed at a live session rather than silently dropping it), and
+ * each is just a friendlier spelling of the env var the DAEMON reads at module
+ * load (LAUNCH_FLAGS / LAUNCH_OPTS forward them into its spawn env). Everything
+ * below is set-once-in-a-shell-profile territory and stays env-only;
+ * `browse help --env` prints the lot.
+ *   BROWSE_HOME        data home: profiles, sessions, run files, the playwright
+ *                      install (default ~/.browse — nothing lives in the clone)
  *   BROWSE_OUT         override the session artifacts dir
  *   BROWSE_SESSION     session name (same as `browse -s <name> …`). Unset ⇒ derived
  *                      from the calling agent (its session-id env var, else the pid
@@ -62,37 +73,31 @@
  *                      both omit -s still get their own browser. "default" for a human.
  *   BROWSE_PORT        pin the localhost control port (default: any free port)
  *   BROWSE_APP_URL     default URL for `browse open` (default: http://127.0.0.1:3000)
- *   BROWSE_HEADFUL=1   show the browser window while driving it (still records)
- *   BROWSE_CURSOR=0    disable the animated on-page cursor overlay
- *   BROWSE_KEYLOG=0    disable the keystroke overlay
- *   BROWSE_TYPE_DELAY  per-keystroke delay in ms for fill/type (default 45, 0 = paste)
- *   BROWSE_IDLE_MS     idle auto-close (default 1800000 = 30 min; 0 = never)
+ *   BROWSE_WIDTH/_HEIGHT     one viewport dimension at a time (--viewport sets both)
  *   BROWSE_IDLE_MODE   what to do with auto-detected static dead air: cut (default,
  *                      drop it) | speed (fast-forward at BROWSE_IDLE_SPEED) | keep
  *   BROWSE_IDLE_SPEED  fast-forward factor: for BROWSE_IDLE_MODE=speed, and the
  *                      default N for `browse speed` (default 10)
- *   BROWSE_NET=0       disable network logging (default: log every request to
- *                      <session dir>/network.jsonl — query it with `browse net`)
+ *   BROWSE_FPS         output frame rate of the finalized mp4 (default 30)
  *   BROWSE_NET_BODIES=0      don't capture request/response bodies
  *   BROWSE_NET_BODY_MAX      max bytes kept per body (default 32768)
  *   BROWSE_NET_SECRETS=1     keep auth headers/cookies verbatim (default: values hashed)
- *   BROWSE_POPUPS=1    let `target=_blank` / `window.open(url)` open REAL popups
- *                      (default: rewritten into same-tab navigation, which keeps
- *                      the recording in one file - see popupSameTabInitScript)
  *   BROWSE_KEEP_WEBM=1 keep the raw .webm after the mp4 is written, so the
  *                      session can be re-cut later with one ffmpeg call
+ *   BROWSE_FFMPEG      the ffmpeg used to finalize the mp4
  *   BROWSE_PW_BASE     path whose parent dir holds node_modules/playwright
  *                      (default: resolve next to this file)
- *   BROWSE_ENGINE      camoufox (default) | chromium. camoufox is a Firefox
- *                      build with C++-level fingerprint patches: it clears
- *                      Cloudflare's JS managed challenge HEADLESSLY, which
- *                      Chromium cannot (new-headless gets an unsolved
- *                      cf_clearance, and headed Chrome can't be hidden on macOS
- *                      - --window-position is clamped onto a real display).
- *                      Falls back to chromium by itself if camoufox isn't
- *                      installed. Chromium-only, so they NEED =chromium:
- *                      `browse emulate` (CDP) and saving a .pdf.
  *   BROWSE_CAMOUFOX_PYTHON  python that can `import camoufox` (default python3)
+ *
+ * On the engine (`--camoufox`, the default, vs `--chromium`): camoufox is a
+ * Firefox build with C++-level fingerprint patches. It clears Cloudflare's JS
+ * managed challenge HEADLESSLY, which Chromium cannot (its new-headless gets an
+ * unsolved cf_clearance, and headed Chrome can't be hidden on macOS —
+ * --window-position is clamped onto a real display). It falls back to chromium
+ * by itself if camoufox isn't installed. Chromium-only, so these NEED
+ * --chromium: `browse emulate` (CDP) and saving a .pdf. The engine also decides
+ * which dir a `-p` profile uses, since the two profile formats are incompatible
+ * (see profileDir).
  */
 
 import http from "node:http";
@@ -186,6 +191,75 @@ let SESSION = sanitizeName(process.env.BROWSE_SESSION || defaultSession());
 // logins+localStorage survive close→open. null = throwaway context (the default).
 let PROFILE = process.env.BROWSE_PROFILE ? sanitizeName(process.env.BROWSE_PROFILE) : null;
 function runFile(name) { return join(RUN_DIR, `${name}.json`); }
+
+// ── Profile storage ────────────────────────────────────────────────────────
+// ONE profile name, up to TWO dirs on disk: a Firefox profile and a Chromium
+// user-data dir are incompatible formats, so camoufox stores `<name>` under
+// `<name>-camoufox`. That is an implementation detail — `-p <name>` and
+// `browse profiles` both speak the logical name, and the listing shows which
+// engines that name actually has a login under.
+const CAMOU_SUFFIX = "-camoufox";
+const PROFILES_DIR = join(BROWSE_HOME, "profiles");
+function profileDir(name, engine) {
+  return join(PROFILES_DIR, engine === "camoufox" ? name + CAMOU_SUFFIX : name);
+}
+/** The lock a LIVE browser leaves in its own profile dir. Chromium's is a
+ *  (usually dangling) symlink, so both are probed via readdir rather than stat. */
+const ENGINE_LOCK = { chromium: "SingletonLock", camoufox: ".parentlock" };
+function profileOpen(dir, engine) {
+  try { return readdirSync(dir).includes(ENGINE_LOCK[engine]); } catch { return false; }
+}
+const humanSize = (kb) => kb >= 1048576 ? `${(kb / 1048576).toFixed(1)}G`
+  : kb >= 1024 ? `${Math.round(kb / 1024)}M` : `${kb}K`;
+function humanAge(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 90) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  if (s < 1209600) return `${Math.round(s / 86400)}d ago`;
+  if (s < 5184000) return `${Math.round(s / 604800)}w ago`;
+  return `${Math.round(s / 2592000)}mo ago`;
+}
+/** Size + last-write of one profile dir, or null when nothing was ever written
+ *  into it (a dir `launchPersistentContext` created and a `clear` emptied, or an
+ *  engine half that only ever held a Finder .DS_Store). `du` because a Firefox
+ *  profile is tens of thousands of files and walking it in-process to print one
+ *  number is not worth the stall; the dir's OWN mtime is useless as "last used"
+ *  since both engines write into subdirs, so take the newest child instead. */
+function profileStat(dir) {
+  let kids = [];
+  try { kids = readdirSync(dir).filter((f) => f !== ".DS_Store"); } catch { return null; }
+  if (!kids.length) return null;
+  let newest = 0;
+  for (const f of kids) {
+    try { newest = Math.max(newest, statSync(join(dir, f)).mtimeMs); } catch { /* vanished mid-scan */ }
+  }
+  let size = "?";
+  try {
+    const kb = Number((spawnSync("du", ["-sk", dir], { encoding: "utf8", timeout: 10000 }).stdout || "").trim().split(/\s+/)[0]);
+    if (Number.isFinite(kb)) size = humanSize(kb);
+  } catch { /* no du — the row still carries the useful part */ }
+  return { size, used: newest ? humanAge(newest) : "?" };
+}
+/** Every profile on disk, folded back to logical names:
+ *  [{ name, engines: [{ engine, size, used }] }], engines empty = nothing stored. */
+function scanProfiles() {
+  let dirs = [];
+  try {
+    dirs = readdirSync(PROFILES_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch { return []; } // no profiles dir yet
+  const byName = new Map();
+  for (const d of dirs) {
+    const camou = d.endsWith(CAMOU_SUFFIX);
+    const name = camou ? d.slice(0, -CAMOU_SUFFIX.length) : d;
+    if (!name) continue; // a dir literally called "-camoufox"
+    if (!byName.has(name)) byName.set(name, { name, engines: [] });
+    const stat = profileStat(join(PROFILES_DIR, d));
+    if (stat) byName.get(name).engines.push({ engine: camou ? "camoufox" : "chromium", ...stat });
+  }
+  for (const p of byName.values()) p.engines.sort((a, b) => a.engine.localeCompare(b.engine));
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
 // Tilde-shortened path — the form every artifact is reported in, and the form
 // the user gets handed: short, terminal-linkified, pasteable into a shell.
 function tildePath(p) {
@@ -799,7 +873,7 @@ Tabs, frames, emulation, saved logins:
                                     viewport= is for CHECKING a layout, not for recording one: the
                                     video frame is fixed when the browser starts, so a smaller page
                                     records anchored top-left in a field of grey. To RECORD phone-
-                                    shaped, start the session with BROWSE_VIEWPORT=390x844 instead.
+                                    shaped, start the session with --viewport 390x844 instead.
   browse state --save <file>        write this session's cookies + localStorage to a file (a bare
                                     name lands in ${join(BROWSE_HOME, "state")}/)
   browse state --load <file> [--clean]
@@ -883,13 +957,39 @@ Parallel sessions (e.g. one browser per agent — fully isolated):
   browse setup                      install/repair deps (playwright, chromium, camoufox link)
   browse version                    print the version
 
+Launch flags (how the browser STARTS — put them before the command that opens the
+session; on an already-live session browse refuses rather than ignoring them):
+  --headful / --headless            show the browser window while driving it (still records)
+  --camoufox / --chromium           pick the engine (default camoufox — see below)
+  --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
+                                    use to RECORD phone-shaped; 'browse emulate viewport=' only
+                                    resizes the page inside an already-fixed frame
+  --cursor / --no-cursor            animated on-page cursor overlay
+  --keylog / --no-keylog            keystroke overlay — both default ON for chromium and OFF for
+                                    camoufox, where every injected script is a fingerprint
+  --popups / --no-popups            let target=_blank open REAL popups, vs rewriting them into
+                                    same-tab navigation so the recording stays one file
+  --net / --no-net                  network logging (default on — see 'browse net')
+  --type-delay <ms>                 per-keystroke delay for fill/type (default 45, 0 = paste)
+  --idle <ms>                       auto-close after this long idle (default 1800000, 0 = never)
+  e.g. browse --headful --chromium -p google open https://accounts.google.com
+  Every flag is also an env var (BROWSE_HEADFUL=1, BROWSE_ENGINE=chromium, …), and the
+  rarer knobs are env-only — 'browse help --env' lists them all.
+
 Persistent profile (keep cookies + localStorage across close→open, e.g. stay logged in):
   browse -p <name> <cmd> …          drive on a persistent profile (own user-data dir). Prefix
                                     EVERY command with the same -p <name>. BROWSE_PROFILE=<name>
-                                    works too. One live session at a time per profile.
+                                    works too. One live BROWSER at a time per profile (tabs are
+                                    unlimited — see 'browse target'); a second session on the
+                                    same profile can't share the locked dir.
                                     No -p = throwaway clean context (the default).
-  browse profiles                   list the persistent profiles (dirs under ${join(BROWSE_HOME, "profiles")}/)
-  browse -p <name> clear            delete a profile's user-data dir (close it first if it's open)
+  browse profiles                   list the persistent profiles, with the engine(s) each has a
+                                    login under, its size, and when it was last written
+  browse -p <name> clear            delete a profile (both engines' dirs; --chromium / --camoufox
+                                    clears just that half). Close it first if it's open.
+  A profile is stored PER ENGINE — a Firefox profile and a Chromium user-data dir are
+  incompatible formats, so 'browse --camoufox -p x' and 'browse --chromium -p x' are two
+  separate logins under one name. Log in on the engine you will drive with.
 
 Artifacts (transcript.md, step screenshots, video) land in a per-session dir
 under ${join(BROWSE_HOME, "sessions")}/. On close, ffmpeg (if installed) trims the
@@ -901,6 +1001,36 @@ visibly-progressing wait still shows. Time spent on a popup is cut too (only the
 main tab is recorded). It writes a shareable recording.mp4 with one chapter per
 command plus a poster.jpg; the temp raw .webm is then deleted (kept only if
 ffmpeg is missing/fails, or with --keep-raw / BROWSE_KEEP_WEBM=1).`;
+
+/** `browse help --env`. The knobs above have flags because they are the ones you
+ *  reach for by hand; these are set once in a shell profile or a wrapper, so a
+ *  flag would only be surface nobody types. */
+const ENV_HELP = `browse — environment variables
+
+Every launch flag is also an env var (a flag on the command WINS over the env):
+  BROWSE_HEADFUL=1         --headful            BROWSE_ENGINE=camoufox|chromium  --camoufox/--chromium
+  BROWSE_VIEWPORT=WxH      --viewport           BROWSE_CURSOR=0|1                --no-cursor/--cursor
+  BROWSE_KEYLOG=0|1        --no-keylog/--keylog BROWSE_POPUPS=0|1                --no-popups/--popups
+  BROWSE_NET=0|1           --no-net/--net       BROWSE_TYPE_DELAY=<ms>           --type-delay
+  BROWSE_IDLE_MS=<ms>      --idle
+  BROWSE_SESSION=<name>    -s <name>            BROWSE_PROFILE=<name>            -p <name>
+
+Env-only (set once in a shell profile — no flag):
+  BROWSE_HOME              data home for profiles/sessions/deps (default ~/.browse)
+  BROWSE_OUT               override this session's artifacts dir
+  BROWSE_PORT              pin the localhost control port (default: any free port)
+  BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
+  BROWSE_WIDTH / _HEIGHT   viewport one dimension at a time (BROWSE_VIEWPORT sets both)
+  BROWSE_IDLE_MODE         auto-detected dead air: cut (default) | speed | keep
+  BROWSE_IDLE_SPEED        fast-forward factor for =speed, and default N for 'browse speed' (10)
+  BROWSE_FPS               output frame rate of the finalized mp4 (30)
+  BROWSE_KEEP_WEBM=1       keep the raw .webm after the mp4 lands (= 'close --keep-raw')
+  BROWSE_NET_BODIES=0      don't capture request/response bodies
+  BROWSE_NET_BODY_MAX      max bytes kept per body (32768)
+  BROWSE_NET_SECRETS=1     keep auth headers/cookie values verbatim (default: hashed)
+  BROWSE_FFMPEG            path to the ffmpeg used for the mp4 finalize
+  BROWSE_PW_BASE           path whose parent dir holds node_modules/playwright
+  BROWSE_CAMOUFOX_PYTHON   python that can 'import camoufox' (default python3)`;
 
 /* ========================================================= network queries */
 
@@ -1197,6 +1327,9 @@ async function ensureDaemon() {
         BROWSE_OUT: OUT,
         BROWSE_SESSION: SESSION,
         ...(PROFILE ? { BROWSE_PROFILE: PROFILE } : {}),
+        // Launch flags win over an inherited env var: the flag is on THIS
+        // command, the env var is ambient (a shell export, an agent's wrapper).
+        ...LAUNCH_ENV,
       },
       });
       child.unref();
@@ -1239,28 +1372,99 @@ function post(port, body) {
 
 const CLOSERS = new Set(["close", "stop", "quit"]);
 
+/** Launch flags — how the browser is STARTED, so they only bite on the command
+ *  that starts the session. The daemon reads its config from env at module load
+ *  (it is a separate process), so each flag is just a friendlier spelling of one
+ *  env var, forwarded into the spawn env by ensureDaemon. The env vars still
+ *  work; every knob that is rarer than these stays env-only.
+ *
+ *  Null-prototype: `LAUNCH_FLAGS[a]` must be falsy for `--constructor` and
+ *  friends, same reasoning as RETIRED. */
+const LAUNCH_FLAGS = Object.assign(Object.create(null), {
+  "--headful": ["BROWSE_HEADFUL", "1"], "--headless": ["BROWSE_HEADFUL", "0"],
+  "--camoufox": ["BROWSE_ENGINE", "camoufox"], "--chromium": ["BROWSE_ENGINE", "chromium"],
+  "--cursor": ["BROWSE_CURSOR", "1"], "--no-cursor": ["BROWSE_CURSOR", "0"],
+  "--keylog": ["BROWSE_KEYLOG", "1"], "--no-keylog": ["BROWSE_KEYLOG", "0"],
+  "--popups": ["BROWSE_POPUPS", "1"], "--no-popups": ["BROWSE_POPUPS", "0"],
+  "--net": ["BROWSE_NET", "1"], "--no-net": ["BROWSE_NET", "0"],
+});
+/** Launch flags that take a value. `check` rejects a malformed one loudly —
+ *  silently falling back to the default is how you record 40 minutes at the
+ *  wrong viewport and only find out watching the mp4. */
+const LAUNCH_OPTS = Object.assign(Object.create(null), {
+  "--viewport": { env: "BROWSE_VIEWPORT", check: (v) => /^\d+\s*[x×,]\s*\d+$/.test(v), want: "WxH, e.g. 390x844" },
+  "--type-delay": { env: "BROWSE_TYPE_DELAY", check: (v) => /^\d+$/.test(v), want: "milliseconds, e.g. 0 (paste) or 45" },
+  "--idle": { env: "BROWSE_IDLE_MS", check: (v) => /^\d+$/.test(v), want: "milliseconds, e.g. 600000 (0 = never auto-close)" },
+});
+/** Env overrides collected from launch flags, handed to the daemon at spawn. */
+const LAUNCH_ENV = {};
+/** Commands answered entirely by the client — no browser, so no launch flags
+ *  apply. (`clear` is the exception: it reads the engine flags to pick which
+ *  half of a profile to wipe.) */
+const LOCAL_CMDS = new Set(["help", "version", "whoami", "sessions", "profiles", "clear", "net", "setup"]);
+
 async function client(argv) {
   // Leading flags (any order): `-s <name>` selects a named parallel session,
   // `-p <name>` selects a persistent profile. Both must accompany EVERY command
-  // aimed at that session (BROWSE_SESSION / BROWSE_PROFILE work too).
+  // aimed at that session (BROWSE_SESSION / BROWSE_PROFILE work too). Launch
+  // flags (LAUNCH_FLAGS / LAUNCH_OPTS) go here too, on the command that opens.
+  const launchSeen = [];
   for (;;) {
-    if (argv[0] === "-s" || argv[0] === "--session") {
+    const a = argv[0];
+    if (a === "-s" || a === "--session") {
       SESSION = sanitizeName(argv[1] || "default");
       argv = argv.slice(2);
       if (!process.env.BROWSE_OUT) setOut(defaultOut());
-    } else if (argv[0] === "-p" || argv[0] === "--profile") {
+    } else if (a === "-p" || a === "--profile") {
       PROFILE = argv[1] ? sanitizeName(argv[1]) : null;
+      argv = argv.slice(2);
+    } else if (LAUNCH_FLAGS[a]) {
+      const [env, val] = LAUNCH_FLAGS[a];
+      LAUNCH_ENV[env] = val;
+      launchSeen.push(a);
+      argv = argv.slice(1);
+    } else if (LAUNCH_OPTS[a]) {
+      const { env, check, want } = LAUNCH_OPTS[a];
+      const val = String(argv[1] ?? "");
+      if (!check(val)) {
+        process.stderr.write(`browse: ${a} wants ${want}${val ? ` — got '${val}'` : " — got nothing"}\n`);
+        return 1;
+      }
+      LAUNCH_ENV[env] = val.replace(/\s/g, "");
+      launchSeen.push(a);
       argv = argv.slice(2);
     } else break;
   }
   const cmd = argv[0];
+  // A launch flag AFTER the command was swallowed as an argument to it (a URL, a
+  // selector, a value), which is silent and looks like the flag did nothing.
+  const late = argv.slice(1).find((a) => LAUNCH_FLAGS[a] || LAUNCH_OPTS[a]);
+  if (late) {
+    process.stderr.write(`browse: ${late} configures how the browser starts, so it goes BEFORE the command — e.g. \`browse ${late} ${cmd} …\`\n`);
+    return 1;
+  }
+  // `<name>-camoufox` is where profile `<name>` keeps its camoufox half, so a
+  // profile that spells it out would silently share a dir with another one.
+  if (PROFILE && PROFILE.endsWith(CAMOU_SUFFIX)) {
+    const base = PROFILE.slice(0, -CAMOU_SUFFIX.length);
+    process.stderr.write(`browse: '${CAMOU_SUFFIX}' is reserved — that dir is profile '${base}' on camoufox. Use \`-p ${base} --camoufox\`.\n`);
+    return 1;
+  }
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
-    process.stdout.write(HELP + "\n");
+    const envOnly = argv.slice(1).some((a) => a === "--env" || a === "env");
+    process.stdout.write((envOnly ? ENV_HELP : HELP) + "\n");
     return 0;
   }
   if (cmd === "version" || cmd === "--version" || cmd === "-v") {
     process.stdout.write(`browse ${pkgVersion()}\n`);
     return 0;
+  }
+  // No command starts with a dash, so this is a misspelled flag. Answer it here:
+  // everything past this point sends the word to the daemon as a command, and a
+  // typo'd flag would LAUNCH A BROWSER just to be told it isn't a command.
+  if (cmd.startsWith("-")) {
+    process.stderr.write(`browse: unknown flag ${cmd} — run \`browse help\` (or \`browse help --env\` for the env-only knobs)\n`);
+    return 1;
   }
   // List every live daemon across all session names (and sweep stale run files).
   // Which session do these commands actually drive? Useful when the name is
@@ -1284,43 +1488,55 @@ async function client(argv) {
     process.stdout.write(lines.length ? lines.join("\n") + "\n" : "(no live sessions)\n");
     return 0;
   }
-  // List the persistent profiles browse owns (their user-data dirs live under
-  // ${BROWSE_HOME}/profiles/<name>). Local + read-only, like `sessions`.
+  // List the persistent profiles browse owns. ONE row per logical name, then one
+  // line per engine that name actually holds a login under — the `-camoufox`
+  // dir is the same profile, not a second one, and showing it as such is the
+  // only way `-p stealth` on the wrong engine stops looking like a lost login.
+  // Local + read-only, like `sessions`.
   if (cmd === "profiles") {
-    let names = [];
-    try {
-      names = readdirSync(join(BROWSE_HOME, "profiles"), { withFileTypes: true })
-        .filter((e) => e.isDirectory()).map((e) => e.name);
-    } catch { /* no profiles dir yet */ }
-    process.stdout.write(names.length ? names.join("\n") + "\n" : "(no profiles yet)\n");
+    const found = scanProfiles();
+    if (!found.length) { process.stdout.write("(no profiles yet)\n"); return 0; }
+    const nameW = Math.max(...found.map((p) => p.name.length));
+    const out = [];
+    for (const p of found) {
+      if (!p.engines.length) { // dir(s) exist but nothing was ever written into them
+        out.push(`${p.name.padEnd(nameW)}  (empty)`);
+        continue;
+      }
+      p.engines.forEach((e, i) => {
+        out.push(`${(i ? "" : p.name).padEnd(nameW)}  ${e.engine.padEnd(8)}  ${e.size.padStart(5)}  ${e.used}`);
+      });
+    }
+    out.push("", "(a login lives per engine — pick with --chromium / --camoufox)");
+    process.stdout.write(out.join("\n") + "\n");
     return 0;
   }
   // Delete the profile selected by `-p <name>`: `browse -p <name> clear`. Local —
-  // just wipes its user-data dir. Refuses while that profile is open (a live
-  // Chromium keeps a SingletonLock in the dir; deleting it out from under a
-  // running browser would corrupt the session).
+  // just wipes its user-data dir(s). BOTH engines' dirs go by default, since one
+  // name is one profile as far as the CLI is concerned; `--chromium` / `--camoufox`
+  // narrows it to that half. Refuses while a half is open (a live browser keeps a
+  // lock file in its dir; deleting it out from under one would corrupt the session).
   if (cmd === "clear") {
     if (!PROFILE) {
       process.stderr.write("browse: `clear` needs a profile — run `browse -p <name> clear`\n");
       return 1;
     }
-    const dir = join(BROWSE_HOME, "profiles", PROFILE);
-    let isDir = false;
-    try { isDir = statSync(dir).isDirectory(); } catch { /* missing */ }
-    if (!isDir) {
-      process.stdout.write(`(no profile '${PROFILE}' to clear)\n`);
+    const only = LAUNCH_ENV.BROWSE_ENGINE; // set by --chromium / --camoufox
+    const halves = ["chromium", "camoufox"]
+      .filter((e) => !only || e === only)
+      .map((engine) => ({ engine, dir: profileDir(PROFILE, engine) }))
+      .filter(({ dir }) => { try { return statSync(dir).isDirectory(); } catch { return false; } });
+    if (!halves.length) {
+      process.stdout.write(`(no ${only ? `${only} ` : ""}profile '${PROFILE}' to clear)\n`);
       return 0;
     }
-    // SingletonLock is a (usually dangling) symlink, so probe it via readdir
-    // rather than stat — its mere presence means a Chromium holds this dir.
-    let open = false;
-    try { open = readdirSync(dir).includes("SingletonLock"); } catch { /* unreadable */ }
-    if (open) {
-      process.stderr.write(`browse: profile '${PROFILE}' looks open — run \`browse -p ${PROFILE} close\` first, then retry.\n`);
+    const open = halves.filter(({ dir, engine }) => profileOpen(dir, engine));
+    if (open.length) {
+      process.stderr.write(`browse: profile '${PROFILE}' looks open (${open.map((h) => h.engine).join(", ")}) — run \`browse -p ${PROFILE} close\` first, then retry.\n`);
       return 1;
     }
-    rmSync(dir, { recursive: true, force: true });
-    process.stdout.write(`cleared profile '${PROFILE}'\n`);
+    for (const { dir } of halves) rmSync(dir, { recursive: true, force: true });
+    process.stdout.write(`cleared profile '${PROFILE}' (${halves.map((h) => h.engine).join(", ")})\n`);
     return 0;
   }
   // Network log queries are answered off the session's network.jsonl, so they
@@ -1350,6 +1566,17 @@ async function client(argv) {
   if (CLOSERS.has(cmd) && !(await findDaemon())) {
     process.stdout.write(`(no active browser session${SESSION === "default" ? "" : ` '${SESSION}'`})\n`);
     return 0;
+  }
+  // Launch flags configure the browser at START-UP, so a live session cannot
+  // adopt one. Refusing beats ignoring: `browse --headful click …` against an
+  // already-open session would otherwise report success with the window still
+  // hidden, and nothing on screen would say why.
+  if (launchSeen.length && (await findDaemon())) {
+    const s = SESSION === "default" ? "" : ` -s ${SESSION}`;
+    process.stderr.write(
+      `browse: ${launchSeen.join(" ")} only applies when the browser starts, and session '${SESSION}' is already live.\n` +
+      `        Run \`browse${s} close\` and re-open with the flag, or start a separate session with -s <name>.\n`);
+    return 1;
   }
   const d = await ensureDaemon();
   const res = await post(d.port, { cmd, args: argv.slice(1) });
@@ -2204,7 +2431,7 @@ async function daemon() {
     if (context.__engine !== "chromium")
       throw new Error(
         `emulate needs CDP, which only Chromium has (engine: ${context.__engine}). ` +
-        `Re-run this session with BROWSE_ENGINE=chromium.`);
+        `Re-run this session with --chromium.`);
     let s = emuSessions.get(page);
     if (!s) { s = await context.newCDPSession(page); emuSessions.set(page, s); }
     return s;
@@ -2946,7 +3173,7 @@ async function daemon() {
           if (context.__engine !== "chromium")
             throw new Error(
               `PDF export is Chromium-only (engine: ${context.__engine}). Re-run ` +
-              `this session with BROWSE_ENGINE=chromium, or save a .png instead.`);
+              `this session with --chromium, or save a .png instead.`);
           await page.pdf({ path });
           return `saved ${path}`;
         }
@@ -3194,7 +3421,7 @@ async function daemon() {
             // inside the page can move it; say so, and point at the one thing
             // that records phone-shaped for real.
             if (+m[1] < VIEWPORT.width || +m[2] < VIEWPORT.height) {
-              applied.push(`(the video frame stays ${VIEWPORT.width}x${VIEWPORT.height} - for a phone-shaped RECORDING, close and respawn with BROWSE_VIEWPORT=${m[1]}x${m[2]})`);
+              applied.push(`(the video frame stays ${VIEWPORT.width}x${VIEWPORT.height} - for a phone-shaped RECORDING, close and respawn with --viewport ${m[1]}x${m[2]})`);
             }
           } else if (k === "tz" || k === "timezone") {
             await (await emuCdp()).send("Emulation.setTimezoneOverride", { timezoneId: v });

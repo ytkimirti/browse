@@ -1,6 +1,6 @@
 # Engines
 
-`BROWSE_ENGINE=camoufox` is the **default**. Camoufox is a Firefox build with
+`--camoufox` is the **default**. Camoufox is a Firefox build with
 fingerprint patches applied in C++; it clears Cloudflare's JS managed challenge
 *headlessly*, which Chromium cannot do at all — its new-headless is handed an
 unsolved `cf_clearance`, and headed Chrome can't be hidden on macOS because
@@ -23,7 +23,7 @@ rejected, the stream stalls, and the session ends with an empty video dir and a
 `close` that blames ffmpeg. `browse setup` re-applies the patch whenever it is
 missing, and says so if it ever stops applying.
 
-Use `BROWSE_ENGINE=chromium` when you need:
+Use `--chromium` when you need:
 
 - a polished demo recording (see below)
 - `browse emulate` (timezone/locale/cpu/network) — CDP-only
@@ -34,9 +34,23 @@ Both raise a clear error under camoufox rather than a Playwright stack trace.
 Under camoufox the three init scripts browse normally injects (cursor overlay,
 keystroke overlay, same-tab popup rewrite) default **off**: they are injected into
 every page, and on a bot-walled site that is the difference between passing and
-not. Force any back on with `BROWSE_CURSOR=1`, `BROWSE_KEYLOG=1`,
-`BROWSE_POPUPS=0`.
+not. Force any back on with `--cursor`, `--keylog`, `--no-popups`.
 
-Camoufox profiles are Firefox-format, so `-p foo` under camoufox uses
-`~/.browse/profiles/foo-camoufox`, separate from the Chromium `foo`. Log in once
-per engine.
+## Profiles are per engine
+
+A Firefox profile and a Chromium user-data dir are incompatible formats, so `-p foo`
+stores two separate logins: `~/.browse/profiles/foo` under chromium and
+`~/.browse/profiles/foo-camoufox` under camoufox. **Log in on the engine you will
+drive with** — a login made under one is invisible to the other, and looks like the
+profile simply lost it.
+
+`browse profiles` folds both dirs back into one row per name and shows which
+engine(s) actually hold a login, so you can see which half you are missing:
+
+```
+gcloud   chromium     9M  3w ago
+stealth  camoufox    73M  4d ago
+```
+
+`browse -p foo clear` wipes both halves; `browse -p foo --camoufox clear` wipes
+just that one. `-p foo-camoufox` is refused — that dir belongs to `foo`.

@@ -6,8 +6,8 @@ working"). For a quick check, `screenshot` + `errors` is enough.
 ## Frame size
 
 Fixed when the browser starts. Default 1280x800. If the app's bottom is clipped,
-or you want a phone-shaped demo, START the session with `BROWSE_VIEWPORT=1280x900`
-/ `=390x844` — the only way to record either, since `emulate viewport=` re-lays-out
+or you want a phone-shaped demo, START the session with `--viewport 1280x900`
+/ `--viewport 390x844` — the only way to record either, since `emulate viewport=` re-lays-out
 the page but leaves the rest of the frame grey. A `screenshot` right after `open`
 catches clipping before you record.
 
