@@ -2385,7 +2385,19 @@ async function daemon() {
     const extra = camou
       ? { executablePath: camouOpts.executable_path,
           env: camouOpts.env,
-          firefoxUserPrefs: camouOpts.firefox_user_prefs }
+          firefoxUserPrefs: {
+            ...camouOpts.firefox_user_prefs,
+            // Firefox paints at the DISPLAY's device pixel ratio by default
+            // (-1 = follow the system), and its video recorder writes those
+            // device pixels straight into the fixed recordVideo frame with no
+            // downscale. Run the same session on a Retina Mac and the whole
+            // recording comes out magnified 2x with the right and bottom of the
+            // page cut off — while `screenshot` stays correct, because that path
+            // rescales to CSS pixels. camoufox spoofs window.devicePixelRatio
+            // for the page regardless, so pinning the PAINT scale to 1 costs no
+            // fidelity and is the only thing that keeps the video honest.
+            "layout.css.devPixelsPerPx": "1",
+          } }
       : {};
     if (PROFILE) {
       // Firefox profiles and Chromium user-data dirs are different formats, so

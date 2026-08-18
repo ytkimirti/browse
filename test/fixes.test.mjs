@@ -324,6 +324,39 @@ try {
     tr.split("\n### ").some((s) => s.split("\n").filter((l) => l.startsWith("- ")).length > 3),
     "no block kept more than 3 lines");
 
+  /* --------------------------------------------- the video covers the viewport */
+  // Firefox paints at the display's device pixel ratio and writes those device
+  // pixels straight into the fixed recordVideo frame, so on a Retina screen the
+  // whole recording came out magnified 2x with the right and bottom of the page
+  // cut off — while every screenshot stayed correct, which is what made it so
+  // hard to see. /corner is green with a blue square pinned bottom-right: sample
+  // that corner out of the last recorded frame and the scale is no longer a
+  // matter of opinion.
+  console.log("\nthe recorded frame covers the whole viewport");
+  {
+    const VID = `${SESSION}-vid`, VIDOUT = mkdtempSync(join(tmpdir(), "browse-vid-"));
+    const vid = (...args) => browseIn(VID, VIDOUT, {}, args);
+    try {
+      vid("open", `${BASE}/corner`);
+      vid("wait", "1500");
+      vid("close", 300000);
+      const mp4 = join(VIDOUT, "recording.mp4");
+      // -sseof reads from the end: the first frames can still be the blank
+      // lead-in, and the corner only exists once the page has painted.
+      const px = spawnSync("ffmpeg", ["-v", "error", "-sseof", "-0.4", "-i", mp4, "-frames:v", "1",
+        "-vf", "crop=2:2:iw-20:ih-20", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        { encoding: "buffer", maxBuffer: 1e6 });
+      const rgb = px.stdout && px.stdout.length >= 3 ? [...px.stdout.subarray(0, 3)] : null;
+      // Blue corner = the frame reaches the bottom-right of the viewport. Green
+      // there = the frame is a magnified crop of the top-left.
+      check("the bottom-right of the page is in the recorded frame",
+        !!rgb && rgb[2] > 150 && rgb[1] < 100,
+        `sampled rgb=${rgb} from ${mp4} (green there means a magnified crop)`);
+    } finally {
+      rmSync(VIDOUT, { recursive: true, force: true });
+    }
+  }
+
   /* ------------------------------------------------- recorded window == viewport */
   // camoufox clamps the window it is asked for to the random screen it drew for
   // the fingerprint, so an unconstrained draw could hand back a 960x525 window
