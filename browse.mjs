@@ -327,7 +327,7 @@ const HEADFUL = process.env.BROWSE_HEADFUL === "1";
 // `BROWSE_ENGINE=chromium` switches back — needed for `emulate` and PDF export,
 // which are CDP-only (see engineSupportsCdp).
 const ENGINE = (process.env.BROWSE_ENGINE || "camoufox").toLowerCase();
-const USING_CAMOUFOX = ENGINE === "camoufox";
+let USING_CAMOUFOX = ENGINE === "camoufox";
 const IDLE_MS = process.env.BROWSE_IDLE_MS === undefined
   ? 30 * 60 * 1000
   : Math.max(0, Number(process.env.BROWSE_IDLE_MS) || 0);
@@ -380,8 +380,8 @@ const KEEP_WEBM = process.env.BROWSE_KEEP_WEBM === "1";
 // because that rewrite is another init script injected into every page, and
 // under camoufox the point is to look like an untouched browser. Set
 // BROWSE_POPUPS=0 to force the same-tab rewrite back on.
-const POPUPS = USING_CAMOUFOX ? process.env.BROWSE_POPUPS !== "0"
-                              : process.env.BROWSE_POPUPS === "1";
+let POPUPS = USING_CAMOUFOX ? process.env.BROWSE_POPUPS !== "0"
+                            : process.env.BROWSE_POPUPS === "1";
 
 /** `browse emulate net=<preset>` - Chrome DevTools' own throttling numbers
  *  (latency in ms, throughput in BYTES/sec). `net=off` clears the override. */
@@ -560,8 +560,8 @@ function logLabel(cmd, args) {
 // page's CSP blocks the inline script and the challenge stalls); with it off it
 // cleared in under 4s. Demo recordings want the cursor, stealth runs do not, so
 // let the engine choose and keep BROWSE_CURSOR=1 as the explicit override.
-const CURSOR = USING_CAMOUFOX ? process.env.BROWSE_CURSOR === "1"
-                              : process.env.BROWSE_CURSOR !== "0";
+let CURSOR = USING_CAMOUFOX ? process.env.BROWSE_CURSOR === "1"
+                            : process.env.BROWSE_CURSOR !== "0";
 /** Commands whose first arg is a selector we glide the cursor to before acting. */
 const ELEMENT_TARGETED = new Set([
   "click", "dblclick", "fill", "type", "press", "drag",
@@ -712,8 +712,26 @@ function cursorInitScript() {
  * to disable. Exposes `window.__browseKeys.type(text)` / `.key(label)`.
  */
 // Same reasoning as CURSOR: injected into every page, so off under camoufox.
-const KEYLOG = USING_CAMOUFOX ? process.env.BROWSE_KEYLOG === "1"
-                              : process.env.BROWSE_KEYLOG !== "0";
+let KEYLOG = USING_CAMOUFOX ? process.env.BROWSE_KEYLOG === "1"
+                            : process.env.BROWSE_KEYLOG !== "0";
+/**
+ * Re-derive the three engine-chosen defaults above once the engine is actually
+ * KNOWN. It is not always the one asked for: camoufox is the default and the
+ * daemon falls back to chromium whenever it is not installed — which is every
+ * box, since a server has no camoufox. Deciding from the REQUESTED engine left
+ * that session with camoufox's stealth defaults on a chromium browser, so the
+ * recording came out with no cursor and no keystrokes and nothing said so. An
+ * explicit BROWSE_CURSOR/KEYLOG/POPUPS still wins: each branch reads the env var.
+ */
+function adoptEngineDefaults(engine) {
+  USING_CAMOUFOX = engine === "camoufox";
+  POPUPS = USING_CAMOUFOX ? process.env.BROWSE_POPUPS !== "0"
+                          : process.env.BROWSE_POPUPS === "1";
+  CURSOR = USING_CAMOUFOX ? process.env.BROWSE_CURSOR === "1"
+                          : process.env.BROWSE_CURSOR !== "0";
+  KEYLOG = USING_CAMOUFOX ? process.env.BROWSE_KEYLOG === "1"
+                          : process.env.BROWSE_KEYLOG !== "0";
+}
 /**
  * Per-keystroke delay (ms) so `fill`/`type` enter text like a person typing —
  * fast, but not an instant paste. BROWSE_TYPE_DELAY overrides (0 = instant). The
@@ -2928,6 +2946,9 @@ async function daemon() {
     ({ browser, context } = await launchWith(engine));
   }
   context.__engine = engine; // read by the CDP-only guards below
+  // Both fallbacks above can have changed the engine out from under the
+  // overlay defaults; this is the last point before they are acted on.
+  adoptEngineDefaults(engine);
   context.__engineNote = engineNote; // surfaced once, on the first `open`
   // Draw the animated cursor + keystroke overlay into every page (before the
   // page's own scripts run, and re-run on each navigation) so the recording shows
