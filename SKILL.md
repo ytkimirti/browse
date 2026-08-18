@@ -63,8 +63,10 @@ blank, connection-refused, or a framework error overlay.
   BEFORE opening: a saved login that quietly expired is the most common way a
   run dies, and that check costs no browser and no recording.
 - **Launch flags** (`--headful`, `--chromium`, `--viewport`, …) only on the
-  command that OPENS the session. On a live one browse refuses rather than
-  ignoring them, so a wrong frame size means close and re-open.
+  command that STARTS the session — which is whichever one you run first, so an
+  `init` or `middleware` registered before `open` is the one that carries them.
+  On a live session browse refuses rather than ignoring them, so a wrong frame
+  size means close and re-open.
 
 ## Recording
 

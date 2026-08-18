@@ -22,6 +22,13 @@
 - **An empty `text`/`snapshot` is usually hydration, not a blank page.** Both
   give a still-loading page a short settle and then say whether it stayed empty;
   if it did, check `url` and `errors` before concluding the app is broken.
+- **Clicks timing out on camoufox while other camoufox sessions are running.**
+  Seen at roughly 1 in 15 sessions under parallel load and never on an idle
+  machine (17/18 and 16/16 clean in back-to-back runs). The locator resolves and
+  `elementFromPoint` returns it, but the click never lands, and the session never
+  recovers - `goto`, `eval` and `scroll` keep working, only pointer input is
+  dead. Close that session and open a new one, or run it under `--chromium`;
+  retrying inside the same session does not help.
 - `browse` needs Node 18+ on PATH; Playwright auto-installs on the first run into
   `~/.browse/` and Chromium into Playwright's shared cache (one-time, ~2 min —
   pre-install with `browse setup`, which is also the repair command;

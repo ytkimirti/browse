@@ -178,12 +178,20 @@ console.log("\nbrowse -p <name> clear");
   check("clearing a profile that does not exist is a no-op, exit 0",
     r.code === 0 && /no.*profile 'nosuch'/.test(r.out), `${r.code} ${r.out}`);
 
-  // A live browser's lock file must stop the delete — wiping the dir under a
-  // running browser corrupts it.
-  writeFileSync(join(HOME, "profiles", "acme", "SingletonLock"), "");
+  // A LIVE SESSION must stop the delete — wiping the dir under a running browser
+  // corrupts it. Liveness is the run file the daemon stamps with its profile,
+  // engine and pid: chromium leaves no SingletonLock behind at all, and firefox's
+  // .parentlock outlives a clean shutdown, so the engines' own lock files said
+  // "open" for a dead profile and "free" for a live one.
+  mkdirSync(join(HOME, "run"), { recursive: true });
+  writeFileSync(join(HOME, "run", "acmesess.json"),
+    JSON.stringify({ port: 1, pid: process.pid, out: OUT, profile: "acme", engine: "chromium" }));
   r = browse("-p", "acme", "clear");
-  check("refuses while a half looks open", r.code === 1 && /looks open/.test(r.err), `${r.code} ${r.err}`);
+  check("refuses while a live session is driving it", r.code === 1 && /live session is driving/.test(r.err), `${r.code} ${r.err}`);
   check("…and deletes nothing", existsSync(join(HOME, "profiles", "acme-camoufox")), "camoufox half gone");
+  // Dead pid in the run file = not live, so the guard must let go again.
+  writeFileSync(join(HOME, "run", "acmesess.json"),
+    JSON.stringify({ port: 1, pid: 2147480000, out: OUT, profile: "acme", engine: "chromium" }));
   spawnSync("rm", [join(HOME, "profiles", "acme", "SingletonLock")]);
 
   r = browse("-p", "acme", "--camoufox", "clear");

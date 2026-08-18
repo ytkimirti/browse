@@ -203,11 +203,27 @@ const PROFILES_DIR = join(BROWSE_HOME, "profiles");
 function profileDir(name, engine) {
   return join(PROFILES_DIR, engine === "camoufox" ? name + CAMOU_SUFFIX : name);
 }
-/** The lock a LIVE browser leaves in its own profile dir. Chromium's is a
- *  (usually dangling) symlink, so both are probed via readdir rather than stat. */
-const ENGINE_LOCK = { chromium: "SingletonLock", camoufox: ".parentlock" };
-function profileOpen(dir, engine) {
-  try { return readdirSync(dir).includes(ENGINE_LOCK[engine]); } catch { return false; }
+/**
+ * Is a LIVE browse session driving this profile right now? Asked of the run
+ * files, which the daemon stamps with the profile + engine it launched, and
+ * checked by pid.
+ *
+ * The obvious probe - the engine's own lock file - is wrong in BOTH directions
+ * and was: Playwright's chromium persistent context writes no `SingletonLock`
+ * at all (so a live, logged-in profile read as "no cookies"), while firefox's
+ * `.parentlock` survives a clean shutdown on macOS (so `clear` refused forever
+ * after the profile's first use, and the only way out was `rm -rf`).
+ */
+function profileBusy(name, engine) {
+  let files = [];
+  try { files = readdirSync(RUN_DIR).filter((f) => f.endsWith(".json")); } catch { return false; }
+  for (const f of files) {
+    try {
+      const info = JSON.parse(readFileSync(join(RUN_DIR, f), "utf8"));
+      if (info.profile === name && info.engine === engine && pidAlive(info.pid)) return true;
+    } catch { /* half-written or stale — not evidence of a live browser */ }
+  }
+  return false;
 }
 const humanSize = (kb) => kb >= 1048576 ? `${(kb / 1048576).toFixed(1)}G`
   : kb >= 1024 ? `${Math.round(kb / 1024)}M` : `${kb}K`;
@@ -256,7 +272,7 @@ function profileStat(dir) {
  *  only by opening the app and reading the page it redirected to.
  *  Hosts and expiries only: cookie VALUES are never read, so nothing secret
  *  comes back. Returns null when it cannot tell (no sqlite3, no db yet). */
-function profileCookies(dir, engine) {
+function profileCookies(dir, engine, name) {
   const db = engine === "camoufox" ? join(dir, "cookies.sqlite") : join(dir, "Default", "Cookies");
   if (!existsSync(db)) return null;
   // Chromium stores microseconds since 1601, firefox seconds (camoufox: ms) since
@@ -266,10 +282,17 @@ function profileCookies(dir, engine) {
     : "select host_key, expires_utc from cookies";
   let out = "";
   try {
-    const r = spawnSync("sqlite3", ["-readonly", db, sql], { encoding: "utf8", timeout: 10000 });
-    if (r.error || r.status !== 0) return null;
+    // `?immutable=1`, not `-readonly`: a plain read-only open FAILS on a db a
+    // running browser holds ("database is locked"), and also on a cleanly closed
+    // firefox profile whose -wal/-shm sidecars are gone ("unable to open database
+    // file"). Both are the normal state of a real profile, which made this whole
+    // feature unusable on camoufox - the DEFAULT engine - while blaming a missing
+    // sqlite3. immutable promises we will not write and skips the locking layer.
+    const r = spawnSync("sqlite3", [`file:${db}?immutable=1`, sql], { encoding: "utf8", timeout: 10000 });
+    if (r.error && r.error.code === "ENOENT") return null; // no sqlite3 on this machine
+    if (r.error || r.status !== 0) return { unreadable: (r.stderr || "").trim().split("\n")[0] || "sqlite3 could not read it", hosts: [], live: 0 };
     out = r.stdout || "";
-  } catch { return null; } // no sqlite3 on this machine
+  } catch { return null; }
   const byHost = new Map();
   for (const line of out.split("\n")) {
     if (!line.trim()) continue;
@@ -293,12 +316,11 @@ function profileCookies(dir, engine) {
   // as a login this profile still holds.
   const hosts = [...byHost].map(([host, ms]) => ({ host, ms, live: ms > now }));
   hosts.sort((a, b) => a.host.localeCompare(b.host));
-  // A browser that is running has not flushed its cookies to disk yet, so an
-  // EMPTY read from a profile that is open means "cannot tell", not "logged out"
-  // - and "logged out" is the one answer that would send an agent off to redo a
-  // login it already has. Read first anyway: the lock file survives a killed
-  // browser, so trusting it alone would hide real logins.
-  if (!hosts.length && profileOpen(dir, engine)) return { open: true, hosts, live: 0 };
+  // A running browser keeps recent cookies in memory, so an EMPTY read from a
+  // profile that is open right now means "cannot tell yet", not "logged out" -
+  // and "logged out" is the one answer that sends an agent off to redo a login
+  // it already has.
+  if (!hosts.length && profileBusy(name, engine)) return { open: true, hosts, live: 0 };
   return { open: false, hosts, live: hosts.filter((h) => h.live).length };
 }
 
@@ -317,7 +339,7 @@ function scanProfiles() {
     if (!byName.has(name)) byName.set(name, { name, engines: [] });
     const engine = camou ? "camoufox" : "chromium";
     const stat = profileStat(join(PROFILES_DIR, d));
-    if (stat) byName.get(name).engines.push({ engine, ...stat, dir: join(PROFILES_DIR, d), cookies: profileCookies(join(PROFILES_DIR, d), engine) });
+    if (stat) byName.get(name).engines.push({ engine, ...stat, dir: join(PROFILES_DIR, d), cookies: profileCookies(join(PROFILES_DIR, d), engine, name) });
   }
   for (const p of byName.values()) p.engines.sort((a, b) => a.engine.localeCompare(b.engine));
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -633,6 +655,9 @@ const NAV_TAKES = Object.assign(Object.create(null), {
 /** Urls that read as an auth wall. Deliberately broad on the path (/login,
  *  /sign-in, /auth/…) and on the well-known identity hosts, since the point is
  *  to say "your saved login is dead" one command earlier, not to be precise. */
+/** What a console message with a non-primitive argument looks like once an
+ *  engine has rendered it: firefox's handle, or chromium's collapsed preview. */
+const OBJECT_ARG_RE = /JSHandle@|\{[^}]*\}|\bArray\(\d+\)|\[object /;
 const AUTH_WALL_RE = /(\/(sign[-_]?in|sign[-_]?up|login|logon|auth|oauth|sso)(\/|\?|$)|accounts\.google\.|\.clerk\.accounts\.|clerk\.com|okta\.com|auth0\.com|login\.microsoftonline\.com|vercel\.com\/sso|github\.com\/login)/i;
 
 /**
@@ -922,8 +947,9 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
   browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser + recording
   browse goto <url>                 navigate. open/goto/reload/goBack/goForward take --timeout <ms>
                                     (default 20000, and the client waits it out) — raise it for a dev
-                                    server compiling a route on first hit. A url that looks like a
-                                    sign-in wall is called out inline.
+                                    server compiling a route on first hit. goBack/goForward FAIL when
+                                    there is nowhere to go. A landing url that looks like a sign-in
+                                    wall is called out inline, here and after a click.
   browse click <selector>           click an element
   browse dblclick <selector>        double-click an element
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
@@ -969,9 +995,10 @@ Observe (do these often — this is your "check" step):
                                     the log/info/warn sibling of 'errors' (which is only the alarm).
                                     Captured from the first command, so a log fired during page load
                                     is there; past 5000 messages the OLDEST are dropped and the count
-                                    is reported. Object arguments are resolved to JSON. A %c-styled
-                                    log shows its format string, and its CSS arguments on chromium
-                                    only — firefox/camoufox drops them before browse can see them.
+                                    is reported. --last defaults to 40 (--all for every one), a very
+                                    long line is cut with a note, and object arguments are resolved to
+                                    real JSON on both engines. A %c-styled log keeps its CSS arguments
+                                    on chromium; firefox/camoufox applies the styling and drops them.
   browse screenshot [name] [--full] [--sel <selector>]
                                     save a screenshot into the session dir. --full captures the whole
                                     scrollable page (without moving it, so the recording is untouched),
@@ -1349,13 +1376,25 @@ function netCommand(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i];
+    const netVal = (flag) => {
+      const v = argv[++i];
+      if (v == null || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value — run \`browse help\``); }
+      return v;
+    };
+    const netNum = (flag) => {
+      const n = Number(netVal(flag));
+      // `net --since abc` used to become NaN and answer "no matching requests",
+      // which is the same output as a real empty result.
+      if (!Number.isFinite(n) || n < 0) throw new Error(`net: ${flag} wants a number — run \`browse help\``);
+      return n;
+    };
     if (a === "-m" || a === "--method") method = String(next() || "").toLowerCase();
     else if (a === "-t" || a === "--type") type = String(next() || "").toLowerCase();
     else if (a === "--status") status = next(); // not `-s`: that's the global session flag
     else if (a === "-d" || a === "--host") host = next();
     else if (a === "--grep") grep = next();
-    else if (a === "--since") since = Number(next());
-    else if (a === "-n" || a === "--last") last = Number(next());
+    else if (a === "--since") since = netNum(a);
+    else if (a === "-n" || a === "--last") last = netNum(a);
     else if (a === "--all") last = 0;
     else if (a === "--failed" || a === "--errors") failed = true;
     else if (a === "-v" || a === "--full") full = true;
@@ -1394,7 +1433,10 @@ function netCommand(argv) {
   // the footer: a filter you cannot see is how you conclude a request never
   // happened when it did.
   let hiddenStatic = 0, onlyStatic = false;
-  if (pattern && !type && !allTypes) {
+  // Not when the query is already narrowed to failures or a status: a 404ing
+  // bundle is exactly what `net <name> --failed` is for, and hiding it there
+  // would answer "nothing failed" about the thing that broke the page.
+  if (pattern && !type && !allTypes && !failed && !status) {
     const kept = list.filter((e) => !NET_STATIC_TYPES.has(String(e.type || "").toLowerCase()));
     // If the pattern matched NOTHING else, the assets ARE the answer ('net .png',
     // 'net chunk-4f2'): hiding them would turn a good query into "no matching
@@ -1406,7 +1448,7 @@ function netCommand(argv) {
   const matched = list.length;
   // --stats summarizes EVERYTHING that matched the filters; --last only trims
   // the listing (a summary of "the last 30" would just misreport the session).
-  const hiddenNote = hiddenStatic ? `${hiddenStatic} static asset${hiddenStatic > 1 ? "s" : ""} matched and are NOT counted here (--all-types includes them)` : "";
+  const hiddenNote = hiddenStatic ? `${hiddenStatic} static asset${hiddenStatic > 1 ? "s matched and are" : " matched and is"} NOT counted here (--all-types includes them)` : "";
   // A summary that silently leaves out 60% of what matched is worse than no
   // summary, and --json is piped into jq where a missing line is invisible - so
   // the note goes to stderr there, keeping the stream itself machine-clean.
@@ -1425,7 +1467,7 @@ function netCommand(argv) {
       : list.map(netLine).join("\n");
   process.stdout.write(body + "\n");
   if (!json) {
-    const more = matched > list.length ? ` (of ${matched} matching, ${all.length} logged; --last 0 for all)` : ` of ${all.length} logged`;
+    const more = matched > list.length ? ` (of ${matched} matching, ${all.length} logged; --all for every one)` : ` of ${all.length} logged`;
     const hid = hiddenStatic ? ` · ${hiddenStatic} static asset${hiddenStatic > 1 ? "s" : ""} hidden (--all-types)`
       : onlyStatic ? " · all static assets — shown because nothing else matched" : "";
     process.stdout.write(`— ${list.length} shown${more}${hid} · ${netFileIn(sessionDir)}\n`);
@@ -1533,9 +1575,13 @@ async function ensureDaemon() {
  *  ceiling turned `goto --timeout 150000` into "command timed out" at 2 minutes,
  *  i.e. the flag help offers for a slow first compile could not actually be used
  *  past two minutes. Plus a margin for the browser to answer afterwards. */
-function postTimeout(args) {
+function postTimeout(cmd, args) {
   const i = args.indexOf("--timeout");
-  const n = i >= 0 ? Number(args[i + 1]) : NaN;
+  // `browse wait 130000` carries its duration as a bare argument, with no flag to
+  // find - and it was the one form that still died client-side at 120s while the
+  // daemon happily kept waiting.
+  const bare = cmd === "wait" && /^\d+$/.test(String(args[0] ?? "")) ? Number(args[0]) : NaN;
+  const n = Math.max(i >= 0 ? Number(args[i + 1]) : NaN, bare) || (i >= 0 ? Number(args[i + 1]) : bare);
   return Number.isFinite(n) && n > 90_000 ? n + 30_000 : 120_000;
 }
 
@@ -1736,8 +1782,15 @@ async function client(argv) {
     try {
       for (const f of readdirSync(RUN_DIR).filter((x) => x.endsWith(".json.lock"))) {
         const path = join(RUN_DIR, f);
-        try { if (!pidAlive(Number(String(readFileSync(path, "utf8")).trim()))) rmSync(path, { force: true }); }
-        catch { /* vanished under us — fine, that was the goal */ }
+        try {
+          const raw = String(readFileSync(path, "utf8")).trim();
+          const holder = Number(raw);
+          // Unparseable content means a spawner caught mid-write, which pidAlive
+          // deliberately treats as alive - but only for the 90s it could still be
+          // writing. Past that it is litter like any other.
+          const stale = !raw || !Number.isInteger(holder) ? Date.now() - statSync(path).mtimeMs > 90_000 : !pidAlive(holder);
+          if (stale) rmSync(path, { force: true });
+        } catch { /* vanished under us — fine, that was the goal */ }
       }
     } catch { /* no run dir yet */ }
     const lines = [];
@@ -1782,7 +1835,8 @@ async function client(argv) {
           const c = e.cookies;
           out.push(`${p.name}  ${e.engine}  ${e.size}  last written ${e.used}`);
           if (!c) { out.push("  (cannot read this profile's cookie db — needs sqlite3 on PATH)"); continue; }
-          if (c.open) { out.push("  a browser has this profile OPEN, so its cookies are not on disk yet — 'browse close' first"); continue; }
+          if (c.unreadable) { out.push(`  (cookie db unreadable: ${c.unreadable})`); continue; }
+          if (c.open) { out.push("  a live session is driving this profile and its newest cookies are still in memory — 'browse close' first"); continue; }
           if (!c.hosts.length) { out.push("  no cookies at all — nothing is logged in here"); continue; }
           for (const h of c.hosts.slice(0, 60)) {
             const when = h.ms === 0 ? "session cookie — dies on close, so it is NOT a saved login"
@@ -1805,7 +1859,8 @@ async function client(argv) {
       }
       p.engines.forEach((e, i) => {
         const c = e.cookies;
-        const logins = !c ? "cookies: ?" : c.open ? "in use — cannot read its cookies" : c.live ? `${c.live} host${c.live > 1 ? "s" : ""} logged in` : "no live cookies";
+        const logins = !c ? "cookies: ? (no sqlite3)" : c.unreadable ? "cookies: ? (db unreadable)"
+          : c.open ? "in use — cannot tell yet" : c.live ? `${c.live} host${c.live > 1 ? "s" : ""} logged in` : "no live cookies";
         out.push(`${(i ? "" : p.name).padEnd(nameW)}  ${e.engine.padEnd(8)}  ${e.size.padStart(5)}  ${String(e.used).padEnd(9)}  ${logins}`);
       });
     }
@@ -1832,9 +1887,9 @@ async function client(argv) {
       process.stdout.write(`(no ${only ? `${only} ` : ""}profile '${PROFILE}' to clear)\n`);
       return 0;
     }
-    const open = halves.filter(({ dir, engine }) => profileOpen(dir, engine));
+    const open = halves.filter(({ engine }) => profileBusy(PROFILE, engine));
     if (open.length) {
-      process.stderr.write(`browse: profile '${PROFILE}' looks open (${open.map((h) => h.engine).join(", ")}) — run \`browse -p ${PROFILE} close\` first, then retry.\n`);
+      process.stderr.write(`browse: a live session is driving profile '${PROFILE}' (${open.map((h) => h.engine).join(", ")}) — \`browse sessions\` shows which, close it first.\n`);
       return 1;
     }
     for (const { dir } of halves) rmSync(dir, { recursive: true, force: true });
@@ -1890,7 +1945,8 @@ async function client(argv) {
     const s = SESSION === "default" ? "" : ` -s ${SESSION}`;
     process.stderr.write(
       `browse: ${launchSeen.join(" ")} only applies when the browser starts, and session '${SESSION}' is already live.\n` +
-      `        Run \`browse${s} close\` and re-open with the flag, or start a separate session with -s <name>.\n`);
+      `        The FIRST command of a session starts it (an 'init' or a 'middleware' before 'open' counts),\n` +
+      `        so the flag belongs on that one. Run \`browse${s} close\` and re-open with it, or use -s <name>.\n`);
     return 1;
   }
   const d = await ensureDaemon();
@@ -1898,7 +1954,7 @@ async function client(argv) {
   // the session was first opened from - a relative path would resolve against a
   // directory the caller never chose. Resolve it here, where the cwd is theirs.
   const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
-  const res = await post(d.port, { cmd, args }, postTimeout(args));
+  const res = await post(d.port, { cmd, args }, postTimeout(cmd, args));
   if (res.ok) {
     if (res.result != null && res.result !== "") process.stdout.write(String(res.result) + "\n");
     return 0;
@@ -2694,36 +2750,63 @@ async function daemon() {
   // timeline at close (see writeChapters).
   const stepMarks = []; // { t, cmd }
 
+  // Entries, not strings: a console message whose object arguments resolve a beat
+  // later has to update wherever it was already recorded, and `errors` is the
+  // surface an agent reads most (it is appended to every command's output).
   const errors = [];
-  const noteErr = (s) => { if (errors.length < 200) errors.push(s); };
+  const noteErr = (s) => {
+    if (errors.length >= 200) return null;
+    const e = { text: s };
+    errors.push(e);
+    return e;
+  };
   // Every console message the page produced, in order, queryable after the fact
   // like the network log is. Capped: a dev server in a reload loop can log tens
   // of thousands of lines, and the cap is reported rather than silently applied.
   const consoleLog = [];
   const CONSOLE_MAX = 5000;
   let consoleDropped = 0, consoleSeq = 0;
+  /** In-flight argument resolutions. A command waits (briefly) for these before
+   *  reporting errors, so the INLINE "new page errors" block - the surface an
+   *  agent actually reads - carries the same resolved text `browse console` and
+   *  `browse errors` will show a moment later, instead of the engine's preview. */
+  const pendingArgs = new Set();
+  async function settleConsoleArgs() {
+    if (!pendingArgs.size) return;
+    await Promise.race([
+      Promise.allSettled([...pendingArgs]),
+      new Promise((r) => setTimeout(r, 300)),
+    ]);
+  }
   /** Record one console message. A RING buffer: past the cap the OLDEST go, not
    *  the newest - keeping the first 5000 forever meant that after one HMR loop
    *  (the very case a cap exists for) nothing the agent did afterwards could ever
    *  appear, and `console --grep` answered "never logged" about a line that had
    *  just fired. `i` keeps counting so `--since <#>` stays meaningful. */
-  function noteConsole(level, m) {
+  function noteConsole(level, m, errEntry) {
     const entry = { i: ++consoleSeq, t: now(), level, text: m.text() };
     consoleLog.push(entry);
     while (consoleLog.length > CONSOLE_MAX) { consoleLog.shift(); consoleDropped++; }
-    // Firefox (camoufox) hands object arguments over as unresolved handles, so
-    // m.text() reads `obj JSHandle@object` where chromium prints the object.
-    // Resolve them in the background and patch the entry in place - console
-    // output is read by a LATER command, so this is settled by the time anyone
-    // looks, and a failure just leaves the original text.
-    if (entry.text.includes("JSHandle@")) {
-      Promise.all(m.args().map((a) => a.jsonValue().then((v) => (typeof v === "string" ? v : JSON.stringify(v)), () => null)))
-        .then((vals) => {
-          if (vals.some((v) => v == null)) return;
-          entry.text = vals.join(" ");
-        })
-        .catch(() => { /* page went away mid-resolve */ });
-    }
+    // Neither engine renders an object argument usefully: firefox gives
+    // `JSHandle@object`, chromium a one-level DevTools preview
+    // (`{a: Object, list: Array(12)}`) that drops everything nested. Both lose
+    // the data the agent logged the object FOR. Resolve the real arguments and
+    // patch the entry (and its error twin) in place - a later command does the
+    // reading, so this is settled by the time anyone looks, and a failure leaves
+    // the original text. Only for messages that look like they contain one, and
+    // never so many at once that a logging flood becomes a CDP flood.
+    if (!OBJECT_ARG_RE.test(entry.text) || pendingArgs.size >= 64) return;
+    const job = Promise.all(m.args().map((a) => a.jsonValue().then(
+      (v) => (typeof v === "string" ? v : JSON.stringify(v)),
+      () => null)))
+      .then((vals) => {
+        if (!vals.length || vals.some((v) => v == null)) return;
+        entry.text = vals.join(" ");
+        if (errEntry) errEntry.text = "console: " + entry.text;
+      })
+      .catch(() => { /* page went away mid-resolve */ })
+      .finally(() => { pendingArgs.delete(job); });
+    pendingArgs.add(job);
   }
   // `browse init` registrations: { i, src, label, disposable }. Numbered, not
   // keyed by source - two "same" snippets are two rules and each has to be
@@ -2789,14 +2872,14 @@ async function daemon() {
   function wirePage(p) {
     p.on("console", (m) => {
       const type = m.type();
-      if (type === "error") noteErr("console: " + m.text());
+      const errEntry = type === "error" ? noteErr("console: " + m.text()) : null;
       // Everything the page logs, not just what it failed on: `browse errors` is
       // the alarm, `browse console` is the log. Whole sessions have been spent
       // proving a console.log fires, and the only way to see one was to monkey-
       // patch console from eval - which cannot see anything logged before it.
       // m.text() renders the raw argument list, so a %c-styled log shows its
       // format string and its CSS args rather than DevTools' rendering.
-      noteConsole(type, m);
+      noteConsole(type, m, errEntry);
     });
     p.on("pageerror", (e) => noteErr("pageerror: " + (e?.message || e)));
     // An unanswered alert/confirm/prompt BLOCKS the page, so without this the
@@ -3180,7 +3263,11 @@ async function daemon() {
    *  Only args[0] — a fill's VALUE is data (often a credential) and has no
    *  business in a filename. */
   function shotSlug(cmd, args) {
-    let raw = String((args && args[0]) ?? "");
+    // The first NON-FLAG argument. `goBack --timeout 30000` used to produce
+    // step-07-goBack-timeout.png, which reads as "goBack timed out" - a shot
+    // name that reports a failure the command never had.
+    const first = (args || []).find((a) => !String(a).startsWith("-"));
+    let raw = String(first ?? "");
     if (!raw) return "";
     if (cmd === "goto" || cmd === "open") {
       // The host+path is what identifies the shot; the scheme and query are noise.
@@ -3231,6 +3318,7 @@ async function daemon() {
    *  is blank" (which has cost a round trip in session after session) turns into
    *  either real content or a line saying what browse actually waited for. */
   async function readSettled(read, budgetMs = 3000) {
+    const startedAt = Date.now();
     let out = await read();
     if (String(out ?? "").trim()) return { out, note: "" };
     // The load-state wait gets its own budget, and the poll ALWAYS gets a full
@@ -3245,7 +3333,7 @@ async function daemon() {
       if (String(out ?? "").trim()) return { out, note: "" };
       await page.waitForTimeout(250);
     } while (Date.now() < deadline);
-    return { out, note: `\nnote: still empty after a ${budgetMs}ms settle - the page may be mid-load/hydration (check 'browse url' + 'browse errors'), or this element really is empty` };
+    return { out, note: `\nnote: still empty after waiting ${Math.round((Date.now() - startedAt) / 100) / 10}s for load + content - the page may be mid-load/hydration (check 'browse url' + 'browse errors'), or this element really is empty` };
   }
 
   async function brief() {
@@ -3653,8 +3741,20 @@ async function daemon() {
       if (cmd === "reload" || cmd === "goBack" || cmd === "goForward") {
         // The same explicit default as open/goto rather than the context default,
         // so the one number in help is true for every navigation verb.
-        await page[cmd]({ timeout: timeout || 20000 });
-        return `ok - ${await brief()}`;
+        const wasAt = page.url();
+        const res = await page[cmd]({ timeout: timeout || 20000 });
+        // "Did we move?" is the url, not the return value: chromium answers null
+        // when there is nothing in that direction, but firefox answers null for a
+        // back/forward it DID perform (a bfcache hit produces no response), so
+        // trusting the return alone would fail a navigation that worked. Saying
+        // "ok" when nothing moved is the lie worth catching - the agent believes
+        // it went back, and the step screenshot is identical to the last one.
+        if (res === null && cmd !== "reload" && page.url() === wasAt) {
+          throw new Error(`${cmd}: did not move - still on ${page.url()}. Either there is nothing to go ` +
+            `${cmd === "goBack" ? "back" : "forward"} to, or the engine refused (firefox/camoufox often ignores ` +
+            `history navigation) - navigate with 'browse goto <url>' instead.`);
+        }
+        return `ok - ${await brief()}${authWallNote(page.url())}`;
       }
       if (cmd === "goto" && !url) throw new Error(`goto: needs a url, e.g. browse goto ${APP_DEFAULT}/settings`);
       await page.goto(url || APP_DEFAULT, { waitUntil: "domcontentloaded", timeout: timeout || 20000 });
@@ -3735,6 +3835,7 @@ async function daemon() {
           `${String(extra).startsWith("-") ? ". Per-command timeouts live on 'browse wait <selector> --timeout <ms>'" : ""}`);
       }
       if (ELEMENT_TARGETED.has(cmd)) {
+        const before = page.url();
         // `browse press Escape` - one arg, so there is no selector: send the key
         // to the page itself (Escape, Tab, "Meta+k" …).
         if (cmd === "press" && args.length === 1) {
@@ -3779,7 +3880,15 @@ async function daemon() {
         // Let the popup land (context.on("page") switches to it) so this command
         // reports where the session actually IS, with its note attached.
         if (expectPopup) await context.waitForEvent("page", { timeout: 3000 }).catch(() => { /* never opened */ });
-        return `ok - ${await brief()}${target.note}`;
+        // A click that navigates resolves BEFORE the new document commits, so the
+        // reply used to name the page the agent just left - which reads as "the
+        // click did nothing" and cost a `browse url` turn every single time.
+        // Cheap: only click-likes, only a short grace, and only when the click
+        // actually started a navigation.
+        if (CLICK_LIKE.has(cmd)) {
+          await page.waitForLoadState("domcontentloaded", { timeout: 2000 }).catch(() => { /* no navigation, or slower than the grace */ });
+        }
+        return `ok - ${await brief()}${target.note}${CLICK_LIKE.has(cmd) ? authWallNote(before) : ""}`;
       }
       if (typeof page[cmd] !== "function") throw new Error(`page has no method '${cmd}'`);
       await page[cmd](...coerce(cmd, args));
@@ -3802,8 +3911,12 @@ async function daemon() {
       case "title": return await page.title();
       case "url": return page.url();
       case "content": return clipForRead(await page.content(), "content", "use 'browse text <selector>' or 'browse eval' for the part you need");
-      case "errors": return errors.length ? errors.join("\n") : "(no console/page errors)";
+      case "errors": {
+        await settleConsoleArgs();
+        return errors.length ? errors.map((e) => e.text).join("\n") : "(no console/page errors)";
+      }
       case "console": {
+        await settleConsoleArgs();
         // The log/info/warn/debug sibling of `errors`. Filters mirror `net`'s
         // (--since <#>, --grep, --last) so one mental model covers both logs.
         let level = null, grep = null, since = null, last = 40;
@@ -3831,7 +3944,25 @@ async function daemon() {
           else if (a === "--all") last = 0;
           else throw new Error(`console: unknown argument '${a}' - ${USAGE}`);
         }
-        const levels = level ? level.split(",").map((x) => x.trim()).filter(Boolean) : null;
+        // Firefox says "warning", chromium says "warning" too but everyone TYPES
+        // "warn" (it is what help used to print and what console.warn is called).
+        // Alias both ways rather than answering "(no messages matched)" about a
+        // level that does exist - an unvalidated level looked exactly like a
+        // quiet page.
+        const LEVEL_ALIAS = { warn: "warning", warning: "warning", err: "error", error: "error", log: "log", info: "info", debug: "debug", trace: "trace", dir: "dir", table: "table", assert: "assert", count: "count", timeEnd: "timeEnd", startGroup: "startGroup", endGroup: "endGroup" };
+        let levels = null;
+        if (level) {
+          levels = [];
+          for (const raw of level.split(",").map((x) => x.trim()).filter(Boolean)) {
+            const seen = [...new Set(consoleLog.map((e) => e.level))];
+            const mapped = LEVEL_ALIAS[raw] || LEVEL_ALIAS[raw.toLowerCase()];
+            if (!mapped && !seen.includes(raw)) {
+              throw new Error(`console: '${raw}' is not a console level - try log, info, warn, error, debug` +
+                `${seen.length ? ` (this session has logged: ${seen.join(", ")})` : ""}`);
+            }
+            levels.push(mapped || raw);
+          }
+        }
         const grepMatch = grep ? netMatcher(grep) : null;
         let list = consoleLog.filter((e) =>
           (!levels || levels.includes(e.level)) &&
@@ -3839,12 +3970,23 @@ async function daemon() {
           (!grepMatch || grepMatch(e.text)));
         const matched = list.length;
         if (!matched) {
+          const dropped = consoleDropped ? `, ${consoleDropped} older ones already dropped past the ${CONSOLE_MAX} cap` : "";
           return consoleLog.length
-            ? `(no console messages matched - ${consoleLog.length} logged this session)`
+            ? `(no console messages matched - ${consoleLog.length} kept this session${dropped})`
             : "(no console messages yet)";
         }
         if (last > 0 && list.length > last) list = list.slice(-last);
-        const lines = list.map((e) => `#${e.i} ${e.t.toFixed(1)}s  ${e.level.padEnd(7)} ${e.text}`);
+        // One serialized API response is enough to blow past every budget, so each
+        // LINE is capped before the whole body is: without this a single 50 KB
+        // log escaped the clip entirely and landed in the agent's context whole.
+        const LINE_MAX = 2000;
+        const lines = list.map((e) => {
+          const head = `#${e.i} ${e.t.toFixed(1)}s  ${e.level.padEnd(7)} `;
+          const text = e.text.length > LINE_MAX
+            ? `${e.text.slice(0, LINE_MAX)}…[+${e.text.length - LINE_MAX} chars, read it whole with 'browse eval']`
+            : e.text;
+          return head + text;
+        });
         // Clipped from the FRONT, unlike every other read: a log is read for what
         // happened last, and keeping the head of `--all` would hand back the
         // oldest lines and cut the ones the command just produced.
@@ -3914,13 +4056,25 @@ async function daemon() {
         // a navigation, or a plain pause. It is ALSO the assertion - a wait that
         // never resolves throws, which the client turns into a non-zero exit.
         let sel = null, gone = false, url = null, timeout = 10000, text = null, notText = null;
+        // Every flag's VALUE is required. `wait "#x" --text` used to drop the flag
+        // and fall back to a plain visibility wait that PASSED - the assertion
+        // command silently asserting nothing is the worst failure in the tool.
+        const need = (flag, i) => {
+          const v = args[i];
+          if (v == null || String(v).startsWith("--")) throw new Error(`wait: ${flag} needs a value - try [selector|ms] [--gone] [--text <substring>] [--not-text <substring>] [--url <pattern>] [--timeout <ms>]`);
+          return v;
+        };
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
           if (a === "--gone") gone = true;
-          else if (a === "--url") url = args[++i];
-          else if (a === "--text") text = args[++i];
-          else if (a === "--not-text") notText = args[++i];
-          else if (a === "--timeout") timeout = Number(args[++i]) || timeout;
+          else if (a === "--url") url = need(a, ++i);
+          else if (a === "--text") text = need(a, ++i);
+          else if (a === "--not-text") notText = need(a, ++i);
+          else if (a === "--timeout") {
+            const ms = Number(need(a, ++i));
+            if (!Number.isFinite(ms) || ms <= 0) throw new Error(`wait: --timeout wants milliseconds, e.g. --timeout 30000`);
+            timeout = ms;
+          }
           // Without this a retired spelling (--hidden, -t) would be taken as the
           // SELECTOR and fail ten seconds later as a mystery timeout.
           else if (a.startsWith("-")) throw new Error(`wait: unknown flag '${a}' - try [selector|ms] [--gone] [--text <substring>] [--not-text <substring>] [--url <pattern>] [--timeout <ms>]`);
@@ -4413,10 +4567,17 @@ async function daemon() {
         let src = null, file = null, clear = false, remove = null, label = null;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
+          const initNeed = (flag, i) => {
+            const v = args[i];
+            // Without this, `init --remove` (no #) fell through to the LISTING and
+            // exited 0, so "nothing was removed" read as "removed".
+            if (v == null || String(v).startsWith("--")) throw new Error(`init: ${flag} needs a value - try init <js> | --file <path> | --label <name> | --remove <#> | --clear`);
+            return v;
+          };
           if (a === "--clear") clear = true;
-          else if (a === "--remove") remove = args[++i];
-          else if (a === "--file") file = args[++i];
-          else if (a === "--label") label = args[++i];
+          else if (a === "--remove") remove = initNeed(a, ++i);
+          else if (a === "--file") file = initNeed(a, ++i);
+          else if (a === "--label") label = initNeed(a, ++i);
           else if (a.startsWith("--")) throw new Error(`init: unknown flag '${a}' - try init <js> | --file <path> | --label <name> | --remove <#> | --clear`);
           else if (src == null) src = a;
           else src += " " + a; // an unquoted multi-word snippet
@@ -4454,8 +4615,12 @@ async function daemon() {
         const disposable = await context.addInitScript({ content: src });
         if (!disposable || typeof disposable.dispose !== "function") throw new Error("init: this Playwright build does not return a Disposable from addInitScript, so a script could never be removed - upgrade it (browse setup)");
         initScripts.push({ i: ++initSeq, src, label: label || null, disposable });
+        // Only worth saying when there IS a loaded page it will miss. On a fresh
+        // session (about:blank) "reload to apply it" is advice about nothing.
+        const loaded = !/^about:blank$/i.test(page.url()) && page.url() !== "";
         return `init +#${initSeq}${label ? ` ${label}` : ""} - runs before page scripts on every document from the NEXT navigation` +
-          `${initScripts.length > 1 ? ` (${initScripts.length} scripts, in the order added)` : ""}\nnote: the page you are on now was already loaded - 'browse reload' (or 'goto') to apply it`;
+          `${initScripts.length > 1 ? ` (${initScripts.length} scripts, in the order added)` : ""}` +
+          `${loaded ? "\nnote: the page you are on now was already loaded - 'browse reload' (or 'goto') to apply it" : ""}`;
       }
       case "dir": return OUT;
       default:
@@ -4525,10 +4690,11 @@ async function daemon() {
         // Next.js error overlay) can't slip by just because the caller didn't run
         // `browse errors`. `errors` already lists them all, so we skip the append
         // there but still advance the cursor so they aren't echoed again later.
+        await settleConsoleArgs();
         const freshErrors = errors.slice(reportedErrors);
         reportedErrors = errors.length;
         if (cmd !== "errors" && freshErrors.length) {
-          result = `${result}\n⚠️ new page errors (${freshErrors.length}):\n${freshErrors.map((e) => "  " + e).join("\n")}`;
+          result = `${result}\n⚠️ new page errors (${freshErrors.length}):\n${freshErrors.map((e) => "  " + e.text).join("\n")}`;
         }
         // Same idea for things nothing asked for: a dialog we answered, a file
         // that downloaded, a popup we switched to. Drained, so each is said once.
@@ -4571,7 +4737,9 @@ async function daemon() {
     const port = server.address().port;
     try {
       mkdirSync(RUN_DIR, { recursive: true });
-      writeFileSync(runFile(SESSION), JSON.stringify({ port, pid: process.pid, out: OUT }));
+      // profile + engine so `profiles` and `clear` can tell whether a live
+      // session is holding this profile without guessing from lock files.
+      writeFileSync(runFile(SESSION), JSON.stringify({ port, pid: process.pid, out: OUT, profile: PROFILE, engine: USING_CAMOUFOX ? "camoufox" : "chromium" }));
     } catch (e) { logDaemon("run file write failed: " + (e?.message || e)); }
     logDaemon(`listening on ${port} (session ${SESSION}) — browser ready`);
     armIdle();

@@ -9,9 +9,12 @@ installed, browse logs it and falls back to Chromium on its own, and says so in
 the `browse open` output.
 
 Reach for `--chromium` when you need a polished demo recording (the overlays
-below), `browse emulate tz= locale= cpu= net=` (CDP-only), or a `.pdf`
-(`page.pdf()` is Chromium-only). Both raise a clear error under camoufox rather
-than a Playwright stack trace.
+below), `browse emulate tz= locale= cpu= net=` (CDP-only), a `.pdf`
+(`page.pdf()` is Chromium-only), or **`goBack`/`goForward`** — this camoufox
+build ignores history navigation completely (even an in-page `history.back()`
+leaves the url where it was), so browse fails those commands there instead of
+reporting a move that never happened. Navigate with `goto <url>` under camoufox.
+All of these raise a clear error rather than a Playwright stack trace.
 
 Under camoufox the three init scripts browse normally injects (cursor overlay,
 keystroke overlay, same-tab popup rewrite) default **off**: they are injected into

@@ -156,6 +156,23 @@ try {
       r.code === 1 && /never appeared/.test(r.err), `code ${r.code} ${r.err}`);
   }
 
+  /* ── the assertion command must never assert nothing ────────────────────── */
+  console.log("wait flag values");
+  {
+    let r = browse("wait", "#status", "--text");
+    check("--text with no value fails instead of becoming a visibility wait",
+      r.code === 1 && /--text needs a value/.test(r.err), `code ${r.code} ${r.out} ${r.err}`);
+
+    r = browse("wait", "#status", "--not-text");
+    check("--not-text with no value fails", r.code === 1 && /--not-text needs a value/.test(r.err), `code ${r.code} ${r.err}`);
+
+    r = browse("wait", "#status", "--url");
+    check("--url with no value fails", r.code === 1 && /--url needs a value/.test(r.err), `code ${r.code} ${r.err}`);
+
+    r = browse("wait", "#status", "--timeout", "abc");
+    check("--timeout with a non-number fails", r.code === 1 && /wants milliseconds/.test(r.err), `code ${r.code} ${r.err}`);
+  }
+
   /* ── browse console ─────────────────────────────────────────────────────── */
   console.log("console");
   {
@@ -175,6 +192,17 @@ try {
 
     r = browse("console", "--bogus");
     check("console refuses an unknown flag", r.code === 1 && /unknown argument '--bogus'/.test(r.err), `code ${r.code} ${r.err}`);
+
+    // The level help PRINTS has to work on the engine you are on: firefox calls
+    // it "warning", everyone types "warn", and an unknown level used to answer
+    // "(no messages matched)" — indistinguishable from a quiet page.
+    r = browse("console", "--level", "warn");
+    check("--level warn matches the engine's own spelling",
+      r.code === 0 && /lab warn two/.test(r.out), `code ${r.code} ${r.out}`);
+
+    r = browse("console", "--level", "nonsense");
+    check("an unknown level fails instead of looking like a quiet page",
+      r.code === 1 && /is not a console level/.test(r.err), `code ${r.code} ${r.out} ${r.err}`);
 
     r = browse("errors");
     check("errors still shows only errors", r.code === 0 && /lab error three/.test(r.out) && !/lab log one/.test(r.out), r.out);
@@ -236,6 +264,56 @@ try {
 
     r = browse("init", "--label", "orphan");
     check("--label with nothing to name is refused", r.code === 1 && /needs one/.test(r.err), `code ${r.code} ${r.err}`);
+
+    r = browse("init", "--remove");
+    check("--remove with no # fails instead of printing the list",
+      r.code === 1 && /--remove needs a value/.test(r.err), `code ${r.code} ${r.out} ${r.err}`);
+
+    r = browse("init", "--file");
+    check("--file with no path fails", r.code === 1 && /--file needs a value/.test(r.err), `code ${r.code} ${r.out} ${r.err}`);
+  }
+
+  /* ── a huge console line is cut, and says so ────────────────────────────── */
+  console.log("console line cap");
+  {
+    browse("eval", 'console.log("X".repeat(50000)); "ok"');
+    const r = browse("console", "--grep", "XXXXXXXX");
+    check("one enormous line cannot dump 50KB into the caller",
+      r.code === 0 && r.out.length < 8000, `${r.out.length} chars`);
+    check("…and it says how much it cut", /chars, read it whole with 'browse eval'/.test(r.out), r.out.slice(0, 200));
+  }
+
+  /* ── navigation reports where it LANDED ─────────────────────────────────── */
+  console.log("navigation reporting");
+  {
+    browse("goto", `${URL_BASE}/ui`);
+    let r = browse("click", "#blank");
+    check("a click that navigates reports the new url, not the old one",
+      r.code === 0 && /ui\?popup=1/.test(r.out), `code ${r.code} out=${r.out} err=${r.err}`);
+
+    // Deterministic history: /lab is entered from /ui, so back and forward both
+    // have somewhere to go before the "nowhere to go" case is asked for.
+    // CAMOUFOX: this firefox build ignores history navigation entirely - even an
+    // in-page `history.back()` leaves the url where it was, with history.length
+    // 5 - so back/forward CANNOT work there and the command now says so instead
+    // of reporting a move that never happened.
+    browse("goto", `${URL_BASE}/lab`);
+    if (ENGINE === "camoufox") {
+      r = browse("goBack");
+      check("camoufox: goBack fails loudly rather than claiming it moved",
+        r.code === 1 && /did not move/.test(r.err) && /goto/.test(r.err), `code ${r.code} ${r.out} ${r.err}`);
+      browse("goto", `${URL_BASE}/ui`);
+    } else {
+      r = browse("goBack");
+      check("goBack with somewhere to go works", r.code === 0 && /ok - /.test(r.out), `code ${r.code} ${r.out} ${r.err}`);
+
+      r = browse("goForward");
+      check("goForward with somewhere to go works", r.code === 0 && /ok - /.test(r.out), `code ${r.code} ${r.out} ${r.err}`);
+    }
+
+    r = browse("goForward");
+    check("goForward with nowhere to go FAILS instead of reporting ok",
+      r.code === 1 && /nothing to go forward to/.test(r.err), `code ${r.code} ${r.out} ${r.err}`);
   }
 
   /* ── an empty read settles instead of lying ─────────────────────────────── */
@@ -249,7 +327,7 @@ try {
 
     r = browse("text", "#alwaysempty");
     check("a genuinely empty element says what browse waited for",
-      r.code === 0 && /still empty after a \d+ms settle/.test(r.out), r.out);
+      r.code === 0 && /still empty after waiting [\d.]+s for load \+ content/.test(r.out), r.out);
 
     // The case the settle exists for: 'load' never fires inside the budget. A
     // shared deadline let waitForLoadState eat all of it and re-read zero times.
@@ -279,15 +357,31 @@ try {
       r.code === 0 && /AFTER-THE-CAP-MARKER/.test(r.out), r.out.slice(0, 400));
     check("…and the drop count is reported", /dropped past the \d+ cap/.test(r.out), r.out.slice(-200));
 
+    r = browse("console", "--grep", "nothing-matches-this-at-all");
+    check("an empty result admits what the cap already dropped",
+      r.code === 0 && /already dropped past the \d+ cap/.test(r.out), r.out);
+
     r = browse("console", "--last", "0");
     check("--last 0 means all, like it does on net", r.code === 0 && /5\d{3} shown/.test(r.out), r.out.slice(-200));
     check("…and a clipped log keeps the NEWEST lines, saying what it cut",
       /console truncated: \d+ earlier lines cut, newest kept/.test(r.out) && /AFTER-THE-CAP-MARKER/.test(r.out), r.out.slice(0, 300));
 
-    r = browse("eval", 'console.log("shape", {a: 1}, [1, 2]); "ok"');
+    // NESTED on purpose: firefox renders `JSHandle@object` and chromium a
+    // one-level preview (`{a: Object, list: Array(12)}`), so a shallow object
+    // would pass on chromium while the data an agent logged the object FOR is
+    // exactly what both engines drop.
+    browse("eval", 'console.log("shape", {a: {b: {c: 7}}}, [1,2,3,4,5,6,7,8,9,10,11,12]); "ok"');
     r = browse("console", "--grep", "shape");
-    check("object arguments are readable on both engines",
-      r.code === 0 && /\{"a":1\}|\{a: 1\}/.test(r.out) && !/JSHandle@/.test(r.out), r.out);
+    check("nested object arguments come back as real JSON on both engines",
+      r.code === 0 && /"c":7/.test(r.out) && /11,12/.test(r.out), r.out);
+    check("…with no engine handle left in the text", !/JSHandle@/.test(r.out) && !/Array\(12\)/.test(r.out), r.out);
+
+    // The alarm surface (errors + the inline append) must show the same text.
+    r = browse("eval", 'console.error("boom", {code: 42}); "ok"');
+    check("a console error's object argument is resolved inline too",
+      /"code":42/.test(r.out) && !/JSHandle@/.test(r.out), r.out);
+    r = browse("errors");
+    check("…and in browse errors", r.code === 0 && /"code":42/.test(r.out) && !/JSHandle@/.test(r.out), r.out.slice(-300));
   }
 
   /* ── net hides bundle noise from a bare pattern ─────────────────────────── */
@@ -303,6 +397,17 @@ try {
     r = browse("net", "lab", "--all-types");
     check("--all-types brings them back", r.code === 0 && /lab-chunk\.js/.test(r.out) && /lab-styles\.css/.test(r.out), r.out);
     check("…and stops claiming anything was hidden", !/static assets? hidden/.test(r.out), r.out);
+
+    // A failing bundle is exactly what an explicit --failed/--status asks for.
+    r = browse("net", "lab", "--failed");
+    check("--failed switches the asset heuristic off", r.code === 0 && !/static assets? hidden/.test(r.out), r.out);
+
+    r = browse("net", "--since", "abc");
+    check("net --since with a non-number fails like console does",
+      r.code === 1 && /wants a number/.test(r.err), `code ${r.code} ${r.out} ${r.err}`);
+
+    r = browse("net", "--last");
+    check("net --last with no value fails", r.code === 1 && /needs a value/.test(r.err), `code ${r.code} ${r.err}`);
 
     r = browse("net", "lab", "--type", "script");
     check("an explicit --type is never second-guessed", r.code === 0 && /lab-chunk\.js/.test(r.out), r.out);
@@ -380,15 +485,28 @@ try {
       r = local("profiles", "emptyprof");
       check("an empty profile still names itself", r.code === 0 && /emptyprof\s+\(empty/.test(r.out), r.out);
 
-      // A live browser has not flushed its cookies: refuse rather than report
-      // "no live cookies" about a profile that is logged in right now.
+      // A live session's newest cookies are still in memory, so an empty read
+      // must say "cannot tell", not "logged out". Liveness comes from the RUN
+      // FILE the daemon stamps, not from an engine lock file: Playwright's
+      // chromium writes no SingletonLock at all, and firefox's .parentlock
+      // outlives a clean shutdown, so the lock was wrong in both directions.
       const openDir = join(HOME, "profiles", "openprof", "Default");
       mkdirSync(openDir, { recursive: true });
       spawnSync("sqlite3", [join(openDir, "Cookies"), "create table cookies (host_key text, expires_utc integer);"], { encoding: "utf8", timeout: 20000 });
-      writeFileSync(join(HOME, "profiles", "openprof", "SingletonLock"), "x");
+      mkdirSync(join(HOME, "run"), { recursive: true });
+      writeFileSync(join(HOME, "run", "pretend.json"),
+        JSON.stringify({ port: 1, pid: process.pid, out: "/tmp", profile: "openprof", engine: "chromium" }));
       r = local("profiles", "openprof");
-      check("a profile a browser holds open says it cannot tell",
-        r.code === 0 && /OPEN, so its cookies are not on disk/.test(r.out), r.out);
+      check("a profile a live session is driving says it cannot tell",
+        r.code === 0 && /live session is driving this profile/.test(r.out), r.out);
+
+      writeFileSync(join(HOME, "run", "pretend.json"),
+        JSON.stringify({ port: 1, pid: 2147480000, out: "/tmp", profile: "openprof", engine: "chromium" }));
+      r = local("profiles", "openprof");
+      check("…and a DEAD session's run file does not fake that", r.code === 0 && /no cookies at all/.test(r.out), r.out);
+
+      r = local("-p", "openprof", "--chromium", "clear");
+      check("clear works once nothing live holds the profile", r.code === 0 && /cleared profile/.test(r.out), `code ${r.code} ${r.out} ${r.err}`);
 
       r = local("profiles", "nosuchprofile");
       check("an unknown name says so and exits 0", r.code === 0 && /no profile matching/.test(r.out), `code ${r.code} ${r.out}`);
