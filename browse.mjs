@@ -107,7 +107,7 @@ import { createRequire } from "node:module";
 import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const SELF = fileURLToPath(import.meta.url);
 const HOST = "127.0.0.1";
@@ -214,6 +214,7 @@ const humanSize = (kb) => kb >= 1048576 ? `${(kb / 1048576).toFixed(1)}G`
 /** humanAge's forward-looking twin: "in 3d", for a cookie that has not died yet. */
 function humanUntil(ms) {
   const s = Math.max(0, (ms - Date.now()) / 1000);
+  if (s < 60) return "in <1m"; // "in 0m" reads as expired, which is the opposite
   if (s < 3600) return `in ${Math.round(s / 60)}m`;
   if (s < 86400) return `in ${Math.round(s / 3600)}h`;
   if (s < 5184000) return `in ${Math.round(s / 86400)}d`;
@@ -287,9 +288,18 @@ function profileCookies(dir, engine) {
     if (!byHost.has(host) || ms > byHost.get(host)) byHost.set(host, ms);
   }
   const now = Date.now();
-  const hosts = [...byHost].map(([host, ms]) => ({ host, ms, live: ms === 0 || ms > now }));
+  // A SESSION cookie (no expiry) dies with the browser, so it is exactly the one
+  // thing that does NOT survive close→open - it is listed, but it does not count
+  // as a login this profile still holds.
+  const hosts = [...byHost].map(([host, ms]) => ({ host, ms, live: ms > now }));
   hosts.sort((a, b) => a.host.localeCompare(b.host));
-  return { hosts, live: hosts.filter((h) => h.live).length };
+  // A browser that is running has not flushed its cookies to disk yet, so an
+  // EMPTY read from a profile that is open means "cannot tell", not "logged out"
+  // - and "logged out" is the one answer that would send an agent off to redo a
+  // login it already has. Read first anyway: the lock file survives a killed
+  // browser, so trusting it alone would hide real logins.
+  if (!hosts.length && profileOpen(dir, engine)) return { open: true, hosts, live: 0 };
+  return { open: false, hosts, live: hosts.filter((h) => h.live).length };
 }
 
 /** Every profile on disk, folded back to logical names:
@@ -911,8 +921,9 @@ not a script. The browser + recording start on your first command.
 Navigate / act (selectors are Playwright strings: text=, role=button[name="…"], css, xpath=…):
   browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser + recording
   browse goto <url>                 navigate. open/goto/reload/goBack/goForward take --timeout <ms>
-                                    (default 20000) — raise it for a dev server compiling a route
-                                    on first hit. Landing on a sign-in wall is called out inline.
+                                    (default 20000, and the client waits it out) — raise it for a dev
+                                    server compiling a route on first hit. A url that looks like a
+                                    sign-in wall is called out inline.
   browse click <selector>           click an element
   browse dblclick <selector>        double-click an element
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
@@ -957,7 +968,10 @@ Observe (do these often — this is your "check" step):
                                     every console message the page logged, in order, with its # —
                                     the log/info/warn sibling of 'errors' (which is only the alarm).
                                     Captured from the first command, so a log fired during page load
-                                    is there. A %c-styled log shows its format string + CSS args.
+                                    is there; past 5000 messages the OLDEST are dropped and the count
+                                    is reported. Object arguments are resolved to JSON. A %c-styled
+                                    log shows its format string, and its CSS arguments on chromium
+                                    only — firefox/camoufox drops them before browse can see them.
   browse screenshot [name] [--full] [--sel <selector>]
                                     save a screenshot into the session dir. --full captures the whole
                                     scrollable page (without moving it, so the recording is untouched),
@@ -1003,9 +1017,11 @@ while the browser is live AND after close; queries never spawn a browser):
     --full                          headers + bodies            --body        just the bodies
     --json                          raw JSON lines — pipe to jq for anything the flags don't cover
     --stats                         counts by status / type / host
-    --all-types                     a bare PATTERN hides static assets (script/css/image/font/media)
-                                    so app calls aren't buried in bundle chunks; this shows them.
-                                    The footer always says how many were hidden.
+    --all-types                     a bare PATTERN hides static assets (script, stylesheet, image,
+                                    font, media, manifest, texttrack) so app calls aren't buried in
+                                    bundle chunks; this shows them. How many were hidden is always
+                                    said (on stderr for --json), and if ONLY assets matched they are
+                                    shown rather than leaving you with an empty result.
     --dir <session dir>             query an OLD session's log  --file        print the log's path
   e.g. browse net -d api.upstash.com --failed --full · browse net --json | jq 'select(.ms>500)'
   Auth headers + cookie VALUES are hashed (sha256 prefix + length), so you can tell tokens
@@ -1390,7 +1406,12 @@ function netCommand(argv) {
   const matched = list.length;
   // --stats summarizes EVERYTHING that matched the filters; --last only trims
   // the listing (a summary of "the last 30" would just misreport the session).
-  if (stats) { process.stdout.write(netStats(list) + "\n"); return 0; }
+  const hiddenNote = hiddenStatic ? `${hiddenStatic} static asset${hiddenStatic > 1 ? "s" : ""} matched and are NOT counted here (--all-types includes them)` : "";
+  // A summary that silently leaves out 60% of what matched is worse than no
+  // summary, and --json is piped into jq where a missing line is invisible - so
+  // the note goes to stderr there, keeping the stream itself machine-clean.
+  if (stats) { process.stdout.write(netStats(list) + (hiddenNote ? `\n— ${hiddenNote}` : "") + "\n"); return 0; }
+  if (json && hiddenNote) process.stderr.write(`browse net: ${hiddenNote}\n`);
   if (last > 0 && list.length > last) list = list.slice(-last);
 
   if (!list.length) {
@@ -1443,7 +1464,11 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 /** Is that pid still around? EPERM means it exists and belongs to someone else. */
 function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // Not a pid: a lock file is created and written in two steps, so a reader can
+  // catch it EMPTY while its owner is very much alive. Assume alive - a lock we
+  // wrongly keep costs one 90s stale window, a lock we wrongly steal spawns a
+  // second browser for the same session.
+  if (!Number.isInteger(pid) || pid <= 0) return true;
   try { process.kill(pid, 0); return true; }
   catch (e) { return e && e.code === "EPERM"; }
 }
@@ -1503,13 +1528,24 @@ async function ensureDaemon() {
 }
 
 /** POST a command to the daemon, return the parsed { ok, result?/error? }. */
-function post(port, body) {
+/** How long the CLIENT waits on the daemon. A command carrying its own
+ *  `--timeout <ms>` (goto, wait, …) must be allowed to run it out: a fixed 120s
+ *  ceiling turned `goto --timeout 150000` into "command timed out" at 2 minutes,
+ *  i.e. the flag help offers for a slow first compile could not actually be used
+ *  past two minutes. Plus a margin for the browser to answer afterwards. */
+function postTimeout(args) {
+  const i = args.indexOf("--timeout");
+  const n = i >= 0 ? Number(args[i + 1]) : NaN;
+  return Number.isFinite(n) && n > 90_000 ? n + 30_000 : 120_000;
+}
+
+function post(port, body, timeoutMs = 120000) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const req = http.request(
       { host: HOST, port, path: "/", method: "POST",
         headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) },
-        timeout: 120000 },
+        timeout: timeoutMs },
       (res) => {
         let buf = "";
         res.setEncoding("utf8");
@@ -1739,13 +1775,17 @@ async function client(argv) {
     const out = [];
     if (wanted) {
       for (const p of found) {
+        // A profile whose dirs exist but hold nothing must still print a ROW:
+        // printing only the footer reads as "browse has no idea what you asked".
+        if (!p.engines.length) { out.push(`${p.name}  (empty — nothing was ever stored under this name)`); continue; }
         for (const e of p.engines) {
           const c = e.cookies;
           out.push(`${p.name}  ${e.engine}  ${e.size}  last written ${e.used}`);
           if (!c) { out.push("  (cannot read this profile's cookie db — needs sqlite3 on PATH)"); continue; }
+          if (c.open) { out.push("  a browser has this profile OPEN, so its cookies are not on disk yet — 'browse close' first"); continue; }
           if (!c.hosts.length) { out.push("  no cookies at all — nothing is logged in here"); continue; }
           for (const h of c.hosts.slice(0, 60)) {
-            const when = h.ms === 0 ? "session cookie (dies with the browser)"
+            const when = h.ms === 0 ? "session cookie — dies on close, so it is NOT a saved login"
               : h.live ? `expires ${humanUntil(h.ms)}` : `EXPIRED ${humanAge(h.ms)}`;
             out.push(`  ${h.live ? " " : "✗"} ${h.host.padEnd(38)} ${when}`);
           }
@@ -1765,7 +1805,7 @@ async function client(argv) {
       }
       p.engines.forEach((e, i) => {
         const c = e.cookies;
-        const logins = !c ? "cookies: ?" : c.live ? `${c.live} host${c.live > 1 ? "s" : ""} logged in` : "no live cookies";
+        const logins = !c ? "cookies: ?" : c.open ? "in use — cannot read its cookies" : c.live ? `${c.live} host${c.live > 1 ? "s" : ""} logged in` : "no live cookies";
         out.push(`${(i ? "" : p.name).padEnd(nameW)}  ${e.engine.padEnd(8)}  ${e.size.padStart(5)}  ${String(e.used).padEnd(9)}  ${logins}`);
       });
     }
@@ -1854,7 +1894,11 @@ async function client(argv) {
     return 1;
   }
   const d = await ensureDaemon();
-  const res = await post(d.port, { cmd, args: argv.slice(1) });
+  // `init --file <path>` is read by the DAEMON, which sits in whatever directory
+  // the session was first opened from - a relative path would resolve against a
+  // directory the caller never chose. Resolve it here, where the cwd is theirs.
+  const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
+  const res = await post(d.port, { cmd, args }, postTimeout(args));
   if (res.ok) {
     if (res.result != null && res.result !== "") process.stdout.write(String(res.result) + "\n");
     return 0;
@@ -2657,7 +2701,30 @@ async function daemon() {
   // of thousands of lines, and the cap is reported rather than silently applied.
   const consoleLog = [];
   const CONSOLE_MAX = 5000;
-  let consoleDropped = 0;
+  let consoleDropped = 0, consoleSeq = 0;
+  /** Record one console message. A RING buffer: past the cap the OLDEST go, not
+   *  the newest - keeping the first 5000 forever meant that after one HMR loop
+   *  (the very case a cap exists for) nothing the agent did afterwards could ever
+   *  appear, and `console --grep` answered "never logged" about a line that had
+   *  just fired. `i` keeps counting so `--since <#>` stays meaningful. */
+  function noteConsole(level, m) {
+    const entry = { i: ++consoleSeq, t: now(), level, text: m.text() };
+    consoleLog.push(entry);
+    while (consoleLog.length > CONSOLE_MAX) { consoleLog.shift(); consoleDropped++; }
+    // Firefox (camoufox) hands object arguments over as unresolved handles, so
+    // m.text() reads `obj JSHandle@object` where chromium prints the object.
+    // Resolve them in the background and patch the entry in place - console
+    // output is read by a LATER command, so this is settled by the time anyone
+    // looks, and a failure just leaves the original text.
+    if (entry.text.includes("JSHandle@")) {
+      Promise.all(m.args().map((a) => a.jsonValue().then((v) => (typeof v === "string" ? v : JSON.stringify(v)), () => null)))
+        .then((vals) => {
+          if (vals.some((v) => v == null)) return;
+          entry.text = vals.join(" ");
+        })
+        .catch(() => { /* page went away mid-resolve */ });
+    }
+  }
   // `browse init` registrations: { i, src, label, disposable }. Numbered, not
   // keyed by source - two "same" snippets are two rules and each has to be
   // removable on its own.
@@ -2729,8 +2796,7 @@ async function daemon() {
       // patch console from eval - which cannot see anything logged before it.
       // m.text() renders the raw argument list, so a %c-styled log shows its
       // format string and its CSS args rather than DevTools' rendering.
-      if (consoleLog.length < CONSOLE_MAX) consoleLog.push({ i: consoleLog.length + 1, t: now(), level: type, text: m.text() });
-      else consoleDropped++;
+      noteConsole(type, m);
     });
     p.on("pageerror", (e) => noteErr("pageerror: " + (e?.message || e)));
     // An unanswered alert/confirm/prompt BLOCKS the page, so without this the
@@ -3149,10 +3215,13 @@ async function daemon() {
     if (!AUTH_WALL_RE.test(landed)) return "";
     let redirected = false;
     try { redirected = new URL(landed).host !== new URL(requested, landed).host; } catch { /* unparseable */ }
-    return `\nnote: this looks like a sign-in wall${redirected ? ` (redirected off ${(() => { try { return new URL(requested, landed).host; } catch { return "the requested host"; } })()})` : ""} - ` +
+    // Says what it SAW (the url), never what it did not check: the cookie db is
+    // not readable while the browser holds it, so "your login expired" would be a
+    // guess - and a wrong one every time you are deliberately recording a login.
+    return `\nnote: this url looks like a sign-in wall${redirected ? ` (redirected off ${(() => { try { return new URL(requested, landed).host; } catch { return "the requested host"; } })()})` : ""}. ` +
       (PROFILE
-        ? `profile '${PROFILE}' has no live login for it. Check with 'browse profiles', or log in once with --headful and keep driving.`
-        : "no profile was selected, so this context has no saved login. Drive the login once with -p <name> --headful, or hand it a 'browse state --load <file>'.");
+        ? `If you did not mean to land here, profile '${PROFILE}' may have no live login for this host - 'browse profiles ${PROFILE}' (after 'close') lists what it holds.`
+        : "If you did not mean to land here, note this context has no saved login: drive the login once with -p <name> --headful, or hand it a 'browse state --load <file>'.");
   }
 
   /** An observe command that comes back EMPTY is far more often a page still
@@ -3164,13 +3233,18 @@ async function daemon() {
   async function readSettled(read, budgetMs = 3000) {
     let out = await read();
     if (String(out ?? "").trim()) return { out, note: "" };
+    // The load-state wait gets its own budget, and the poll ALWAYS gets a full
+    // one after it. Sharing a single deadline meant a page whose 'load' never
+    // fires inside the budget (a stalled image, a hanging script - i.e. exactly
+    // the still-loading page this exists for) burned all of it in waitForLoadState
+    // and then re-read ZERO times.
+    await page.waitForLoadState("load", { timeout: budgetMs }).catch(() => { /* still loading, or already loaded */ });
     const deadline = Date.now() + budgetMs;
-    await page.waitForLoadState("load", { timeout: budgetMs }).catch(() => { /* already loaded, or slower than the budget */ });
-    while (Date.now() < deadline) {
-      await page.waitForTimeout(250);
+    do {
       out = await read();
       if (String(out ?? "").trim()) return { out, note: "" };
-    }
+      await page.waitForTimeout(250);
+    } while (Date.now() < deadline);
     return { out, note: `\nnote: still empty after a ${budgetMs}ms settle - the page may be mid-load/hydration (check 'browse url' + 'browse errors'), or this element really is empty` };
   }
 
@@ -3577,7 +3651,9 @@ async function daemon() {
         else throw new Error(`${cmd}: unexpected argument '${a}' - ${cmd} takes ${takes}`);
       }
       if (cmd === "reload" || cmd === "goBack" || cmd === "goForward") {
-        await page[cmd](timeout ? { timeout } : undefined);
+        // The same explicit default as open/goto rather than the context default,
+        // so the one number in help is true for every navigation verb.
+        await page[cmd]({ timeout: timeout || 20000 });
         return `ok - ${await brief()}`;
       }
       if (cmd === "goto" && !url) throw new Error(`goto: needs a url, e.g. browse goto ${APP_DEFAULT}/settings`);
@@ -3731,14 +3807,29 @@ async function daemon() {
         // The log/info/warn/debug sibling of `errors`. Filters mirror `net`'s
         // (--since <#>, --grep, --last) so one mental model covers both logs.
         let level = null, grep = null, since = null, last = 40;
+        const USAGE = "try [--level log,warn,error] [--grep <pattern>] [--since <#>] [--last <n>|--all]";
+        // Every value is checked. A missing one used to slide through as
+        // NaN/undefined and answer "no console messages matched", which is the
+        // silent wrong answer this whole round exists to remove.
+        const val = (flag, i) => {
+          const v = args[i];
+          if (v == null || String(v).startsWith("--")) throw new Error(`console: ${flag} needs a value - ${USAGE}`);
+          return v;
+        };
+        const num = (flag, i) => {
+          const n = Number(val(flag, i));
+          if (!Number.isFinite(n) || n < 0) throw new Error(`console: ${flag} wants a number - ${USAGE}`);
+          return n;
+        };
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
-          if (a === "--level") level = String(args[++i] || "").toLowerCase();
-          else if (a === "--grep") grep = args[++i];
-          else if (a === "--since") since = Number(args[++i]);
-          else if (a === "--last" || a === "-n") last = Number(args[++i]) || last;
+          if (a === "--level") level = String(val(a, ++i)).toLowerCase();
+          else if (a === "--grep") grep = val(a, ++i);
+          else if (a === "--since") since = num(a, ++i);
+          // 0 means "all", the same as it does on `browse net --last 0`.
+          else if (a === "--last" || a === "-n") last = num(a, ++i);
           else if (a === "--all") last = 0;
-          else throw new Error(`console: unknown argument '${a}' - try [--level log,warn,error] [--grep <pattern>] [--since <#>] [--last <n>|--all]`);
+          else throw new Error(`console: unknown argument '${a}' - ${USAGE}`);
         }
         const levels = level ? level.split(",").map((x) => x.trim()).filter(Boolean) : null;
         const grepMatch = grep ? netMatcher(grep) : null;
@@ -3753,10 +3844,19 @@ async function daemon() {
             : "(no console messages yet)";
         }
         if (last > 0 && list.length > last) list = list.slice(-last);
-        const body = list.map((e) => `#${e.i} ${e.t.toFixed(1)}s  ${e.level.padEnd(7)} ${e.text}`).join("\n");
+        const lines = list.map((e) => `#${e.i} ${e.t.toFixed(1)}s  ${e.level.padEnd(7)} ${e.text}`);
+        // Clipped from the FRONT, unlike every other read: a log is read for what
+        // happened last, and keeping the head of `--all` would hand back the
+        // oldest lines and cut the ones the command just produced.
+        let body = lines.join("\n"), cut = 0;
+        while (body.length > READ_MAX && cut < lines.length - 1) {
+          cut = Math.max(cut + 1, Math.ceil(lines.length * (1 - READ_MAX / body.length)));
+          body = lines.slice(cut).join("\n");
+        }
+        const clipped = cut ? `…[console truncated: ${cut} earlier line${cut > 1 ? "s" : ""} cut, newest kept. Narrow with --grep <pattern>, --level <l> or --since <#>]\n` : "";
         const more = matched > list.length ? ` (of ${matched} matching, ${consoleLog.length} logged; --all for every one)` : ` of ${consoleLog.length} logged`;
         const capped = consoleDropped ? ` · ${consoleDropped} dropped past the ${CONSOLE_MAX} cap` : "";
-        return `${clipForRead(body, "console", "narrow it with --grep <pattern>, --level <l>, or --since <#>")}\n— ${list.length} shown${more}${capped}`;
+        return `${clipped}${body}\n— ${list.length} shown${more}${capped}`;
       }
       case "screenshot": {
         let name = null, full = false, sel = null;
@@ -4324,6 +4424,9 @@ async function daemon() {
         const list = () => initScripts.length
           ? initScripts.map((r) => `  #${r.i}  ${r.label ? r.label + "  " : ""}${r.src.length} chars`).join("\n")
           : "  (none)";
+        if (clear && (remove != null || file != null || src != null)) throw new Error("init: --clear takes nothing else - it removes every registered script");
+        if (remove != null && (file != null || src != null)) throw new Error("init: --remove <#> takes nothing else");
+        if (label != null && src == null && file == null) throw new Error("init: --label names a script, so it needs one - init '<js>' --label <name>");
         if (clear) {
           const n = initScripts.length;
           for (const r of initScripts) await r.disposable.dispose().catch(() => { /* context going away */ });

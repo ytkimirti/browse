@@ -23,8 +23,8 @@ script runner.
    dialogs and saved downloads are appended inline to the next command's result.
 2. **Observe often.** `snapshot` is your check step. `wait` doubles as your
    assertion: it exits non-zero if the thing never happens. Hold for what the UI
-   SAYS (`wait <sel> --text Complete`) rather than guessing a duration — a bare
-   `wait <ms>` asserts nothing, slows the run and paces the video worse.
+   says or shows, never for a guessed duration — a fixed pause asserts nothing,
+   slows the run and paces the video worse (`browse help` for the ways to wait).
 3. **Diagnose** from what the session already recorded: `errors` (the alarm),
    `console` (everything the page logged), and `net` (note the last entry `#`,
    act, then `net --since <#> --failed` to see only what that action caused).

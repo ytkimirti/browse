@@ -116,6 +116,15 @@ const LATE = `<!doctype html><meta charset=utf8><title>late</title>
 
 const SIGNIN = `<!doctype html><meta charset=utf8><title>sign in</title><h1>Sign in to continue</h1>`;
 
+// The page whose 'load' event never arrives inside a settle budget: an image the
+// server never answers. #box is filled at t=600ms, so a read right after the
+// navigation is empty, the content IS there well before the budget runs out, and
+// only a settle that re-reads AFTER waiting for load can see it.
+const STALLED = `<!doctype html><meta charset=utf8><title>stalled</title>
+<div id=box></div>
+<img src="/never-answers.png">
+<script>setTimeout(() => { document.getElementById('box').textContent = 'arrived while loading'; }, 600);</script>`;
+
 // Fills the viewport with one colour and pins a different one to the far
 // corner, so a single pixel of a recorded frame says whether the video really
 // covers the viewport or only its magnified top-left corner.
@@ -142,11 +151,13 @@ http.createServer((req, res) => {
   if (url === "/api/user") { hits.user++; return json(res, { id: 99, name: "real-user" }); }
   if (url === "/api/config") { hits.config++; return json(res, { env: "prod", debug: false }); }
   if (url === "/api/other") { hits.other++; return json(res, { from: "server" }); }
-  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/auth/sign-in") {
+  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/stalled" || url === "/auth/sign-in") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/auth/sign-in": SIGNIN }[url];
+    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/stalled": STALLED, "/auth/sign-in": SIGNIN }[url];
     return res.end(body);
   }
+  // Answers nothing, ever: holds the page's 'load' event open.
+  if (url === "/never-answers.png") { res.writeHead(200, { "content-type": "image/png" }); return; }
   if (url === "/lab-styles.css") {
     res.writeHead(200, { "content-type": "text/css", "cache-control": "no-store" });
     return res.end("body{font-family:system-ui}");

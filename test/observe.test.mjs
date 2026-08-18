@@ -106,7 +106,8 @@ try {
   {
     let r = browse("goto", `${URL_BASE}/auth/sign-in`);
     check("goto onto a sign-in url says so", r.code === 0 && /sign-in wall/.test(r.out), r.out + r.err);
-    check("and says no profile was selected", /no profile was selected/.test(r.out), r.out);
+    check("and says this context has no saved login", /no saved login/.test(r.out), r.out);
+    check("…without claiming a login was checked", !/has no live login/.test(r.out), r.out);
 
     r = browse("goto", `${URL_BASE}/ui`);
     check("an ordinary page says nothing about auth", r.code === 0 && !/sign-in wall/.test(r.out), r.out);
@@ -228,6 +229,13 @@ try {
 
     r = browse("init");
     check("the empty listing says so", r.code === 0 && /0 init scripts/.test(r.out), r.out);
+
+    r = browse("init", "window.__x = 1", "--clear");
+    check("--clear with a snippet is refused, not silently preferred",
+      r.code === 1 && /--clear takes nothing else/.test(r.err), `code ${r.code} ${r.err}`);
+
+    r = browse("init", "--label", "orphan");
+    check("--label with nothing to name is refused", r.code === 1 && /needs one/.test(r.err), `code ${r.code} ${r.err}`);
   }
 
   /* ── an empty read settles instead of lying ─────────────────────────────── */
@@ -242,6 +250,44 @@ try {
     r = browse("text", "#alwaysempty");
     check("a genuinely empty element says what browse waited for",
       r.code === 0 && /still empty after a \d+ms settle/.test(r.out), r.out);
+
+    // The case the settle exists for: 'load' never fires inside the budget. A
+    // shared deadline let waitForLoadState eat all of it and re-read zero times.
+    browse("goto", `${URL_BASE}/stalled`, "--timeout", "3000");
+    r = browse("text", "#box");
+    check("a page whose load event never fires is still re-read",
+      r.code === 0 && /arrived while loading/.test(r.out), r.out);
+  }
+
+  /* ── console: the cap drops the OLDEST, and flags are validated ──────────── */
+  console.log("console cap + flag validation");
+  {
+    let r = browse("console", "--since");
+    check("--since with no value fails", r.code === 1 && /--since needs a value/.test(r.err), `code ${r.code} ${r.err}`);
+
+    r = browse("console", "--since", "abc");
+    check("--since with a non-number fails", r.code === 1 && /wants a number/.test(r.err), `code ${r.code} ${r.err}`);
+
+    r = browse("console", "--level");
+    check("--level with no value fails", r.code === 1 && /--level needs a value/.test(r.err), `code ${r.code} ${r.err}`);
+
+    r = browse("eval", 'for (let i = 0; i < 5200; i++) console.log("flood " + i); "ok"');
+    check("flooding the console works", r.code === 0, r.out + r.err);
+    browse("eval", 'console.log("AFTER-THE-CAP-MARKER"); "ok"');
+    r = browse("console", "--grep", "AFTER-THE-CAP-MARKER");
+    check("a message logged AFTER the cap is still readable",
+      r.code === 0 && /AFTER-THE-CAP-MARKER/.test(r.out), r.out.slice(0, 400));
+    check("…and the drop count is reported", /dropped past the \d+ cap/.test(r.out), r.out.slice(-200));
+
+    r = browse("console", "--last", "0");
+    check("--last 0 means all, like it does on net", r.code === 0 && /5\d{3} shown/.test(r.out), r.out.slice(-200));
+    check("…and a clipped log keeps the NEWEST lines, saying what it cut",
+      /console truncated: \d+ earlier lines cut, newest kept/.test(r.out) && /AFTER-THE-CAP-MARKER/.test(r.out), r.out.slice(0, 300));
+
+    r = browse("eval", 'console.log("shape", {a: 1}, [1, 2]); "ok"');
+    r = browse("console", "--grep", "shape");
+    check("object arguments are readable on both engines",
+      r.code === 0 && /\{"a":1\}|\{a: 1\}/.test(r.out) && !/JSHandle@/.test(r.out), r.out);
   }
 
   /* ── net hides bundle noise from a bare pattern ─────────────────────────── */
@@ -260,6 +306,18 @@ try {
 
     r = browse("net", "lab", "--type", "script");
     check("an explicit --type is never second-guessed", r.code === 0 && /lab-chunk\.js/.test(r.out), r.out);
+
+    r = browse("net", "lab", "--stats");
+    check("--stats says what the static filter left out",
+      r.code === 0 && /static assets? matched and are NOT counted/.test(r.out), r.out);
+
+    const rj = spawnSync(BIN, ["-s", SESSION, "net", "lab", "--json"], {
+      encoding: "utf8",
+      env: { ...process.env, BROWSE_ENGINE: ENGINE, BROWSE_OUT: OUT, BROWSE_HEADFUL: "0" },
+      timeout: 60000,
+    });
+    check("--json keeps stdout machine-clean", rj.status === 0 && (rj.stdout || "").trim().split("\n").every((l) => l.startsWith("{")), (rj.stdout || "").slice(0, 200));
+    check("…and warns about the hidden assets on stderr", /static assets? matched and are NOT counted/.test(rj.stderr || ""), rj.stderr);
 
     r = browse("net", "lab-chunk.js");
     check("a pattern that ONLY matches static assets still shows them",
@@ -316,6 +374,21 @@ try {
       r = local("profiles", "seeded");
       check("the detail view lists the live host", r.code === 0 && /live\.example\.com\s+expires in 30d/.test(r.out), r.out);
       check("…and marks the expired one", /✗ dead\.example\.com\s+EXPIRED/.test(r.out), r.out);
+
+      // A profile dir that exists but holds nothing must still print a row.
+      mkdirSync(join(HOME, "profiles", "emptyprof"), { recursive: true });
+      r = local("profiles", "emptyprof");
+      check("an empty profile still names itself", r.code === 0 && /emptyprof\s+\(empty/.test(r.out), r.out);
+
+      // A live browser has not flushed its cookies: refuse rather than report
+      // "no live cookies" about a profile that is logged in right now.
+      const openDir = join(HOME, "profiles", "openprof", "Default");
+      mkdirSync(openDir, { recursive: true });
+      spawnSync("sqlite3", [join(openDir, "Cookies"), "create table cookies (host_key text, expires_utc integer);"], { encoding: "utf8", timeout: 20000 });
+      writeFileSync(join(HOME, "profiles", "openprof", "SingletonLock"), "x");
+      r = local("profiles", "openprof");
+      check("a profile a browser holds open says it cannot tell",
+        r.code === 0 && /OPEN, so its cookies are not on disk/.test(r.out), r.out);
 
       r = local("profiles", "nosuchprofile");
       check("an unknown name says so and exits 0", r.code === 0 && /no profile matching/.test(r.out), `code ${r.code} ${r.out}`);
