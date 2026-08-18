@@ -4,36 +4,12 @@
   "description": "Drive a real browser step by step from the CLI, and get a video of it",
   "license": "MIT",
   "author": "ytkimirti",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/ytkimirti/browse.git"
-  },
+  "repository": { "type": "git", "url": "git+https://github.com/ytkimirti/browse.git" },
   "homepage": "https://github.com/ytkimirti/browse#readme",
-  "bugs": {
-    "url": "https://github.com/ytkimirti/browse/issues"
-  },
-  "keywords": [
-    "browser",
-    "automation",
-    "playwright",
-    "cli",
-    "recording",
-    "agent",
-    "screencast"
-  ],
-  "bin": {
-    "browse": "bin/browse",
-    "browse-box": "bin/browse-box"
-  },
-  "files": [
-    "bin/",
-    "browse.mjs",
-    "scripts/",
-    "SKILL.md",
-    "README.md"
-  ],
-  "engines": {
-    "node": ">=18"
-  },
+  "bugs": { "url": "https://github.com/ytkimirti/browse/issues" },
+  "keywords": ["browser", "automation", "playwright", "cli", "recording", "agent", "screencast"],
+  "bin": { "browse": "bin/browse", "browse-box": "bin/browse-box" },
+  "files": ["bin/", "browse.mjs", "scripts/", "SKILL.md", "README.md"],
+  "engines": { "node": ">=18" },
   "private": false
 }
