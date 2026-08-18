@@ -37,23 +37,35 @@ spawns, and pointing it at a dead port records the failure.
 
 ## Upstash Box
 
-`browse-box` (next to `browse`; `browse-box help` is its command surface) is the
-box side of this: bring one up, put files on it, run things on it, stop it. It
-needs `UPSTASH_BOX_API_KEY`, which is also what browse hands the box's ssh as a
+`browse-box` (next to `browse`; `browse-box help` is its command surface) makes
+the box side disposable: `up` gives you a fresh box in about 12 seconds, `down`
+deletes it, and nothing of yours is left running in between. It needs
+`UPSTASH_BOX_API_KEY`, which is also what browse hands the box's ssh as a
 password, so a box needs no second credential.
 
 The shape of a session — the app runs on the box, so `browse open` at
 `127.0.0.1` finds it:
 
 ```sh
-export BROWSE_REMOTE=$(browse-box up)          # resumes your box, ~1s
+export BROWSE_REMOTE=$(browse-box up)          # fresh box, ~12s
 browse-box push $BROWSE_REMOTE ./my-app        # copy the code over
 browse-box exec $BROWSE_REMOTE 'cd /workspace/home/my-app && npm i && (npm run dev &)'
 browse open http://127.0.0.1:3000
 ...
 browse close                                   # the mp4 lands here
-browse-box down                                # meter off
+browse-box down                                # box deleted
 ```
+
+**Why it is fast: the image.** Installing browse on a bare box takes ~6 minutes
+(Chromium alone is ~1GB). `browse-box image` does that once and snapshots the
+result; `up` restores that snapshot instead of installing. A snapshot restores
+the **whole disk** — the apt packages and `/usr/local/bin/browse` come back with
+it, not just `/workspace` — and it outlives the box it was taken from, so the
+image is the only thing you keep. Re-run `image` after a browse update.
+
+**Boxes made by `up` expire on their own** (`--ttl`, 8h by default), so a session
+you walk away from does not become an account full of boxes. `down` is still the
+right ending; the TTL is the backstop.
 
 **Use `exec`, not ssh, to run things on a box.** A box's ssh gateway runs your
 command and then throws its output and exit status away, and kills whatever it
@@ -61,29 +73,18 @@ left running — so an `ssh box 'npm run dev &'` dev server dies the moment the
 command returns. `browse-box exec` goes through the box's API, which does
 neither.
 
-**`up` resumes, it does not create.** A paused box keeps its whole disk — the
-browse checkout, ~1GB of browsers, the apt packages — and comes back in under a
-second, while costing only storage. The first `up` provisions one (a few
-minutes); every later one resumes it. Snapshots are *not* a shortcut here: a
-snapshot does not carry the install, so restoring one still means provisioning.
-
-You can skip `up` entirely once a box is provisioned: a `browse --remote`
-command wakes a paused box by itself (about 5 seconds to the first page). `down`
-is the half that matters — nothing stops the meter for you except the idle
-auto-pause.
-
-**What it costs.** CPU only while the box is actually running, plus about
-$0.10/GB/month for a paused box's disk. `down` stops the CPU meter immediately,
-and a box you forget pauses itself when idle. Avoid keep-alive boxes for this:
-they bill a flat monthly rate whether you use them or not.
+**What it costs.** CPU seconds while the box actually runs, plus the image's
+storage between sessions (~0.6GB, cents a month). Nothing is billed for a box
+that no longer exists. Avoid keep-alive boxes here: they bill a flat monthly rate
+whether you use them or not, which is the opposite of what this is for.
 
 **Keep everything under `/workspace/home`.** It is the box user's half of the
-volume that survives a restart; the rest of the filesystem does not. `push` and
-the provisioning both default there.
+volume; `push` and the provisioning both default there.
 
 `browse-box url <box> <port>` gives a port a public
 `https://<box-id>-<port>.preview.box.upstash.com` URL — the link to hand someone
-who wants to click around the app themselves rather than watch the video.
+who wants to click around the app themselves rather than watch the video. It
+works on these boxes despite what the Box docs' feature table says.
 
 ## Before you point it at a shared machine
 

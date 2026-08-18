@@ -16,12 +16,18 @@
  * an exit status, and kills whatever a command leaves running. The API does
  * none of that.
  *
+ * The model: a box is DISPOSABLE. `up` makes one from a snapshot that already
+ * has browse, Chromium and ffmpeg on it (~18s, no install), and `down` deletes
+ * it. Nothing is left running, and nothing bills between sessions except the
+ * one snapshot's storage. The snapshot is built once by `image`, which is the
+ * only slow step (~6 min) and the only thing worth keeping.
+ *
  * Two box facts the commands are built around:
- *   • Only /workspace/home belongs to the box user. It is also the half of the
- *     disk that survives a restart, so everything installed lands there.
- *   • A box with no keep-alive bills per ACTIVE CPU second and pauses itself
- *     when idle, so a session box costs roughly what it computes. `down` makes
- *     that immediate; storage keeps billing until `rm`.
+ *   • Only /workspace/home belongs to the box user, so everything installed
+ *     lands there. A snapshot, though, restores the WHOLE disk — the apt
+ *     packages and /usr/local/bin/browse come back with it.
+ *   • Restoring is `POST /v2/box/from-snapshot`. Passing `snapshot_id` to plain
+ *     `POST /v2/box` is silently ignored: you get an empty box and no error.
  */
 
 import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
@@ -37,6 +43,10 @@ const WORK = "/workspace/home";
 // Remembers the last snapshot taken, so `up` starts warm without being told an
 // id. One file, next to browse's own data.
 const STATE = join(process.env.BROWSE_HOME || join(homedir(), ".browse"), "box.json");
+// A backstop, not a schedule: a session box you forget deletes itself rather
+// than sitting on the account. Eight hours outlasts any browse session; the API
+// caps it at three days.
+const TTL_DEFAULT = 28800;
 
 const die = (msg) => { process.stderr.write(`box: ${msg}\n`); process.exit(1); };
 const say = (msg) => process.stderr.write(`${msg}\n`); // stdout stays machine-readable
@@ -182,27 +192,74 @@ async function pull(id, remote, dest) {
   process.stdout.write(`${out}\n`);
 }
 
+/** Every browse image on the account, newest first. Snapshots outlive the box
+ *  they were taken from, so this is the only durable list of them — the box a
+ *  snapshot names is usually long deleted. */
+async function listImages() {
+  const { snapshots = [] } = await api("GET", "/v2/box/snapshots");
+  return snapshots
+    .filter((s) => s.status === "ready" && /^browse-/.test(s.name || ""))
+    .sort((a, b) => b.created_at - a.created_at);
+}
+const newestImage = async () => (await listImages())[0];
+
+/** Build the warm image: a throwaway box, browse installed on it, a snapshot of
+ *  the result, and the box deleted. A snapshot restores the WHOLE disk, so the
+ *  apt packages and /usr/local/bin/browse come back with it and a session box
+ *  has nothing left to install. Snapshots outlive the box they came from. */
+async function buildImage(size) {
+  say(`creating a ${size} box to build the image on…`);
+  let box = await api("POST", "/v2/box", { name: "browse-image-builder", size, runtime: "node", labels: ["browse"] }, 300000);
+  for (let i = 0; i < 90 && box.status === "creating"; i++) {
+    await sleep(2000);
+    box = await api("GET", `/v2/box/${box.id}`);
+  }
+  if (box.status === "creating") die(`${box.id} is still creating — check the console`);
+  try {
+    await runScript(box.id, INSTALL, "install");
+    say("snapshotting it…");
+    const snap = await api("POST", `/v2/box/${box.id}/snapshots`, { name: `browse-${Date.now().toString(36)}` }, 600000);
+    for (let i = 0; i < 120; i++) {
+      const { snapshots = [] } = await api("GET", `/v2/box/${box.id}/snapshots`);
+      const mine = snapshots.find((x) => x.id === snap.id);
+      if (mine && mine.status !== "creating") {
+        if (mine.status !== "ready") die(`snapshot ${snap.id} ended up ${mine.status}`);
+        say(`image ${snap.id} ready (${(mine.size_bytes / 1e9).toFixed(1)}GB)`);
+        break;
+      }
+      if (i === 119) die(`snapshot ${snap.id} did not become ready`);
+      await sleep(5000);
+    }
+    await writeState({ snapshot: snap.id });
+    return snap.id;
+  } finally {
+    // The builder has done its job either way, and a forgotten one is a box
+    // nobody is watching. The snapshot survives it.
+    await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
+    say(`builder ${box.id} deleted`);
+  }
+}
+
 /* ── commands ─────────────────────────────────────────────────────────────── */
 
-const HELP = `box.mjs — Upstash Boxes for 'browse --remote'
+const HELP = `box.mjs — disposable Upstash Boxes for 'browse --remote'
 
-  up [--new] [--size medium] [--name <n>]
-                              bring up THE session box and print its --remote host. Resumes the
-                              one you used last (under a second, with its browsers and packages
-                              intact); makes and provisions one the first time, or with --new.
-                              No keep-alive, so it bills per active CPU second
-  down [box]                  pause it — stops the CPU meter now, keeps the whole disk. Defaults
-                              to the box 'up' last brought up
-  rm <box>                    delete it, disk and all
-  ls                          every box on the account, newest first
+  up [--ttl <sec>] [--size small] [--snapshot <id>]
+                              make a box from the warm image and print its --remote host.
+                              ~18s, nothing to install. Builds the image first if there
+                              isn't one yet (~6 min, once). The box also deletes itself
+                              after --ttl (default ${TTL_DEFAULT}s) if you never call down
+  down [box]                  DELETE it. Defaults to the box 'up' made
+  image [--size medium]       build the warm image: a box, browse installed on it, snapshot
+                              taken, box thrown away. Re-run after a browse update
+  ls                          boxes and images on the account
 
   exec <box> <cmd…>           run a command on the box and show its output. This is how you
                               install and start a dev server there — ssh into a box relays
                               nothing back
   push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}, skips .git/node_modules)
   pull <box> <remote> [local]       copy one file out
-  url <box> <port>            public URL for a port on the box, to share a dev server
-  install <box>               (re)install browse on a box you already have
+  install <box>               (re)install browse on a box, e.g. to refresh the image builder
 
 <box> is a box id or the '<id>@…' host you pass to browse --remote, so $BROWSE_REMOTE works.
 
@@ -212,11 +269,11 @@ A session, end to end:
   browse-box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && npm i && (npm run dev &)'
   browse open http://127.0.0.1:3000     # 127.0.0.1 is the BOX's
   browse close                          # the mp4 lands here
-  browse-box down                       # meter off
+  browse-box down                       # gone
 
-Costs: CPU only while it runs, plus ~$0.10/GB/month for the disk of a paused box
-(a provisioned one is about 1GB). A box left running pauses itself when idle, so
-forgetting 'down' is a small bill, not a standing one.
+Costs: CPU seconds while it runs, and the image's storage (~0.6GB, cents a month)
+between sessions. A box you forget still bills nothing once idle, and expires by
+itself at the TTL.
 `;
 
 /** Pull `--name value` out of the args, leaving the positionals behind. */
@@ -239,64 +296,66 @@ const rest = args.slice(1);
 // The key is checked here rather than at load: `help` (and a typo, which prints
 // help) must answer on a machine that has no key yet — that is the command you
 // run to find out what to set.
-const NEEDS_KEY = new Set(["up", "down", "rm", "ls", "exec", "push", "pull", "url", "install"]);
+const NEEDS_KEY = new Set(["up", "down", "image", "ls", "exec", "push", "pull", "url", "install"]);
 if (NEEDS_KEY.has(cmd) && !KEY) die("set UPSTASH_BOX_API_KEY (Upstash console → Box)");
 
 switch (cmd) {
   case "up": {
-    const size = flag("size", "medium");
-    const name = flag("name", "browse-box");
-    let id = has("new") ? null : boxId(flag("box", (await readState()).box));
-    // A box that is merely PAUSED keeps its whole disk — the browse checkout,
-    // the ~1GB of browsers, the apt packages — and resumes in under a second,
-    // while costing only storage (cents a month) in the meantime. So a session
-    // reuses one box rather than making one: creating is minutes, resuming is
-    // instant, and neither bills CPU while nothing is running.
-    if (id) {
-      const box = await api("GET", `/v2/box/${id}`).catch(() => null);
-      if (!box || !box.id) { say(`${id} is gone — making a new one`); id = null; }
-      else if (box.status === "paused") { await api("POST", `/v2/box/${id}/resume`, undefined, 300000); say(`resumed ${id}`); }
-      else say(`${id} is already up`);
+    const size = flag("size", "small");
+    const ttl = Number(flag("ttl", TTL_DEFAULT));
+    // The account is the source of truth for which images exist — a local note
+    // of the last one is a convenience, not a record, and a machine that has
+    // never run this should still find the image you built on another one.
+    let snapshot = flag("snapshot", (await readState()).snapshot) || (await newestImage())?.id;
+    if (!snapshot) {
+      say("no warm image yet — building one first (once, ~6 minutes)");
+      snapshot = await buildImage(flag("image-size", "medium"));
     }
-    if (!id) {
-      // No keep-alive: a session box should bill for what it computes and pause
-      // itself when it stops. keep-alive is a flat monthly charge instead, which
-      // is the wrong shape for something you use in bursts.
-      say(`creating ${size} box (one time — later sessions just resume it)…`);
-      let box = await api("POST", "/v2/box", { name, size, runtime: "node", labels: ["browse"] }, 300000);
-      for (let i = 0; i < 90 && box.status === "creating"; i++) {
-        await sleep(2000);
-        box = await api("GET", `/v2/box/${box.id}`);
-      }
-      if (box.status === "creating") die(`${box.id} is still creating — check the console`);
-      id = box.id;
+    // from-snapshot, NOT plain create with a snapshot_id: that field is ignored
+    // there and you get an empty box back with no error to tell you.
+    // `ephemeral` boxes are ready the moment the call returns — no polling — and
+    // expire on their own, which is what makes a box safe to just make one of.
+    const box = await api("POST", "/v2/box/from-snapshot", {
+      snapshot_id: snapshot, ephemeral: true, ttl, size, runtime: "node",
+      name: flag("name", "browse-session"), labels: ["browse"],
+    }, 600000);
+    if (!box.id) die(`from-snapshot returned no box: ${JSON.stringify(box).slice(0, 200)}`);
+    const ready = await exec(box.id, "command -v browse >/dev/null && browse version");
+    if (ready.exit_code !== 0) {
+      await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
+      die(`image ${snapshot} has no browse on it — rebuild it with: browse-box image`);
     }
-    const ready = await exec(id, "command -v browse >/dev/null && browse version");
-    if (ready.exit_code !== 0) await runScript(id, INSTALL, "install");
-    await writeState({ box: id });
-    say(`\n${id} is up. Stop the meter when you are done: browse-box down ${id}`);
-    process.stdout.write(`${sshHost(id)}\n`);
+    // Remember the image too, so a one-off `--snapshot` becomes the default and
+    // the next `up` needs no arguments.
+    await writeState({ box: box.id, snapshot });
+    say(`${box.id} up from ${snapshot} — ${String(ready.output).trim()}, expires in ${Math.round(ttl / 3600)}h`);
+    say(`Delete it when you are done: browse-box down`);
+    process.stdout.write(`${sshHost(box.id)}\n`);
     break;
   }
   case "down": {
     const id = boxId(rest[0]) || boxId((await readState()).box) || die("down needs a box");
-    await api("POST", `/v2/box/${id}/pause`);
-    say(`${id} paused — no more CPU charge. Its disk (and storage charge) stays until 'rm'.`);
-    break;
-  }
-  case "rm": {
-    const id = boxId(rest[0]) || die("rm needs a box");
     await api("DELETE", `/v2/box/${id}`);
     if (boxId((await readState()).box) === id) await writeState({ box: null });
     say(`${id} deleted`);
     break;
   }
+  case "image": {
+    const snapshot = await buildImage(flag("size", "medium"));
+    process.stdout.write(`${snapshot}\n`);
+    break;
+  }
   case "ls": {
     const boxes = await api("GET", "/v2/box");
     const list = Array.isArray(boxes) ? boxes : boxes.boxes || [];
-    if (!list.length) { say("(no boxes)"); break; }
     for (const b of list) {
       process.stdout.write(`${(b.id || "").padEnd(24)} ${(b.status || "?").padEnd(8)} ${b.name || ""}\n`);
+    }
+    if (!list.length) say("(no boxes)");
+    const images = await listImages();
+    if (!images.length) say("images: none yet — 'browse-box up' will build one");
+    for (const i of images) {
+      process.stdout.write(`${i.id}  ${(i.status || "?").padEnd(8)} ${(i.size_bytes / 1e9).toFixed(1)}GB  ${i.name}\n`);
     }
     break;
   }

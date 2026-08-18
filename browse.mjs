@@ -1010,9 +1010,9 @@ this one — see 'browse help --env' for the auth + install knobs):
                                     'ssh -R 3000:127.0.0.1:3000 <sshhost>'.
                                     'profiles', 'clear' and 'setup' read that machine's disk,
                                     so they run there; 'net' copies its log down first.
-                                    For an Upstash Box, 'browse-box' (next to this one) brings one
-                                    up, copies files onto it, runs its dev server and stops it
-                                    again — 'browse-box help'.
+                                    For an Upstash Box, 'browse-box' (next to this one) makes one
+                                    in ~12s, copies files onto it, runs its dev server, and
+                                    deletes it when you are done — 'browse-box help'.
 
 Launch flags (how the browser STARTS — put them before the command that opens the
 session; on an already-live session browse refuses rather than ignoring them):

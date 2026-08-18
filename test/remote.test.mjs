@@ -166,13 +166,14 @@ console.log("\nbrowse-box");
   };
   let r = box("help");
   check("browse-box help lists the lifecycle",
-    r.code === 0 && /\bup\b/.test(r.out) && /\bdown\b/.test(r.out) && /\bexec\b/.test(r.out) && /\bpush\b/.test(r.out),
+    r.code === 0 && ["up", "down", "image", "exec", "push"].every((c) => new RegExp(`^\\s*${c}\\b`, "m").test(r.out)),
     `${r.code} ${r.out.slice(0, 120)}`);
-  check("…and says what a box costs while paused", /storage|GB\/month/.test(r.out), r.out.slice(0, 200));
+  check("…and says a box is deleted, not parked", /DELETE it/.test(r.out), r.out.slice(0, 200));
+  check("…and says what the standing cost is", /storage/.test(r.out) && /CPU seconds/.test(r.out), r.out.slice(0, 200));
   check("…and hands the host to browse --remote", /BROWSE_REMOTE=\$\(browse-box up\)/.test(r.out), r.out.slice(0, 200));
 
   r = box("nonsense");
-  check("an unknown command exits non-zero with the usage", r.code === 1 && /up \[--new\]/.test(r.out), `${r.code} ${r.out.slice(0, 80)}`);
+  check("an unknown command exits non-zero with the usage", r.code === 1 && /^\s*up \[/m.test(r.out), `${r.code} ${r.out.slice(0, 80)}`);
 
   // Without a key nothing can work, and the failure has to name the variable
   // rather than surface a 401 from a request that should never have been made.
