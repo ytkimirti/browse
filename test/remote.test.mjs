@@ -35,7 +35,10 @@ function check(name, ok, detail = "") {
   return false;
 }
 
-const ENV = { ...process.env, BROWSE_OUT: OUT, BROWSE_SESSION: SESSION, BROWSE_IDLE_MS: "120000" };
+// Ten minutes, not the usual couple: the remote half opens a SECOND session
+// midway (the pinned-port case), and the first one must not idle-close while
+// that runs — its recording is what the close assertions are about.
+const ENV = { ...process.env, BROWSE_OUT: OUT, BROWSE_SESSION: SESSION, BROWSE_IDLE_MS: "600000" };
 
 /** Client-only command against a throwaway data home — straight to browse.mjs,
  *  since a temp BROWSE_HOME has no playwright and the launcher would install a
