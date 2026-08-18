@@ -324,6 +324,35 @@ try {
     tr.split("\n### ").some((s) => s.split("\n").filter((l) => l.startsWith("- ")).length > 3),
     "no block kept more than 3 lines");
 
+  /* ------------------------------------------------- recorded window == viewport */
+  // camoufox clamps the window it is asked for to the random screen it drew for
+  // the fingerprint, so an unconstrained draw could hand back a 960x525 window
+  // for a 1280x800 ask. Playwright forces the viewport anyway: the page LAYS OUT
+  // at 1280 (screenshots look right) while the recording captures the small
+  // window and stretches it to recordVideo.size, i.e. a magnified video with the
+  // right and bottom of the page cut off. Assert the two agree, at a viewport
+  // large enough that a clamped draw is the common case, not a rare one.
+  console.log("\nthe window camoufox drew fits the recording frame");
+  if (ENGINE !== "camoufox") {
+    console.log("  skip (camoufox only — chromium takes the viewport verbatim)");
+  } else {
+    const FIT = `${SESSION}-fit`, FITOUT = mkdtempSync(join(tmpdir(), "browse-fit-"));
+    const fit = (...args) => browseIn(FIT, FITOUT, { BROWSE_VIEWPORT: "1600x1000" }, args);
+    try {
+      fit("open", `${BASE}/ui`);
+      const win = fit("eval", "[innerWidth, innerHeight, outerWidth, outerHeight].join('x')");
+      check("the window matches the 1600x1000 viewport", /1600x1000x1600x1000/.test(win.out),
+        `${win.out}\n${readFileSync(join(FITOUT, "browsed.log"), "utf8")}`);
+      // Re-rolling a clamped draw is normal; giving up on one is not.
+      check("...without giving up and recording a magnified frame",
+        !/could not fit a/.test(readFileSync(join(FITOUT, "browsed.log"), "utf8")),
+        readFileSync(join(FITOUT, "browsed.log"), "utf8"));
+    } finally {
+      fit("close");
+      rmSync(FITOUT, { recursive: true, force: true });
+    }
+  }
+
   /* ----------------------------------------------------------------- close */
   console.log("\nclose");
   const closed = browse("close", 300000);
