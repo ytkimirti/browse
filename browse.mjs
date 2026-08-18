@@ -1460,6 +1460,9 @@ const LAUNCH_ENV = {};
  *  apply. (`clear` is the exception: it reads the engine flags to pick which
  *  half of a profile to wipe.) */
 const LOCAL_CMDS = new Set(["help", "version", "whoami", "sessions", "profiles", "clear", "net", "setup"]);
+/** Session/profile selectors. Like the launch flags, they only mean anything
+ *  before the command; after it they are just another argument. */
+const SELECT_FLAGS = new Set(["-s", "--session", "-p", "--profile"]);
 
 async function client(argv) {
   // Leading flags (any order): `-s <name>` selects a named parallel session,
@@ -1499,6 +1502,16 @@ async function client(argv) {
   const late = argv.slice(1).find((a) => LAUNCH_FLAGS[a] || LAUNCH_OPTS[a]);
   if (late) {
     process.stderr.write(`browse: ${late} configures how the browser starts, so it goes BEFORE the command — e.g. \`browse ${late} ${cmd} …\`\n`);
+    return 1;
+  }
+  // Same for -s / -p: swallowed as an argument, the command quietly drives the
+  // DEFAULT session, or a profile-less browser, which reads as the profile being
+  // ignored rather than never selected at all.
+  const lateSel = argv.slice(1).find((a) => SELECT_FLAGS.has(a));
+  if (lateSel) {
+    const val = argv[argv.indexOf(lateSel, 1) + 1];
+    const pair = `${lateSel}${val && !val.startsWith("-") ? ` ${val}` : " <name>"}`;
+    process.stderr.write(`browse: ${lateSel} picks which session/profile the command runs against, so it goes BEFORE the command, e.g. \`browse ${pair} ${cmd} …\`\n`);
     return 1;
   }
   // `<name>-camoufox` is where profile `<name>` keeps its camoufox half, so a

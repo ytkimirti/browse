@@ -107,6 +107,18 @@ console.log("launch flag parsing");
   check("…on any command, naming the flag and the fix",
     r.code === 1 && r.err.includes("--no-net") && r.err.includes("browse --no-net click"), `${r.code} ${r.err}`);
 
+  r = browse("open", "http://x", "-p", "acme");
+  check("-p AFTER the command is refused, not swallowed",
+    r.code === 1 && /before the command/i.test(r.err) && r.err.includes("browse -p acme open"), `${r.code} ${r.err}`);
+
+  r = browse("url", "-s", "other");
+  check("…and so is a late -s, on any command",
+    r.code === 1 && r.err.includes("browse -s other url"), `${r.code} ${r.err}`);
+
+  r = browse("click", "text=x", "--profile");
+  check("…a late selector with no value still names the fix",
+    r.code === 1 && r.err.includes("browse --profile <name> click"), `${r.code} ${r.err}`);
+
   // A typo must not reach the daemon: everything past the flag parse is sent on
   // as a command, so `--headfull` would launch a whole browser to be told it is
   // not one.
