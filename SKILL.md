@@ -21,14 +21,20 @@ script runner.
 
 1. **Act**, then read the output closely. New console/page errors, answered
    dialogs and saved downloads are appended inline to the next command's result.
-2. **Observe often.** `snapshot` is your check step. `wait <selector>` doubles as
-   your assertion: it exits non-zero if the thing never happens.
-3. **Diagnose** from what the session already recorded: `errors`, and `net` (note
-   the last entry `#`, act, then `net --since <#> --failed` to see only what that
-   action caused).
-4. **Reach states the UI can't get you to** with `middleware`: an error path, an
-   empty list, a slow endpoint, a paid tier. A rule only affects requests made
-   after it exists, so register before `open`, or `reload` after.
+2. **Observe often.** `snapshot` is your check step. `wait` doubles as your
+   assertion: it exits non-zero if the thing never happens. Hold for what the UI
+   SAYS (`wait <sel> --text Complete`) rather than guessing a duration — a bare
+   `wait <ms>` asserts nothing, slows the run and paces the video worse.
+3. **Diagnose** from what the session already recorded: `errors` (the alarm),
+   `console` (everything the page logged), and `net` (note the last entry `#`,
+   act, then `net --since <#> --failed` to see only what that action caused).
+4. **Reach states the UI can't get you to** with `middleware` for a REQUEST (an
+   error path, an empty list, a slow endpoint, a paid tier) and `init` for page
+   STATE that must exist before the app's own JS runs (an analytics stub, a
+   consent flag, a frozen clock). Both only affect what happens after they are
+   registered, so set them up before `open`, or `reload` after. Never rewrite a
+   dev server's HTML document with `middleware` to inject a script: on Next/Vite
+   that produces an endless reload loop that reads exactly like an app bug.
 5. **Always `close`** when done, with the same `-s`. It finalizes the video and
    prints the mp4 path. A forgotten session auto-closes after 30 min idle.
 
@@ -53,7 +59,9 @@ blank, connection-refused, or a framework error overlay.
 - **`-p <name>`, on every command**, when you need to stay logged in across
   `close` → `open`. Log in by hand once under `--headful`, `close`, then reuse it.
   A profile is stored per engine, so log in on the engine you will drive with
-  (`skill/engines.md`).
+  (`skill/engines.md`). Check it is still good with `browse profiles <name>`
+  BEFORE opening: a saved login that quietly expired is the most common way a
+  run dies, and that check costs no browser and no recording.
 - **Launch flags** (`--headful`, `--chromium`, `--viewport`, …) only on the
   command that OPENS the session. On a live one browse refuses rather than
   ignoring them, so a wrong frame size means close and re-open.

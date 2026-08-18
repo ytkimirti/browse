@@ -12,6 +12,15 @@
   VISIBLE match and says so (`selector matched 2, 1 hidden - …`); when every
   match is hidden it fails saying that, rather than looking like a typo.
   `setInputFiles` is exempt — a file input is normally `display:none`.
+- **A sign-in wall you did not expect ends the run.** `open`/`goto` say so when
+  the url they land on looks like one. If it is the app's own login and you have
+  no live profile, stop and ask for a `--headful` login or a `browse state` file;
+  do not drive someone's OAuth. If it is infrastructure (`vercel.com/sso-api`,
+  Cloudflare Access, Okta), the host is unreachable to you at all — report that
+  rather than burning sessions on it.
+- **An empty `text`/`snapshot` is usually hydration, not a blank page.** Both
+  give a still-loading page a short settle and then say whether it stayed empty;
+  if it did, check `url` and `errors` before concluding the app is broken.
 - `browse` needs Node 18+ on PATH; Playwright auto-installs on the first run into
   `~/.browse/` and Chromium into Playwright's shared cache (one-time, ~2 min —
   pre-install with `browse setup`, which is also the repair command;

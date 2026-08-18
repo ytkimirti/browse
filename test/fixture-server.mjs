@@ -86,6 +86,36 @@ document.getElementById('long').textContent =
 const FRAME = `<!doctype html><meta charset=utf8><title>frame</title>
 <div id=fs>inside-the-frame</div>`;
 
+// One page for the observation commands: a status that FLIPS on a timer (so
+// `wait --text` has something to hold for that a `wait <selector>` cannot),
+// console output at three levels including one logged during page load (which
+// an eval-installed hook can never see), a slot printed from a global that only
+// an init script can have set, and a set of same-named static assets next to one
+// real api call (so `net lab` has bundle noise to hide).
+const LAB = `<!doctype html><meta charset=utf8><title>lab</title>
+<link rel=stylesheet href="/lab-styles.css">
+<div id=status>Working</div>
+<div id=seed></div>
+<img src="/lab-pixel.png">
+<script src="/lab-chunk.js"></script>
+<script>
+console.log('lab log one');
+console.warn('lab warn two');
+console.error('lab error three');
+document.getElementById('seed').textContent = String(window.__seeded === undefined ? 'none' : window.__seeded);
+fetch('/api/lab');
+setTimeout(() => { document.getElementById('status').textContent = 'Complete'; }, 1200);
+</script>`;
+
+// Body is EMPTY until a timer fills it: an observe command run right after the
+// navigation reads nothing, which is the false "the page is blank" this suite
+// pins down. #alwaysempty stays empty forever, for the other half of the case.
+const LATE = `<!doctype html><meta charset=utf8><title>late</title>
+<div id=alwaysempty></div>
+<script>setTimeout(() => { document.body.insertAdjacentHTML('beforeend', '<p>late content arrived</p>'); }, 900);</script>`;
+
+const SIGNIN = `<!doctype html><meta charset=utf8><title>sign in</title><h1>Sign in to continue</h1>`;
+
 // Fills the viewport with one colour and pins a different one to the far
 // corner, so a single pixel of a recorded frame says whether the video really
 // covers the viewport or only its magnified top-left corner.
@@ -112,10 +142,24 @@ http.createServer((req, res) => {
   if (url === "/api/user") { hits.user++; return json(res, { id: 99, name: "real-user" }); }
   if (url === "/api/config") { hits.config++; return json(res, { env: "prod", debug: false }); }
   if (url === "/api/other") { hits.other++; return json(res, { from: "server" }); }
-  if (url === "/ui" || url === "/frame" || url === "/corner") {
+  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/auth/sign-in") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    return res.end(url === "/ui" ? UI : url === "/frame" ? FRAME : CORNER);
+    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/auth/sign-in": SIGNIN }[url];
+    return res.end(body);
   }
+  if (url === "/lab-styles.css") {
+    res.writeHead(200, { "content-type": "text/css", "cache-control": "no-store" });
+    return res.end("body{font-family:system-ui}");
+  }
+  if (url === "/lab-chunk.js") {
+    res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
+    return res.end("window.__labChunk = 1;");
+  }
+  if (url === "/lab-pixel.png") {
+    res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" });
+    return res.end(PNG);
+  }
+  if (url === "/api/lab") return json(res, { lab: true });
   if (url === "/pixel.png") {
     hits.pixel++;
     res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" });
