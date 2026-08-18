@@ -57,6 +57,13 @@ button{display:block;margin:8px 0}</style>
 <input id=file type=file>
 <select id=sel><option value="a">a</option><option value="--">-- pick one --</option></select>
 <iframe id=frame src="/frame" width=200 height=80></iframe>
+<!-- A closed dialog left mounted, EARLIER in the DOM than the open one, with the
+     same roles inside it. This is what Ant Design and Radix forceMount leave
+     behind, and it is what makes [role=dialog] input resolve to nothing a user
+     can see. -->
+<div class=ghost role=dialog style="display:none"><input class=confirm><button class=go>Go</button></div>
+<div class=live role=dialog><input class=confirm><button class=go>Go</button></div>
+<div class=allhidden style="display:none"><button class=nope>Nope</button><button class=nope>Nope</button></div>
 <div id=clicks>0</div>
 <div id=dropped>no</div>
 <div id=long></div>
@@ -65,6 +72,8 @@ let n = 0;
 document.getElementById('btn').addEventListener('click', () => {
   document.getElementById('clicks').textContent = String(++n);
 });
+window.__go = 0;
+for (const b of document.querySelectorAll('.go')) b.addEventListener('click', () => { window.__go++; });
 const drop = document.getElementById('drop');
 drop.addEventListener('dragover', (e) => e.preventDefault());
 drop.addEventListener('drop', (e) => { e.preventDefault(); document.getElementById('dropped').textContent = 'yes'; });

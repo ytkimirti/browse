@@ -2992,13 +2992,41 @@ async function daemon() {
     } catch { /* toast is decorative — never fail the command over it */ }
   }
 
+  /** Playwright's `.first()` is document order, and a UI that keeps a closed
+   *  dialog mounted (Ant Design, Radix `forceMount`, a stale drawer) leaves an
+   *  invisible copy of the same input or button EARLIER in the DOM. Acting on
+   *  that copy fails the one way an agent cannot read: the command spends its
+   *  whole timeout scrolling the page toward something nobody can see, then
+   *  reports an element that is not on screen. So prefer a visible match, and
+   *  say which one was taken rather than choosing silently.
+   *
+   *  setInputFiles is exempt: a file input is normally display:none behind a
+   *  styled label, so "visible" would be exactly the wrong element there. */
+  async function actionTarget(cmd, sel) {
+    const all = L(sel);
+    const plain = { loc: all.first(), note: "", hiddenOnly: false };
+    if (cmd === "setInputFiles") return plain;
+    let total = 0;
+    try { total = await all.count(); } catch { return plain; }
+    if (total < 2) return plain;
+    let shown = 0;
+    const visible = all.filter({ visible: true });
+    try { shown = await visible.count(); } catch { return plain; }
+    if (shown === 0) return { loc: all.first(), note: "", hiddenOnly: true };
+    if (shown === total) return { loc: all.first(), note: ` (selector matched ${total}, acted on the first)`, hiddenOnly: false };
+    return {
+      loc: visible.first(),
+      note: ` (selector matched ${total}, ${total - shown} hidden - acted on the first visible)`,
+      hiddenOnly: false,
+    };
+  }
+
   /** Glide the on-page cursor to an element's center before we act on it, so the
    *  recording shows the pointer travelling there. Best-effort: the real action
    *  must never be blocked or failed by a cursor hiccup. */
-  async function cursorGlideTo(selector) {
-    if (!CURSOR || !selector) return;
+  async function cursorGlideTo(loc) {
+    if (!CURSOR || !loc) return;
     try {
-      const loc = L(selector).first();
       // Short timeouts: gliding the cursor is cosmetic, so a missing/typo'd
       // selector must NOT wait the context default here — humanType/page[cmd] is
       // what actually reports the error, and should do so fast.
@@ -3080,8 +3108,7 @@ async function daemon() {
    *  field is confirmed present, so a bad selector fails FAST (~6s, like the rest
    *  of browse) instead of hanging on the type, and the bezel never shows text that
    *  didn't actually get typed. Password fields are masked to bullets. */
-  async function humanType(selector, text, clear) {
-    const loc = L(selector).first();
+  async function humanType(loc, text, clear) {
     // Resolve the field quickly; a missing/typo'd selector should fail in seconds
     // so the caller adapts — not block for the full pressSequentially timeout.
     await loc.waitFor({ state: "visible", timeout: 4000 });
@@ -3149,10 +3176,16 @@ async function daemon() {
    *  Nms exceeded", so a text test also fires for "element intercepts pointer
    *  events", where the element WAS found and a list of look-alikes buries the
    *  real cause (a modal on top of it). */
-  async function withSelectorHint(e, selector) {
+  async function withSelectorHint(e, selector, hiddenOnly = false) {
     if (!selector) return e;
     let n = -1;
     try { n = await L(selector).count(); } catch { return e; } // bad syntax: no idea
+    // Every match is in the DOM but none is on screen, which reads as "the page
+    // never rendered it" unless we say otherwise. A closed dialog or menu that
+    // stayed mounted is the usual source.
+    if (hiddenOnly) {
+      return new Error(`${e?.message || e}\nevery element matching this selector is hidden (${n} matched) - a closed dialog or menu left in the DOM is the usual cause. Scope to what is on screen, e.g. '${selector} >> visible=true'`);
+    }
     if (n !== 0) return e; // found it - the failure is about something else
     const msg = e && e.message ? e.message : String(e);
     let hint = "";
@@ -3218,7 +3251,7 @@ async function daemon() {
       const center = async (sel) => {
         // Same timeout as every other element command: a drop target that is
         // still rendering shouldn't fail faster here than a click on it would.
-        const b = await L(sel).first().boundingBox({ timeout: 12000 });
+        const b = await (await actionTarget("drag", sel)).loc.boundingBox({ timeout: 12000 });
         if (!b) throw new Error(`drag: '${sel}' has no box on screen`);
         return [b.x + b.width / 2, b.y + b.height / 2];
       };
@@ -3231,7 +3264,7 @@ async function daemon() {
       let side = "source", failed = from;
       let sx, sy, tx, ty;
       try {
-        await cursorGlideTo(from);
+        await cursorGlideTo((await actionTarget("drag", from)).loc);
         [sx, sy] = await center(from);
         side = "target"; failed = to;
         [tx, ty] = await center(to);
@@ -3244,7 +3277,7 @@ async function daemon() {
       await page.mouse.move(sx, sy);
       await page.mouse.down();
       try {
-        await cursorGlideTo(to);
+        await cursorGlideTo((await actionTarget("drag", to)).loc);
         // Several intermediate moves: HTML5 drop zones often only arm after a few
         // dragover events, and one jump can also miss a sortable list's threshold.
         for (let i = 1; i <= 8; i++) await page.mouse.move(sx + ((tx - sx) * i) / 8, sy + ((ty - sy) * i) / 8);
@@ -3283,7 +3316,8 @@ async function daemon() {
           await page.keyboard.press(args[0]);
           return `ok - ${await brief()}`;
         }
-        await cursorGlideTo(args[0]);
+        const target = await actionTarget(cmd, args[0]);
+        await cursorGlideTo(target.loc);
         // Clicking into a field to type gets a ripple too, like a real click.
         if (CLICK_LIKE.has(cmd) || typing) await cursorClickFx();
         // press shows its key chip up front; typing shows its overlay inside
@@ -3297,14 +3331,14 @@ async function daemon() {
         let expectPopup = false;
         if (CLICK_LIKE.has(cmd)) {
           try {
-            expectPopup = await L(args[0]).first().evaluate(
+            expectPopup = await target.loc.evaluate(
               (el) => { const a = el.closest?.("a"); return !!(a && a.target === "_blank"); });
           } catch { /* detached, cross-origin: fall back to the late note */ }
         }
         // Everything past the selector goes through a Locator, which is what makes
         // an iframe scope (see L) work without any per-command handling.
         try {
-          if (typing) await humanType(args[0], args.slice(1).join(" "), cmd === "fill");
+          if (typing) await humanType(target.loc, args.slice(1).join(" "), cmd === "fill");
           // setInputFiles takes ONE array argument - spreading it would silently
           // drop every file but the first.
           else if (cmd === "setInputFiles") {
@@ -3312,14 +3346,14 @@ async function daemon() {
             // "ENOENT: stat" that reads like a browse fault.
             const missing = args.slice(1).filter((f) => !existsSync(f));
             if (missing.length) throw new Error(`setInputFiles: no such file: ${missing.join(", ")} (paths are resolved from the directory browse runs in)`);
-            await L(args[0]).first().setInputFiles(args.slice(1));
+            await target.loc.setInputFiles(args.slice(1));
           }
-          else await L(args[0]).first()[cmd](...args.slice(1));
-        } catch (e) { throw await withSelectorHint(e, args[0]); }
+          else await target.loc[cmd](...args.slice(1));
+        } catch (e) { throw await withSelectorHint(e, args[0], target.hiddenOnly); }
         // Let the popup land (context.on("page") switches to it) so this command
         // reports where the session actually IS, with its note attached.
         if (expectPopup) await context.waitForEvent("page", { timeout: 3000 }).catch(() => { /* never opened */ });
-        return `ok - ${await brief()}`;
+        return `ok - ${await brief()}${target.note}`;
       }
       if (typeof page[cmd] !== "function") throw new Error(`page has no method '${cmd}'`);
       await page[cmd](...coerce(cmd, args));

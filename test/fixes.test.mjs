@@ -128,6 +128,26 @@ try {
   check("...and the drop handler fired", read("document.getElementById('dropped').textContent") === "yes",
     read("document.getElementById('dropped').textContent"));
 
+  /* ------------------------------------------------- stale hidden matches */
+  // A closed dialog that stays mounted (Ant Design, Radix forceMount) puts an
+  // invisible twin of the same input and button EARLIER in the DOM. `.first()`
+  // is document order, so the action used to spend its whole timeout scrolling
+  // the page toward an element nobody can see, and then blamed the selector.
+  console.log("\nhidden twins do not win over what is on screen");
+  works("fill picks the visible dialog", ["fill", "[role=dialog] input.confirm", "typed"],
+    /1 hidden - acted on the first visible/);
+  check("...and the visible field got the text",
+    read("document.querySelector('.live input.confirm').value") === "typed",
+    `live='${read("document.querySelector('.live input.confirm').value")}' ghost='${read("document.querySelector('.ghost input.confirm').value")}'`);
+  check("...and the hidden twin was left alone",
+    read("document.querySelector('.ghost input.confirm').value.length") === "0",
+    read("document.querySelector('.ghost input.confirm').value"));
+  works("click picks the visible dialog too", ["click", "[role=dialog] button.go"],
+    /1 hidden - acted on the first visible/);
+  check("...and the page saw exactly one click", read("window.__go") === "1", read("window.__go"));
+  fails("all-hidden matches fail saying so, not 'no such element'",
+    ["click", ".allhidden button.nope"], /every element matching this selector is hidden \(2 matched\)/);
+
   /* ------------------------------------------------------------ screenshot */
   console.log("\nscreenshot names");
   works("a bare name is saved as .png", ["screenshot", "checkout"], /checkout\.png/);
