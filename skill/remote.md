@@ -53,9 +53,9 @@ Two box behaviours worth knowing before they confuse you:
   not over ssh's stdout.
 - **A paused box loses its public URLs and its running processes.** Use a
   keep-alive box for anything you want to come back to, and keep the work under
-  `/workspace` — the rest of the filesystem does not survive a restart. Chromium
-  alone is ~1GB, which is why `scripts/box.mjs` puts it there and asks for a
-  medium box.
+  `/workspace/home` (the writable half of the volume that survives a restart —
+  `/workspace` itself is root-owned). Chromium alone is ~1GB, which is why
+  `scripts/box.mjs` points Playwright's cache there and asks for a medium box.
 
 ## Before you point it at a shared machine
 

@@ -1074,7 +1074,8 @@ Every launch flag is also an env var (a flag on the command WINS over the env):
 Env-only (set once in a shell profile — no flag):
   BROWSE_HOME              data home for profiles/sessions/deps (default ~/.browse)
   BROWSE_OUT               override this session's artifacts dir
-  BROWSE_PORT              pin the localhost control port (default: any free port)
+  BROWSE_PORT              pin the control port (default: any free port — but with --remote it is
+                           derived from the session name, and this overrides that)
   BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
   BROWSE_WIDTH / _HEIGHT   viewport one dimension at a time (BROWSE_VIEWPORT sets both)
   BROWSE_IDLE_MODE         auto-detected dead air: cut (default) | speed | keep
@@ -1364,10 +1365,38 @@ function remoteHostname() { return String(REMOTE || "").split("@").pop().split("
 
 /** The remote daemon's control port. Pinned to the session name (rather than
  *  free-chosen like a local daemon's) so a later command reattaches by simply
- *  forwarding the same port again, without asking the remote anything. */
+ *  forwarding the same port again, without asking the remote anything. The
+ *  price of pinning is that something else on that machine can already hold the
+ *  port — BROWSE_PORT is the way out, and ensureRemoteDaemon says so when it
+ *  sees a port that answers but isn't browse. */
 function remotePortFor(session) {
+  if (FIXED_PORT) return FIXED_PORT;
   const h = createHash("sha256").update(session).digest();
   return 41000 + (((h[0] << 8) | h[1]) % 8000);
+}
+
+/** What is on the far end of the tunnel: a browse daemon, something else, or
+ *  nothing. Not a TCP connect — an `ssh -L` listener ACCEPTS every local
+ *  connection and only then finds out whether the remote target exists, so a
+ *  connect always "succeeds" and would call every free port taken. Bytes coming
+ *  back is the only signal that distinguishes the three. */
+function probePort(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: HOST, port, path: "/health", timeout: 8000 }, (res) => {
+      let buf = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => (buf += c));
+      res.on("end", () => {
+        try {
+          const health = JSON.parse(buf);
+          if (health && health.session) return resolve({ kind: "browse", health });
+        } catch { /* answered, but not with browse's /health */ }
+        resolve({ kind: "other" });
+      });
+    });
+    req.on("error", () => resolve({ kind: "none" })); // forward refused: nothing there
+    req.on("timeout", () => { req.destroy(); resolve({ kind: "none" }); });
+  });
 }
 
 /** Where a remote session's artifacts are mirrored locally. Derived from the
@@ -1427,6 +1456,11 @@ function stopTunnel() {
  *  fails HERE instead of leaving a connection whose forward silently isn't. */
 function startTunnel(localPort, remotePort) {
   mkdirSync(RUN_DIR, { recursive: true });
+  // A socket left behind by a master that is gone (killed, laptop slept) makes
+  // `ssh -M` warn and fall back to a NON-multiplexed connection: the forward
+  // works, but `-O exit` can never reach it, so every later command leaks
+  // another idle ssh. Clear a dead one before asking for a new master.
+  if (existsSync(ctlPath()) && !tunnelAlive()) stopTunnel();
   const r = ssh(["-M", "-f", "-N", "-T",
     "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
     "-L", `${HOST}:${localPort}:${HOST}:${remotePort}`, REMOTE], { timeout: 60000 });
@@ -1447,6 +1481,8 @@ function freePort() {
 }
 
 const REMOTE_BIN = process.env.BROWSE_REMOTE_BIN || "browse";
+/** Where a remote spawn's own output lands, on the remote. */
+const SPAWN_LOG = "~/.browse/spawn.log";
 const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 /** An Upstash Box, as `<box-id>@<region>.box.upstash.com`, or null. Its ssh is a
  *  gateway that attaches into the container rather than an sshd, which changes
@@ -1480,7 +1516,13 @@ async function spawnRemoteDaemon(remotePort) {
     ...(PROFILE ? { BROWSE_PROFILE: PROFILE } : {}), ...LAUNCH_ENV,
   };
   const assigns = Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join(" ");
-  const remoteCmd = `nohup setsid env ${assigns} ${REMOTE_BIN} __serve >/dev/null 2>&1 </dev/null &`;
+  // Keep the start-up output: everything that can go wrong BEFORE browse runs
+  // (not on PATH, not executable, no node) leaves no session dir and therefore
+  // no browsed.log, and on a host whose ssh swallows output this file is the
+  // only place that failure is written down at all.
+  const remoteCmd =
+    `mkdir -p ~/.browse && nohup setsid env ${assigns} ${REMOTE_BIN} __serve ` +
+    `>${SPAWN_LOG} 2>&1 </dev/null &`;
 
   if (process.env.BROWSE_REMOTE_SPAWN) {
     spawnSync("sh", ["-c", process.env.BROWSE_REMOTE_SPAWN],
@@ -1541,8 +1583,20 @@ async function ensureRemoteDaemon() {
   // The run file can be gone while the daemon is not (a cleared ~/.browse, a
   // `sessions` sweep during a dropped tunnel). The port is derived from the
   // session name, so ASK before spawning a second browser onto the same one.
-  const live = await healthInfo(local);
-  if (live && live.session === SESSION) return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...live });
+  const probe = await probePort(local);
+  if (probe.kind === "browse" && probe.health.session === SESSION) {
+    return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...probe.health });
+  }
+  // Anything ELSE on that port means a daemon spawned now would fail to bind, so
+  // say so here rather than wait out the whole start-up poll to report a browser
+  // that "did not come up".
+  if (probe.kind !== "none") {
+    stopTunnel();
+    throw new Error(
+      `port ${remotePort} on ${REMOTE} is already taken by ` +
+      `${probe.kind === "browse" ? `browse session '${probe.health.session}'` : "something that is not browse"}\n` +
+      `  Re-run with BROWSE_PORT=<a free port there>, or use a different -s name.`);
+  }
   await spawnRemoteDaemon(remotePort);
   // A cold remote installs Playwright + a browser on this first command, which
   // is minutes, not seconds — so this waits far longer than the local spawn.
@@ -1556,8 +1610,10 @@ async function ensureRemoteDaemon() {
   if (!h) {
     stopTunnel();
     throw new Error(
-      `browse daemon for session '${SESSION}' did not come up on ${REMOTE}\n` +
-      `  look at its log: ssh ${REMOTE} 'tail -40 ~/.browse/sessions/*/browsed.log'`);
+      `browse daemon for session '${SESSION}' did not come up on ${REMOTE} (port ${remotePort})\n` +
+      `  its start-up output is in ${SPAWN_LOG} on ${REMOTE}, and once it gets as far as\n` +
+      `  launching a browser, ~/.browse/sessions/*/browsed.log. Check '${REMOTE_BIN}' is\n` +
+      `  on PATH and executable there.`);
   }
   return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...h });
 }

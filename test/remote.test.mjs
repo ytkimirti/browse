@@ -56,6 +56,13 @@ function browseLive(...args) {
 function browseRemote(...args) {
   return browseLive("--remote", REMOTE_HOST, ...args);
 }
+/** …with extra env, for the cases that pin the remote control port. */
+function browseRemoteEnv(env, ...args) {
+  const r = spawnSync(BIN, ["--remote", REMOTE_HOST, ...args], {
+    encoding: "utf8", env: { ...ENV, ...env }, timeout: 300000,
+  });
+  return { code: r.status, out: (r.stdout || "").trim(), err: (r.stderr || "").trim() };
+}
 async function get(port, path) {
   const res = await fetch(`http://127.0.0.1:${port}${path}`);
   const buf = Buffer.from(await res.arrayBuffer());
@@ -175,6 +182,20 @@ if (!REMOTE_HOST) {
     // not allowed to turn an error into a hang or a zero exit.
     r = browseRemote("click", "text=no-such-element-anywhere");
     check("a failing remote command exits non-zero", r.code === 1 && /Timeout|not found|waiting for/i.test(r.err), `${r.code} ${r.err}`);
+
+    // The remote control port is derived from the session name, so something
+    // else already holding it has to fail FAST and say which port — not spend
+    // the whole start-up poll to report a browser that "did not come up". Two
+    // sessions pinned to one port is the cheapest way to really occupy it.
+    const pinned = { BROWSE_PORT: "47321" };
+    r = browseRemoteEnv(pinned, "-s", `${SESSION}-pin`, "open", "about:blank");
+    check("a session on a pinned remote port opens", r.code === 0, `${r.code} ${r.err}`);
+    r = browseRemoteEnv(pinned, "-s", `${SESSION}-pin2`, "url");
+    check("a second session on that port is refused, not waited out",
+      r.code === 1 && /already taken by browse session/.test(r.err), `${r.code} ${r.err}`);
+    check("…and the error names the port and the way out",
+      /47321/.test(r.err) && /BROWSE_PORT/.test(r.err), r.err);
+    browseRemoteEnv(pinned, "-s", `${SESSION}-pin`, "close");
 
     r = browseRemote("close");
     const mp4 = (/mp4:\s+(\S+)/.exec(r.out) || [])[1];
