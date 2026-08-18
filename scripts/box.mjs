@@ -249,7 +249,8 @@ const HELP = `box.mjs — disposable Upstash Boxes for 'browse --remote'
                               ~18s, nothing to install. Builds the image first if there
                               isn't one yet (~6 min, once). The box also deletes itself
                               after --ttl (default ${TTL_DEFAULT}s) if you never call down
-  down [box]                  DELETE it. Defaults to the box 'up' made
+  down [box]                  DELETE it. Defaults to the LAST box 'up' made, so name the box
+                              when you are running more than one
   image [--size medium]       build the warm image: a box, browse installed on it, snapshot
                               taken, box thrown away. Re-run after a browse update
   ls                          boxes and images on the account
@@ -259,6 +260,9 @@ const HELP = `box.mjs — disposable Upstash Boxes for 'browse --remote'
                               nothing back
   push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}, skips .git/node_modules)
   pull <box> <remote> [local]       copy one file out
+  url <box> <port>            public https URL for a port, to hand someone who wants to click
+                              around the app themselves. The server must be listening on
+                              0.0.0.0, not 127.0.0.1, or the URL answers 502
   install <box>               (re)install browse on a box, e.g. to refresh the image builder
 
 <box> is a box id or the '<id>@…' host you pass to browse --remote, so $BROWSE_REMOTE works.

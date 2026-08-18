@@ -249,6 +249,62 @@ if (!REMOTE_HOST) {
   } finally {
     browseRemote("close");
   }
+
+  // A box's ssh gateway swallows the output of the commands that describe the
+  // REMOTE machine, so browse refuses rather than printing nothing. The way out
+  // it names has to be one that works: telling someone to ssh in is telling them
+  // to use the very gateway that ate the answer.
+  {
+    const r = browseRemote("profiles");
+    const isBox = /@(?:[\w-]+\.)?box\.upstash\.com$/.test(REMOTE_HOST);
+    check("a remote-only command that relays nothing fails loudly",
+      r.code === 1 && /relays no output back/.test(r.err), `${r.code} ${r.err}`);
+    check(isBox ? "…and points a box at browse-box exec, not at ssh"
+                : "…and points an ordinary host at an interactive ssh",
+      isBox ? /browse-box exec \S+ 'browse profiles'/.test(r.err) && !/instead: ssh/.test(r.err)
+            : /ssh /.test(r.err),
+      r.err);
+  }
+
+  /* ── what the caller's environment does, or fails to do, over there ────── */
+
+  // A remote is where the camoufox fallback actually happens: no server has
+  // camoufox, so EVERY default remote session is a chromium one that was asked
+  // for camoufox. The overlays have to follow the engine that launched, not the
+  // one requested — the recording is the deliverable, and a video with no cursor
+  // and no keystrokes is the failure this catches. Both overlays announce
+  // themselves on `window`, which is the only observable that does not require
+  // reading pixels back out of the mp4.
+  const OVERLAYS = 'JSON.stringify([!!window.__browseCursor, !!window.__browseKeys])';
+  try {
+    let r = browseRemote("-s", `${SESSION}-fb`, "open", "https://example.com");
+    check("a default-engine remote session opens", r.code === 0, `${r.code} ${r.err}`);
+    check("…having fallen back to chromium (no camoufox on a server)",
+      /camoufox not installed/.test(r.out), r.out);
+    r = browseRemote("-s", `${SESSION}-fb`, "eval", OVERLAYS);
+    check("…and the fallback keeps the cursor AND keystroke overlays",
+      r.code === 0 && /\[true,true\]/.test(r.out.replace(/\s/g, "")), `${r.code} ${r.out}`);
+  } finally {
+    browseRemote("-s", `${SESSION}-fb`, "close");
+  }
+
+  // `browse help` promises every launch flag is also an env var and that the
+  // rarer knobs are env-only. Under --remote the daemon is a DIFFERENT process
+  // on another machine, so a var read only by the client is a knob that silently
+  // does nothing — which is worse than an error. One of each: a flag's env twin,
+  // and a knob with no flag at all.
+  try {
+    let r = browseRemoteEnv({ BROWSE_CURSOR: "0", BROWSE_VIEWPORT: "640x480" },
+      "-s", `${SESSION}-env`, "open", "https://example.com");
+    check("a remote session carrying env-only knobs opens", r.code === 0, `${r.code} ${r.err}`);
+    r = browseRemote("-s", `${SESSION}-env`, "eval", OVERLAYS);
+    check("BROWSE_CURSOR=0 reaches the remote daemon",
+      r.code === 0 && /\[false,true\]/.test(r.out.replace(/\s/g, "")), `${r.code} ${r.out}`);
+    r = browseRemote("-s", `${SESSION}-env`, "eval", "[innerWidth, innerHeight].join('x')");
+    check("…so does BROWSE_VIEWPORT", r.code === 0 && /640x480/.test(r.out), `${r.code} ${r.out}`);
+  } finally {
+    browseRemote("-s", `${SESSION}-env`, "close");
+  }
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed`);

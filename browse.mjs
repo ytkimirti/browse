@@ -1094,7 +1094,9 @@ Every launch flag is also an env var (a flag on the command WINS over the env):
 
 Env-only (set once in a shell profile — no flag):
   BROWSE_HOME              data home for profiles/sessions/deps (default ~/.browse)
-  BROWSE_OUT               override this session's artifacts dir
+  BROWSE_OUT               override this session's artifacts dir (LOCAL sessions only — with
+                           --remote the browser writes on the remote and the copies land in a
+                           mirror dir, which 'close' and 'dir' print)
   BROWSE_PORT              pin the control port (default: any free port — but with --remote it is
                            derived from the session name, and this overrides that)
   BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
@@ -1473,6 +1475,42 @@ function stopTunnel() {
   if (existsSync(ctlPath())) ssh(["-O", "exit", REMOTE], { stdio: "ignore", timeout: 20000 });
   rmSync(ctlPath(), { force: true });
 }
+/** The BROWSE_* knobs that belong to the machine running the BROWSER, carried
+ *  from this shell into the remote daemon's spawn env.
+ *
+ *  `browse help` promises every launch flag is also an env var, and that the
+ *  rarer knobs (BROWSE_IDLE_MODE, BROWSE_TYPE_DELAY, …) are env-only. Without
+ *  this, --remote kept that promise for the flags — which travel as LAUNCH_ENV —
+ *  and quietly broke it for the env vars, which were read by the CLIENT and
+ *  never sent anywhere. `BROWSE_CURSOR=0 browse --remote … open` recorded a
+ *  cursor.
+ *
+ *  A deny-list, not an allow-list, so an env-only knob added later travels
+ *  without anyone remembering to list it. What it denies is the vars that
+ *  describe THIS side: where ssh goes, how it authenticates, which port and
+ *  address the tunnel uses, and where the local files live — BROWSE_HOME above
+ *  all, since a mac path handed to the box points its data dir at a directory
+ *  that does not exist there.
+ *
+ *  BROWSE_OUT is denied for a subtler reason: it names a LOCAL directory the
+ *  caller wants artifacts in, and the remote's artifacts arrive through the
+ *  mirror, not through the remote's own out dir. Forwarding it would make the
+ *  box write to the caller's mac path. `close` prints where the mp4 really is.
+ */
+const REMOTE_ENV_DENY = new Set([
+  "BROWSE_REMOTE", "BROWSE_REMOTE_BIN", "BROWSE_REMOTE_SPAWN",
+  "BROWSE_SSH_PASSWORD", "BROWSE_SSH_OPTS",
+  "BROWSE_HOME", "BROWSE_OUT", "BROWSE_PORT", "BROWSE_BIND",
+  "BROWSE_SESSION", "BROWSE_PROFILE",
+]);
+function forwardedEnv() {
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("BROWSE_") && !REMOTE_ENV_DENY.has(k) && v !== undefined) out[k] = String(v);
+  }
+  return out;
+}
+
 /** Bring up the master + forward. ExitOnForwardFailure so a taken local port
  *  fails HERE instead of leaving a connection whose forward silently isn't. */
 function startTunnel(localPort, remotePort) {
@@ -1530,6 +1568,7 @@ function upstashBox() {
  *  the forwarded port, which ensureRemoteDaemon is already waiting for. */
 async function spawnRemoteDaemon(remotePort) {
   const env = {
+    ...forwardedEnv(),
     BROWSE_SESSION: SESSION, BROWSE_PORT: String(remotePort),
     // A forward into a CONTAINER arrives on its external interface, not its
     // loopback, so a loopback-only daemon would be unreachable through the very
@@ -1712,7 +1751,12 @@ function sshPassthrough(argv) {
   if (!r.stdout && !r.stderr && r.status !== 0) {
     process.stderr.write(
       `browse: ${REMOTE} ran '${argv[0]}' but relays no output back over ssh (an Upstash Box does this).\n` +
-      `        Read the answer from an interactive session instead: ssh ${REMOTE}, then '${REMOTE_BIN} ${argv.join(" ")}'.\n`);
+      // On a box the suggestion cannot be "ssh in": the gateway that swallowed
+      // this output is the same one an interactive session gets. `browse-box
+      // exec` goes through the box's HTTP API instead, which does relay output.
+      (upstashBox()
+        ? `        Run it through the box's API instead: browse-box exec ${upstashBox().id} '${REMOTE_BIN} ${argv.join(" ")}'.\n`
+        : `        Read the answer from an interactive session instead: ssh ${REMOTE}, then '${REMOTE_BIN} ${argv.join(" ")}'.\n`));
     return 1;
   }
   return r.status === null ? 1 : r.status;

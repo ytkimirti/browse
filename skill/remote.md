@@ -33,7 +33,13 @@ spawns, and pointing it at a dead port records the failure.
   the recording stays on the remote (browse tells you where). Close it properly.
 - Commands that read the remote's disk — `profiles`, `clear`, `setup` — run over
   there, because that is the machine they are about. `net` still answers here: it
-  copies the session's request log down first.
+  copies the session's request log down first. On a box those three run but their
+  OUTPUT is swallowed by the ssh gateway, so browse tells you to re-run them
+  through `browse-box exec` instead.
+- **`BROWSE_OUT` is the one knob that does nothing here.** The browser writes on
+  the remote and the copies land in a mirror dir; take the artifact paths from
+  `close` and `dir` rather than choosing them. Every other browser-side env var
+  reaches the remote daemon, so a flag and its env twin still agree.
 
 ## Upstash Box
 
@@ -84,7 +90,12 @@ volume; `push` and the provisioning both default there.
 `browse-box url <box> <port>` gives a port a public
 `https://<box-id>-<port>.preview.box.upstash.com` URL — the link to hand someone
 who wants to click around the app themselves rather than watch the video. It
-works on these boxes despite what the Box docs' feature table says.
+works on these boxes despite what the Box docs' feature table says, but only if
+the server is bound to `0.0.0.0`: the proxy reaches the container from outside,
+so a dev server on `127.0.0.1` answers 502. `browse open` does not care either
+way, so a server started the usual way records fine and only the shareable link
+is dead. Start it with `--host 0.0.0.0` (or your framework's equivalent) when you
+want both.
 
 ## Before you point it at a shared machine
 
