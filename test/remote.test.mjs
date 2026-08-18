@@ -151,6 +151,36 @@ try {
   browseLive("close");
 }
 
+/* ── browse-box: the Upstash Box side ────────────────────────────────────── */
+
+// Offline only. Everything past argument handling talks to a real account, and
+// the box lifecycle (up/push/exec/down) is exercised by hand against one —
+// there is no way to fake a box that would prove anything about the real API.
+console.log("\nbrowse-box");
+{
+  const box = (...args) => {
+    const r = spawnSync(join(ROOT, "bin", "browse-box"), args, {
+      encoding: "utf8", env: { ...process.env, UPSTASH_BOX_API_KEY: "" }, timeout: 60000,
+    });
+    return { code: r.status, out: (r.stdout || "").trim(), err: (r.stderr || "").trim() };
+  };
+  let r = box("help");
+  check("browse-box help lists the lifecycle",
+    r.code === 0 && /\bup\b/.test(r.out) && /\bdown\b/.test(r.out) && /\bexec\b/.test(r.out) && /\bpush\b/.test(r.out),
+    `${r.code} ${r.out.slice(0, 120)}`);
+  check("…and says what a box costs while paused", /storage|GB\/month/.test(r.out), r.out.slice(0, 200));
+  check("…and hands the host to browse --remote", /BROWSE_REMOTE=\$\(browse-box up\)/.test(r.out), r.out.slice(0, 200));
+
+  r = box("nonsense");
+  check("an unknown command exits non-zero with the usage", r.code === 1 && /up \[--new\]/.test(r.out), `${r.code} ${r.out.slice(0, 80)}`);
+
+  // Without a key nothing can work, and the failure has to name the variable
+  // rather than surface a 401 from a request that should never have been made.
+  r = box("ls");
+  check("no API key fails with the variable to set",
+    r.code === 1 && /UPSTASH_BOX_API_KEY/.test(r.err), `${r.code} ${r.err.slice(0, 120)}`);
+}
+
 /* ── a real remote, end to end ───────────────────────────────────────────── */
 
 if (!REMOTE_HOST) {

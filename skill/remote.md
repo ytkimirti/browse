@@ -37,25 +37,53 @@ spawns, and pointing it at a dead port records the failure.
 
 ## Upstash Box
 
-`node scripts/box.mjs create` provisions one end to end and prints the exact
-`--remote` destination; `install <box-id>` does it to a box you already have. It
-needs `UPSTASH_BOX_API_KEY`, which is also what browse hands the box's ssh as its
-password, so there is nothing further to configure.
+`browse-box` (next to `browse`; `browse-box help` is its command surface) is the
+box side of this: bring one up, put files on it, run things on it, stop it. It
+needs `UPSTASH_BOX_API_KEY`, which is also what browse hands the box's ssh as a
+password, so a box needs no second credential.
 
-Two box behaviours worth knowing before they confuse you:
+The shape of a session — the app runs on the box, so `browse open` at
+`127.0.0.1` finds it:
 
-- **Its ssh relays no output back.** A command runs on the box and returns
-  nothing, not even an exit status. browse works around this where it can (it
-  proves the daemon started by asking it, not by trusting ssh) and says so where
-  it cannot: `browse --remote <box> profiles` will tell you to read the answer
-  from an interactive `ssh` session instead of printing an empty list. The
-  commands you actually run in the loop are unaffected — they go over the tunnel,
-  not over ssh's stdout.
-- **A paused box loses its public URLs and its running processes.** Use a
-  keep-alive box for anything you want to come back to, and keep the work under
-  `/workspace/home` (the writable half of the volume that survives a restart —
-  `/workspace` itself is root-owned). Chromium alone is ~1GB, which is why
-  `scripts/box.mjs` points Playwright's cache there and asks for a medium box.
+```sh
+export BROWSE_REMOTE=$(browse-box up)          # resumes your box, ~1s
+browse-box push $BROWSE_REMOTE ./my-app        # copy the code over
+browse-box exec $BROWSE_REMOTE 'cd /workspace/home/my-app && npm i && (npm run dev &)'
+browse open http://127.0.0.1:3000
+...
+browse close                                   # the mp4 lands here
+browse-box down                                # meter off
+```
+
+**Use `exec`, not ssh, to run things on a box.** A box's ssh gateway runs your
+command and then throws its output and exit status away, and kills whatever it
+left running — so an `ssh box 'npm run dev &'` dev server dies the moment the
+command returns. `browse-box exec` goes through the box's API, which does
+neither.
+
+**`up` resumes, it does not create.** A paused box keeps its whole disk — the
+browse checkout, ~1GB of browsers, the apt packages — and comes back in under a
+second, while costing only storage. The first `up` provisions one (a few
+minutes); every later one resumes it. Snapshots are *not* a shortcut here: a
+snapshot does not carry the install, so restoring one still means provisioning.
+
+You can skip `up` entirely once a box is provisioned: a `browse --remote`
+command wakes a paused box by itself (about 5 seconds to the first page). `down`
+is the half that matters — nothing stops the meter for you except the idle
+auto-pause.
+
+**What it costs.** CPU only while the box is actually running, plus about
+$0.10/GB/month for a paused box's disk. `down` stops the CPU meter immediately,
+and a box you forget pauses itself when idle. Avoid keep-alive boxes for this:
+they bill a flat monthly rate whether you use them or not.
+
+**Keep everything under `/workspace/home`.** It is the box user's half of the
+volume that survives a restart; the rest of the filesystem does not. `push` and
+the provisioning both default there.
+
+`browse-box url <box> <port>` gives a port a public
+`https://<box-id>-<port>.preview.box.upstash.com` URL — the link to hand someone
+who wants to click around the app themselves rather than watch the video.
 
 ## Before you point it at a shared machine
 
