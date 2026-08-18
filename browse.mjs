@@ -1456,11 +1456,13 @@ function stopTunnel() {
  *  fails HERE instead of leaving a connection whose forward silently isn't. */
 function startTunnel(localPort, remotePort) {
   mkdirSync(RUN_DIR, { recursive: true });
-  // A socket left behind by a master that is gone (killed, laptop slept) makes
-  // `ssh -M` warn and fall back to a NON-multiplexed connection: the forward
-  // works, but `-O exit` can never reach it, so every later command leaks
-  // another idle ssh. Clear a dead one before asking for a new master.
-  if (existsSync(ctlPath()) && !tunnelAlive()) stopTunnel();
+  // Never ask for a master while a socket for one is still on disk — alive or
+  // not, `ssh -M` warns and falls back to a NON-multiplexed connection, whose
+  // forward works but which `-O exit` can then never reach, so every later
+  // command leaks another idle ssh. Reaching here means the existing tunnel was
+  // no use anyway (its daemon is gone, or it answers for another session), so
+  // take it down first. stopTunnel handles both live and stale.
+  if (existsSync(ctlPath())) stopTunnel();
   const r = ssh(["-M", "-f", "-N", "-T",
     "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
     "-L", `${HOST}:${localPort}:${HOST}:${remotePort}`, REMOTE], { timeout: 60000 });
