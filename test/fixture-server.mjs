@@ -86,6 +86,14 @@ document.getElementById('long').textContent =
 const FRAME = `<!doctype html><meta charset=utf8><title>frame</title>
 <div id=fs>inside-the-frame</div>`;
 
+// Fills the viewport with one colour and pins a different one to the far
+// corner, so a single pixel of a recorded frame says whether the video really
+// covers the viewport or only its magnified top-left corner.
+const CORNER = `<!doctype html><meta charset=utf8><title>corner</title>
+<style>html,body{margin:0;height:100%;background:#00ff00}
+#br{position:fixed;right:0;bottom:0;width:120px;height:120px;background:#0000ff}</style>
+<div id=br></div>`;
+
 // 1x1 transparent png
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -104,9 +112,9 @@ http.createServer((req, res) => {
   if (url === "/api/user") { hits.user++; return json(res, { id: 99, name: "real-user" }); }
   if (url === "/api/config") { hits.config++; return json(res, { env: "prod", debug: false }); }
   if (url === "/api/other") { hits.other++; return json(res, { from: "server" }); }
-  if (url === "/ui" || url === "/frame") {
+  if (url === "/ui" || url === "/frame" || url === "/corner") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    return res.end(url === "/ui" ? UI : FRAME);
+    return res.end(url === "/ui" ? UI : url === "/frame" ? FRAME : CORNER);
   }
   if (url === "/pixel.png") {
     hits.pixel++;

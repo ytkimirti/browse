@@ -2206,6 +2206,23 @@ function logDaemon(msg) {
  * Returns null when camoufox isn't importable or its browser isn't fetched, so
  * the caller can fall back to Chromium instead of dying.
  */
+/** The window size camoufox actually settled on, read back out of the
+ *  fingerprint it just generated. That fingerprint arrives as CAMOU_CONFIG_1..N
+ *  env chunks that concatenate (in numeric order) into one JSON blob. Returns
+ *  null when the blob is unreadable — an unknown window is not a mismatch. */
+function camoufoxWindow(opts) {
+  try {
+    const chunks = Object.keys(opts?.env || {})
+      .filter((k) => /^CAMOU_CONFIG_\d+$/.test(k))
+      .sort((a, b) => Number(a.split("_").pop()) - Number(b.split("_").pop()));
+    if (!chunks.length) return null;
+    const cfg = JSON.parse(chunks.map((k) => opts.env[k]).join(""));
+    const width = cfg["window.outerWidth"], height = cfg["window.outerHeight"];
+    return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null;
+  } catch { return null; }
+}
+
+let CAMOU_WINDOW_NOTE = null; // set when camoufox could not fit the viewport
 let _camouOpts; // undefined = unresolved · object = options · null = unavailable
 function camoufoxLaunchOptions() {
   if (_camouOpts !== undefined) return _camouOpts;
@@ -2215,9 +2232,21 @@ function camoufoxLaunchOptions() {
   // window that disagrees with its own screen — a classic automation tell, and
   // in testing it was the difference between clearing Cloudflare and sitting on
   // the challenge forever. `humanize` adds human-like cursor timing.
+  //
+  // The screen constraint is NOT cosmetic. camoufox picks a random screen for
+  // the fingerprint and CLAMPS `window` to fit it, so an unconstrained draw
+  // occasionally hands back a 960x525 (or smaller) window for a 1280x800 ask.
+  // Playwright then forces the 1280x800 viewport anyway: the page LAYS OUT at
+  // 1280 (so screenshots look right) while the real window stays small, and the
+  // recording — which captures the window surface and stretches it to
+  // recordVideo.size — comes out magnified with the right/bottom of the page cut
+  // off. Pinning the screen to at least the viewport keeps window == viewport,
+  // which is also the anti-detection invariant below.
   const script =
-    "import json,sys;from camoufox.utils import launch_options;" +
-    `print(json.dumps(launch_options(headless=True,humanize=True,window=(${VIEWPORT.width},${VIEWPORT.height}),i_know_what_im_doing=True)))`;
+    "import json,sys;from browserforge.fingerprints import Screen;" +
+    "from camoufox.utils import launch_options;" +
+    `print(json.dumps(launch_options(headless=True,humanize=True,window=(${VIEWPORT.width},${VIEWPORT.height}),` +
+    `screen=Screen(min_width=${VIEWPORT.width},min_height=${VIEWPORT.height}),i_know_what_im_doing=True)))`;
   // camoufox is a Python package but this skill is global, so a project venv is
   // no good. `uv tool install camoufox` is the normal way in, and its venv
   // python is not on PATH — look there before falling back to a system python
@@ -2227,18 +2256,44 @@ function camoufoxLaunchOptions() {
     join(homedir(), ".local/share/uv/tools/camoufox/bin/python"),
     "python3",
   ].filter(Boolean);
+  let clamped = null; // last draw whose window came back smaller than the viewport
   for (const py of candidates) {
-    try {
-      const r = spawnSync(py, ["-c", script], { encoding: "utf8", timeout: 60000 });
-      if (r.status !== 0) continue;
-      const opts = JSON.parse(r.stdout);
-      if (!opts?.executable_path || !existsSync(opts.executable_path)) {
-        logDaemon(`camoufox (${py}) reports no browser binary — run \`${py} -m camoufox fetch\``);
-        continue;
-      }
-      logDaemon(`camoufox options from ${py}`);
-      return (_camouOpts = opts);
-    } catch { /* try the next candidate */ }
+    // Each call re-rolls the fingerprint, so a draw that still comes back
+    // clamped is worth retrying before giving up on this python.
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        const r = spawnSync(py, ["-c", script], { encoding: "utf8", timeout: 60000 });
+        if (r.status !== 0) break;
+        const opts = JSON.parse(r.stdout);
+        if (!opts?.executable_path || !existsSync(opts.executable_path)) {
+          logDaemon(`camoufox (${py}) reports no browser binary — run \`${py} -m camoufox fetch\``);
+          break;
+        }
+        const win = camoufoxWindow(opts);
+        if (win && (win.width !== VIEWPORT.width || win.height !== VIEWPORT.height)) {
+          // Never silently record a magnified, half-cropped video: a screen so
+          // small that no fingerprint can hold the viewport lands here.
+          logDaemon(`camoufox (${py}) clamped the window to ${win.width}x${win.height} for a ` +
+                    `${VIEWPORT.width}x${VIEWPORT.height} viewport (attempt ${attempt}) — re-rolling`);
+          clamped = { opts, win };
+          continue;
+        }
+        logDaemon(`camoufox options from ${py}`);
+        return (_camouOpts = opts);
+      } catch { break; /* try the next candidate */ }
+    }
+  }
+  if (clamped) {
+    // Camoufox works, it just never drew a screen big enough. Recording on a
+    // window smaller than the viewport is what magnifies the video, so say so
+    // instead of pretending the session is fine — the fix is a viewport that
+    // fits a real screen.
+    CAMOU_WINDOW_NOTE =
+      `camoufox could not fit a ${VIEWPORT.width}x${VIEWPORT.height} window on any generated screen ` +
+      `(smallest tried ${clamped.win.width}x${clamped.win.height}) - the recording will be magnified ` +
+      `and cropped. Re-open with a smaller --viewport.`;
+    logDaemon(CAMOU_WINDOW_NOTE);
+    return (_camouOpts = clamped.opts);
   }
   logDaemon(`no usable camoufox python (tried: ${candidates.join(", ")})`);
   return (_camouOpts = null);
@@ -2310,6 +2365,8 @@ async function daemon() {
                "`~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch`, " +
                "and re-run `browse setup`.");
       engine = "chromium";
+    } else if (CAMOU_WINDOW_NOTE) {
+      fallback(CAMOU_WINDOW_NOTE); // camoufox still launches, the frame just won't match
     }
   }
   logDaemon(`engine ${engine}${engine === "camoufox" ? ` (${camouOpts.executable_path})` : ""}`);
@@ -2328,7 +2385,19 @@ async function daemon() {
     const extra = camou
       ? { executablePath: camouOpts.executable_path,
           env: camouOpts.env,
-          firefoxUserPrefs: camouOpts.firefox_user_prefs }
+          firefoxUserPrefs: {
+            ...camouOpts.firefox_user_prefs,
+            // Firefox paints at the DISPLAY's device pixel ratio by default
+            // (-1 = follow the system), and its video recorder writes those
+            // device pixels straight into the fixed recordVideo frame with no
+            // downscale. Run the same session on a Retina Mac and the whole
+            // recording comes out magnified 2x with the right and bottom of the
+            // page cut off — while `screenshot` stays correct, because that path
+            // rescales to CSS pixels. camoufox spoofs window.devicePixelRatio
+            // for the page regardless, so pinning the PAINT scale to 1 costs no
+            // fidelity and is the only thing that keeps the video honest.
+            "layout.css.devPixelsPerPx": "1",
+          } }
       : {};
     if (PROFILE) {
       // Firefox profiles and Chromium user-data dirs are different formats, so

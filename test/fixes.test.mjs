@@ -324,6 +324,68 @@ try {
     tr.split("\n### ").some((s) => s.split("\n").filter((l) => l.startsWith("- ")).length > 3),
     "no block kept more than 3 lines");
 
+  /* --------------------------------------------- the video covers the viewport */
+  // Firefox paints at the display's device pixel ratio and writes those device
+  // pixels straight into the fixed recordVideo frame, so on a Retina screen the
+  // whole recording came out magnified 2x with the right and bottom of the page
+  // cut off — while every screenshot stayed correct, which is what made it so
+  // hard to see. /corner is green with a blue square pinned bottom-right: sample
+  // that corner out of the last recorded frame and the scale is no longer a
+  // matter of opinion.
+  console.log("\nthe recorded frame covers the whole viewport");
+  {
+    const VID = `${SESSION}-vid`, VIDOUT = mkdtempSync(join(tmpdir(), "browse-vid-"));
+    const vid = (...args) => browseIn(VID, VIDOUT, {}, args);
+    try {
+      vid("open", `${BASE}/corner`);
+      vid("wait", "1500");
+      vid("close", 300000);
+      const mp4 = join(VIDOUT, "recording.mp4");
+      // -sseof reads from the end: the first frames can still be the blank
+      // lead-in, and the corner only exists once the page has painted.
+      const px = spawnSync("ffmpeg", ["-v", "error", "-sseof", "-0.4", "-i", mp4, "-frames:v", "1",
+        "-vf", "crop=2:2:iw-20:ih-20", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        { encoding: "buffer", maxBuffer: 1e6 });
+      const rgb = px.stdout && px.stdout.length >= 3 ? [...px.stdout.subarray(0, 3)] : null;
+      // Blue corner = the frame reaches the bottom-right of the viewport. Green
+      // there = the frame is a magnified crop of the top-left.
+      check("the bottom-right of the page is in the recorded frame",
+        !!rgb && rgb[2] > 150 && rgb[1] < 100,
+        `sampled rgb=${rgb} from ${mp4} (green there means a magnified crop)`);
+    } finally {
+      rmSync(VIDOUT, { recursive: true, force: true });
+    }
+  }
+
+  /* ------------------------------------------------- recorded window == viewport */
+  // camoufox clamps the window it is asked for to the random screen it drew for
+  // the fingerprint, so an unconstrained draw could hand back a 960x525 window
+  // for a 1280x800 ask. Playwright forces the viewport anyway: the page LAYS OUT
+  // at 1280 (screenshots look right) while the recording captures the small
+  // window and stretches it to recordVideo.size, i.e. a magnified video with the
+  // right and bottom of the page cut off. Assert the two agree, at a viewport
+  // large enough that a clamped draw is the common case, not a rare one.
+  console.log("\nthe window camoufox drew fits the recording frame");
+  if (ENGINE !== "camoufox") {
+    console.log("  skip (camoufox only — chromium takes the viewport verbatim)");
+  } else {
+    const FIT = `${SESSION}-fit`, FITOUT = mkdtempSync(join(tmpdir(), "browse-fit-"));
+    const fit = (...args) => browseIn(FIT, FITOUT, { BROWSE_VIEWPORT: "1600x1000" }, args);
+    try {
+      fit("open", `${BASE}/ui`);
+      const win = fit("eval", "[innerWidth, innerHeight, outerWidth, outerHeight].join('x')");
+      check("the window matches the 1600x1000 viewport", /1600x1000x1600x1000/.test(win.out),
+        `${win.out}\n${readFileSync(join(FITOUT, "browsed.log"), "utf8")}`);
+      // Re-rolling a clamped draw is normal; giving up on one is not.
+      check("...without giving up and recording a magnified frame",
+        !/could not fit a/.test(readFileSync(join(FITOUT, "browsed.log"), "utf8")),
+        readFileSync(join(FITOUT, "browsed.log"), "utf8"));
+    } finally {
+      fit("close");
+      rmSync(FITOUT, { recursive: true, force: true });
+    }
+  }
+
   /* ----------------------------------------------------------------- close */
   console.log("\nclose");
   const closed = browse("close", 300000);
