@@ -20,15 +20,18 @@ Not on npm yet, so clone it:
 
 ```sh
 git clone https://github.com/ytkimirti/browse.git ~/browse
-ln -s ~/browse/bin/browse      ~/.local/bin/browse
-ln -s ~/browse/bin/browse-box  ~/.local/bin/browse-box
-ln -s ~/browse                 ~/.claude/skills/browse   # the agent skill
-browse setup
+~/browse/bin/browse install
 ```
 
-Node 18+, and `~/.local/bin` on your `PATH`. Playwright and a browser install
-themselves into `~/.browse` on first use, or up front with `setup`. One clone
-holds the CLI and the skill, so `git pull` updates both.
+`install` puts `browse` on your PATH (`~/.local/bin`), links the clone in as an
+agent skill for Claude Code (`~/.claude/skills`) and for anything that reads
+`~/.agents/skills`, then downloads Playwright and a browser. Name directories to
+link somewhere else instead, a project's own `./.agents/skills` say. Needs Node
+18+, and re-running it is safe.
+
+One clone is both the CLI and the skill, so `git pull` updates them together.
+The npm package lands in `~/.browse`; the browser binaries go to Playwright's
+shared cache, so one you already downloaded for another project is reused.
 
 ## Every session leaves
 
@@ -43,17 +46,17 @@ holds the CLI and the skill, so `git pull` updates both.
 ## Record on a throwaway machine
 
 A browser, a dev server and ffmpeg are the heaviest things an agent runs.
-`browse-box` moves all three onto a disposable [Upstash
+`browse box` moves all three onto a disposable [Upstash
 Box](https://upstash.com/docs/box) and brings the mp4 back here. Two lines,
 once:
 
 ```sh
-browse-box key      # paste a Box API key from console.upstash.com (it starts with box_)
-browse-box up       # first run bakes a reusable image (~6 min); every one after is ~13s
+browse box key      # prompts for a Box API key from console.upstash.com (starts with box_)
+browse box up       # first run bakes a reusable image (~6 min); every one after is ~13s
 ```
 
-`up` prints the host to pass as `--remote`, and `browse-box help` shows a whole
-session end to end. `browse-box down` deletes the box. Nothing is billed once it
+`up` prints the host to pass as `--remote`, and `browse box help` shows a whole
+session end to end. `browse box down` deletes it. Nothing is billed once the box
 is gone, and the image that makes `up` fast costs cents a month.
 
 ## Beyond the basics

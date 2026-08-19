@@ -1,6 +1,6 @@
 ---
 name: browse
-description: Drive a real, recorded browser step by step with the local `browse` CLI, capturing every session as a video plus transcript, per-step screenshots and a network log. Use when the user wants a video/demo/walkthrough of a web app, wants a UI change verified or a frontend bug reproduced in a real browser, wants a local dev server driven end to end, or says "browse".
+description: Drive a real, recorded browser step by step with the local `browse` CLI, capturing every session as a video plus transcript, per-step screenshots and a network log. Use when the user wants a video/demo/walkthrough of a web app, wants a UI change verified or a frontend bug reproduced in a real browser, wants a local dev server driven end to end, wants the run recorded on a remote machine or a throwaway box instead of this one, or says "browse".
 ---
 
 # browse — recorded agentic browsing
@@ -98,5 +98,5 @@ be candid and specific; a few bullets is enough.
 - `skill/engines.md` — camoufox (default, clears bot walls) vs chromium (needed for
   `emulate`, PDF, and polished demos)
 - `skill/remote.md` — running the browser on another machine (`--remote`), and on
-  an Upstash Box
+  a disposable Upstash Box (`browse box`)
 - `skill/troubleshooting.md` — daemon won't start, selector misses, install, ffmpeg

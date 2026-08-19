@@ -50,11 +50,15 @@ if (( NODE_MAJOR < 18 )); then
 fi
 
 # `help` must never trigger a 400MB download — it is the first thing anyone runs
-# after cloning. Same for version/setup, which either need no browser or do the
-# installing themselves.
+# after cloning. Same for version/setup/install, which either need no browser or
+# do the installing themselves, and for `box`, which never touches a browser here.
+# Matched on $1 only: `box` is also a legal session name, profile name and
+# selector, so scanning the whole argv would break `browse -s box open …`.
 case "${1:-help}" in
   help|-h|--help|version|-v|--version)
     exec node "$REPO_ROOT/browse.mjs" "$@" ;;
+  box)
+    shift; exec node "$REPO_ROOT/scripts/box.mjs" "$@" ;;
 esac
 
 # Is camoufox (the optional stealth engine) actually installed on this machine?
@@ -160,15 +164,57 @@ camoufox_pw_ready() {
   [[ "$(cat "$CAMOU_PW_DIR/.patched" 2>/dev/null)" == "$CAMOU_PW_VERSION $CAMOU_PATCH_TAG" ]]
 }
 
+# `browse install` — the first thing you run after cloning: put the CLI on PATH,
+# link this clone in as an agent skill, then install the deps. One clone is both
+# the CLI and the skill, so `git pull` updates them together and a symlink keeps
+# that true. Idempotent; re-run it after adding another agent.
+if [[ "${1:-}" == "install" ]]; then
+  shift
+  BIN_DIR="${BROWSE_BIN_DIR:-$HOME/.local/bin}"
+  mkdir -p "$BIN_DIR"
+  ln -sfn "$SCRIPT_DIR/browse" "$BIN_DIR/browse"
+  echo "browse: ✓ $BIN_DIR/browse"
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) echo "browse: ! $BIN_DIR is not on your PATH — add it, or 'browse' won't be found" ;;
+  esac
+  # Skills live in a per-agent directory. With no argument, link into the two
+  # that cover everything on this machine: Claude Code's, and ~/.agents/skills,
+  # which the agents that read AGENTS.md share. Name dirs to override — a
+  # project's own ./.agents/skills, say.
+  DIRS=("$@")
+  [[ ${#DIRS[@]} -eq 0 ]] && DIRS=("$HOME/.claude/skills" "$HOME/.agents/skills")
+  for d in "${DIRS[@]}"; do
+    mkdir -p "$d"
+    # -n so an existing link is REPLACED rather than linked inside it. A real
+    # directory there is someone else's install: say so instead of clobbering.
+    if [[ -d "$d/browse" && ! -L "$d/browse" ]]; then
+      echo "browse: ! $d/browse is a real directory, not a link — left alone"
+    else
+      ln -sfn "$REPO_ROOT" "$d/browse"
+      echo "browse: ✓ $d/browse (skill)"
+    fi
+  done
+  echo "browse: installing deps…"
+  set -- setup
+fi
+
 if [[ "${1:-}" == "setup" ]]; then
   echo "browse: data home is $HOME_DIR"
   if main_installed; then
     echo "browse: ✓ playwright $PW_VERSION + chromium already installed"
   else
     have="$(installed_version "$PW_DIR" playwright)"
-    [[ -n "$have" ]] \
-      && echo "browse: playwright $have installed but $PW_VERSION is pinned — updating…" \
-      || echo "browse: installing playwright $PW_VERSION + chromium (one-time, ~2 min)…"
+    if [[ "$have" == "$PW_VERSION" ]]; then
+      # The package is at the pin but the BROWSER is missing: an interrupted
+      # download, or a fresh browser cache. Saying "updating" here reads as a
+      # no-op and hides the 170MB about to be fetched.
+      echo "browse: playwright $PW_VERSION is installed but its chromium is not — fetching it…"
+    elif [[ -n "$have" ]]; then
+      echo "browse: playwright $have installed but $PW_VERSION is pinned — updating…"
+    else
+      echo "browse: installing playwright $PW_VERSION + chromium (one-time, ~2 min)…"
+    fi
     install_main
     echo "browse: ✓ playwright $PW_VERSION + chromium"
   fi

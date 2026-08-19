@@ -28,7 +28,7 @@ spawns, and pointing it at a dead port records the failure.
   action, which is not noticeable against a page load.
 - **The engine will usually be chromium.** Camoufox is rarely installed on a
   server, and browse falls back and says so. If the site has a bot wall, that
-  matters, see `engines.md`.
+  matters, see `skill/engines.md`.
 - **The mp4 only comes back on `close`.** Kill the session without closing and
   the recording stays on the remote (browse tells you where). Close it properly.
 - **`--remote` goes on every command**, `close` included. Export `BROWSE_REMOTE`
@@ -43,53 +43,36 @@ spawns, and pointing it at a dead port records the failure.
 
 ## Upstash Box: a machine that exists only for this session
 
-`browse-box` makes the remote side disposable. `up` restores a pre-baked image
-into a fresh box in about 13 seconds, `down` deletes it, and nothing of the
-user's runs in between. Prefer it over a standing server: the laptop keeps its
-RAM and there is nothing to clean up or pay for afterwards.
-
-`browse-box help` is the command surface and ends with the whole session, both
-CLIs interleaved. Read it before the first command. One credential covers both
-halves, browse hands the same Box API key to the box's ssh as its password, and
-`browse-box key` saves it. If there is no key yet, the README's setup section is
-two lines and the error message names them too.
+`browse box` makes the remote side disposable: a fresh box from a pre-baked
+image, deleted when you are done, nothing of the user's running in between.
+Prefer it over a standing server. `browse box help` is the command surface and
+ends with a whole session, both halves interleaved; read it before the first
+command. One credential covers browse and the box's ssh both, and `browse box
+key` prompts for it.
 
 What a box changes on top of `--remote`:
 
-- **The app must run on the box.** That is the point, and `127.0.0.1` is the
-  box's. Confirm the server listens *there* before the first `browse` command.
-- **`browse-box exec`, never `ssh`.** A box's ssh gateway throws away stdout and
-  the exit status, and kills whatever the command left running, so a
-  backgrounded dev server dies the moment ssh returns. `exec` goes through the
-  box's API and does none of that. This is also why `profiles`, `clear` and
-  `setup` come back empty over `--remote` on a box: browse refuses and names the
-  `exec` form instead.
-- **Keep everything under `/workspace/home`**, the box user's half of the
-  volume, and where `push` and the provisioning both default.
-- **Always `down`.** Boxes from `up` expire on their own (`--ttl`, 8h), but that
-  is a backstop for a crashed session, not the ending.
-- **Never create a keep-alive box.** They bill a flat monthly rate whether used
-  or not, the opposite of what this is for. A box that ran and was deleted costs
-  CPU seconds; the only standing cost is the image (~0.6GB, cents a month).
-
-**Why `up` is fast: the image.** Installing browse on a bare box takes ~6
-minutes, Chromium alone is ~1GB. `browse-box image` does that once and snapshots
-the result, and a snapshot restores the whole disk, so the apt packages and
-`/usr/local/bin/browse` come back with it, not just `/workspace`. It outlives
-the box it came from, so the image is the only thing kept. Re-run `image` after
-a browse update; a fresh box where `browse` is missing means the image is stale.
-
-**Handing over something clickable.** `browse-box url` gives a port a public
-`https://…preview.box.upstash.com` URL, worth offering alongside the video when
-the user will want to poke at the app themselves. The proxy reaches the
-container from outside, so it only answers if the server is bound to `0.0.0.0`;
-a dev server on `127.0.0.1` records perfectly and 502s on the link. Start it
-with `--host 0.0.0.0` when you plan to share one, and say plainly that the link
-dies with the box.
-
-**When `browse` fails with an ssh error**, the box is usually gone, deleted or
-expired. `browse-box ls` says. The recording went with it and there is nothing
-to recover, so start over rather than hunting.
+- **The app runs on the box**, and `127.0.0.1` is the box's. Confirm the server
+  is listening *there* with `browse box exec <box> 'curl -sf http://127.0.0.1:<port>'`
+  before the first `browse` command, because recording starts the moment the
+  browser spawns.
+- **`browse box exec`, never `ssh`.** A box's ssh gateway drops the output and
+  the exit status and kills whatever the command left running, so an
+  `ssh box 'npm run dev &'` dev server dies the moment ssh returns. This is also
+  why `profiles`, `clear` and `setup` come back empty over `--remote` on a box:
+  browse refuses and names the `exec` form instead.
+- **`down` is the ending.** The TTL that also deletes it is a backstop for a
+  crashed session, not a plan.
+- **Never make a keep-alive box.** They bill a flat monthly rate whether used or
+  not, the opposite of what this is for.
+- **A fresh box with no `browse` on it means the image is stale.** Rebuild it
+  with `browse box image` rather than installing onto the session's own box.
+- **`browse box url`** is worth offering alongside the video when the user will
+  want to click around the app themselves. Say plainly that the link dies with
+  the box.
+- **An ssh error usually means the box is gone**, deleted or expired;
+  `browse box ls` says. The recording went with it and there is nothing to
+  recover, so start over rather than hunting.
 
 ## Before you point it at a shared machine
 

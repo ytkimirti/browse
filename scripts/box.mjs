@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * box.mjs — what `browse-box` runs. Upstash Boxes for `browse --remote`: make one, put browse on it,
+ * box.mjs — what `browse box` runs. Upstash Boxes for `browse --remote`: make one, put browse on it,
  * copy files in and out, run commands on it, and stop it when you are done.
  *
- *   browse-box help
+ *   browse box help
  *
  * None of this is part of browse. browse only needs ssh and a `browse` on the
  * far side; this is one way to arrange that, and the cost control around it.
  *
  * Needs the Box API key, which is also what `browse --remote` hands the box's
  * ssh as its password — so once a box is up there is nothing else to configure.
- * `browse-box key <key>` saves it 0600 in ~/.browse/box.json; UPSTASH_BOX_API_KEY
+ * `browse box key` saves it 0600 in ~/.browse/box.json; UPSTASH_BOX_API_KEY
  * still wins when set. It lives in a file rather than a shell export so one
  * credential is not in the environment of every process on the machine.
  *
@@ -34,7 +34,8 @@
  */
 
 import { readFile, writeFile, mkdir, readdir, stat, chmod, rename } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, createReadStream } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, basename, resolve as resolvePath } from "node:path";
 
@@ -103,14 +104,28 @@ async function writeState(patch) {
   await rename(tmp, STATE);
   return next;
 }
-/** Everything on stdin, for a secret that should not be an argument. */
+/** Everything on stdin, for a secret that should not be an argument. At a
+ *  terminal nothing is piped in, so PROMPT rather than returning empty: passing
+ *  the key as an argument is the exact thing this exists to avoid, and telling
+ *  someone to remember a pipe idiom is not a fix. Read from /dev/tty with echo
+ *  off, so a pasted credential is not left on screen either. */
 async function readStdin() {
-  if (process.stdin.isTTY) return "";
-  let out = "";
-  for await (const chunk of process.stdin) out += chunk;
-  return out;
+  if (!process.stdin.isTTY) {
+    let out = "";
+    for await (const chunk of process.stdin) out += chunk;
+    return out;
+  }
+  const echo = (on) => spawnSync("stty", [on ? "echo" : "-echo"], { stdio: ["inherit", "ignore", "ignore"] });
+  process.stderr.write("paste the Box API key (not echoed): ");
+  echo(false);
+  const tty = createReadStream("/dev/tty");
+  try {
+    let line = "";
+    for await (const chunk of tty) { line += chunk; if (line.includes("\n")) break; }
+    return line;
+  } finally { tty.destroy(); echo(true); process.stderr.write("\n"); }
 }
-/** The API key: the env var, else what `browse-box key` saved. Read per call
+/** The API key: the env var, else what `browse box key` saved. Read per call
  *  rather than at load so `key` itself can run without one. */
 async function apiKey() {
   return process.env.UPSTASH_BOX_API_KEY || (await readState()).apiKey || null;
@@ -295,7 +310,7 @@ async function buildImage(size) {
 
 /* ── commands ─────────────────────────────────────────────────────────────── */
 
-const HELP = `box.mjs — disposable Upstash Boxes for 'browse --remote'
+const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
 
   up [--ttl <sec>] [--size small] [--snapshot <id>]
                               make a box from the warm image and print its --remote host.
@@ -325,12 +340,12 @@ const HELP = `box.mjs — disposable Upstash Boxes for 'browse --remote'
 <box> is a box id or the '<id>@…' host you pass to browse --remote, so $BROWSE_REMOTE works.
 
 A session, end to end:
-  export BROWSE_REMOTE=$(browse-box up)
-  browse-box push $BROWSE_REMOTE ./my-app
-  browse-box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && npm i && (npm run dev &)'
+  export BROWSE_REMOTE=$(browse box up)
+  browse box push $BROWSE_REMOTE ./my-app
+  browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && npm i && (npm run dev &)'
   browse open http://127.0.0.1:3000     # 127.0.0.1 is the BOX's
   browse close                          # the mp4 lands here
-  browse-box down                       # gone
+  browse box down                       # gone
 
 Costs: CPU seconds while it runs, and the image's storage (~0.6GB, cents a month)
 between sessions. A box you forget still bills nothing once idle, and expires by
@@ -356,7 +371,7 @@ const NEEDS_KEY = new Set(["up", "down", "image", "ls", "exec", "push", "pull", 
 try {
 if (NEEDS_KEY.has(cmd) && !(await apiKey()))
   die("no Box API key. Make one at https://console.upstash.com (Box), then:\n" +
-      "       browse-box key          # paste it (reads stdin, stays out of ps and history)\n" +
+      "       browse box key          # it prompts, so the key stays out of ps and your history\n" +
       "     UPSTASH_BOX_API_KEY overrides the saved one when set.");
 
 switch (cmd) {
@@ -387,13 +402,13 @@ switch (cmd) {
     const ready = await exec(box.id, "command -v browse >/dev/null && browse version");
     if (ready.exit_code !== 0) {
       await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
-      die(`image ${snapshot} has no browse on it — rebuild it with: browse-box image`);
+      die(`image ${snapshot} has no browse on it — rebuild it with: browse box image`);
     }
     // Remember the image too, so a one-off `--snapshot` becomes the default and
     // the next `up` needs no arguments.
     await writeState({ box: box.id, snapshot });
     say(`${box.id} up from ${snapshot} — ${String(ready.output).trim()}, expires in ${Math.round(ttl / 3600)}h`);
-    say(`Delete it when you are done: browse-box down`);
+    say(`Delete it when you are done: browse box down`);
     process.stdout.write(`${sshHost(box.id)}\n`);
     break;
   }
@@ -405,7 +420,7 @@ switch (cmd) {
     // to every user on the machine and lands in the shell's history file, which
     // is most of what keeping the key out of the environment was for.
     const value = (rest[0] && rest[0] !== "-" ? rest[0] : await readStdin()).trim();
-    if (!value) die("key needs the API key: browse-box key <key>, or pipe it in.\n" +
+    if (!value) die("key needs the API key: browse box key <key>, or pipe it in.\n" +
                      "     Make one at https://console.upstash.com (Box); they start with box_");
     // Never echo the rejected value: pasting the wrong Upstash token here is the
     // likely mistake, and that token is live somewhere else.
@@ -434,7 +449,7 @@ switch (cmd) {
     }
     if (!list.length) say("(no boxes)");
     const images = await listImages();
-    if (!images.length) say("images: none yet — 'browse-box up' will build one");
+    if (!images.length) say("images: none yet — 'browse box up' will build one");
     for (const i of images) {
       process.stdout.write(`${i.id}  ${(i.status || "?").padEnd(8)} ${(i.size_bytes / 1e9).toFixed(1)}GB  ${i.name}\n`);
     }
@@ -485,7 +500,7 @@ switch (cmd) {
     break;
   }
   default:
-    // Usage on the ERROR path goes to stderr, so `browse-box $typo | …` does not
+    // Usage on the ERROR path goes to stderr, so `browse box $typo | …` does not
     // feed a help page into whatever was expecting output.
     (cmd && cmd !== "help" ? process.stderr : process.stdout).write(HELP);
     process.exitCode = cmd && cmd !== "help" ? 1 : 0;
@@ -494,6 +509,6 @@ switch (cmd) {
   // die() throws rather than exiting so that `finally` blocks run — buildImage's
   // deletes the builder box. This is where that lands.
   if (!(e instanceof BoxError)) throw e;
-  process.stderr.write(`box: ${e.message}\n`);
+  process.stderr.write(`browse box: ${e.message}\n`);
   process.exitCode = 1;
 }

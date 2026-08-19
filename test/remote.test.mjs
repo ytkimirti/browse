@@ -159,46 +159,53 @@ try {
   browseLive("close");
 }
 
-/* ── browse-box: the Upstash Box side ────────────────────────────────────── */
+/* ── browse box: the Upstash Box side ─────────────────────────────────────── */
 
 // Offline only. Everything past argument handling talks to a real account, and
 // the box lifecycle (up/push/exec/down) is exercised by hand against one —
 // there is no way to fake a box that would prove anything about the real API.
-console.log("\nbrowse-box");
+console.log("\nbrowse box");
 {
   // A throwaway BROWSE_HOME as well as an empty env var: the key now also lives
   // in ~/.browse/box.json, so a machine that HAS one would otherwise sail past
   // the no-key checks below and start talking to the real account.
   const box = (...args) => {
-    const r = spawnSync(join(ROOT, "bin", "browse-box"), args, {
+    // Through bin/browse, not a bin of its own: this also pins the early-exit
+    // that keeps `browse box` from triggering the ~400MB Playwright install.
+    const r = spawnSync(join(ROOT, "bin", "browse"), ["box", ...args], {
       encoding: "utf8", timeout: 60000,
       env: { ...process.env, UPSTASH_BOX_API_KEY: "", BROWSE_HOME: join(HOME, "boxhome") },
     });
     return { code: r.status, out: (r.stdout || "").trim(), err: (r.stderr || "").trim() };
   };
   let r = box("help");
-  check("browse-box help lists the lifecycle",
+  check("browse box help lists the lifecycle",
     r.code === 0 && ["up", "down", "image", "exec", "push"].every((c) => new RegExp(`^\\s*${c}\\b`, "m").test(r.out)),
     `${r.code} ${r.out.slice(0, 120)}`);
   check("…and says a box is deleted, not parked", /DELETE it/.test(r.out), r.out.slice(0, 200));
   check("…and says what the standing cost is", /storage/.test(r.out) && /CPU seconds/.test(r.out), r.out.slice(0, 200));
-  check("…and hands the host to browse --remote", /BROWSE_REMOTE=\$\(browse-box up\)/.test(r.out), r.out.slice(0, 200));
+  check("…and hands the host to browse --remote", /BROWSE_REMOTE=\$\(browse box up\)/.test(r.out), r.out.slice(0, 200));
   check("…and documents where the key is kept",
     /^\s*key \[<key>\]/m.test(r.out) && /box\.json/.test(r.out), r.out.slice(0, 300));
 
-  // Usage on the ERROR path belongs on stderr, so a piped `browse-box $typo`
+  // Usage on the ERROR path belongs on stderr, so a piped `browse box $typo`
   // does not feed a help page to whatever was reading stdout.
   r = box("nonsense");
   check("an unknown command exits non-zero with the usage",
     r.code === 1 && /^\s*up \[/m.test(r.err), `${r.code} ${r.err.slice(0, 80)}`);
   check("…on stderr, leaving stdout empty", r.out === "", JSON.stringify(r.out.slice(0, 80)));
 
+  // `box` rides on bin/browse, which installs Playwright before dispatching
+  // anything it does not recognise. A box command must never pay that.
+  check("box never triggers the playwright install",
+    !existsSync(join(HOME, "boxhome", "node_modules")), join(HOME, "boxhome", "node_modules"));
+
   // Without a key nothing can work, and the failure has to name BOTH ways to
   // supply one rather than surface a 401 from a request that should never have
   // been made.
   r = box("ls");
   check("no API key fails with the way to save one",
-    r.code === 1 && /browse-box key/.test(r.err) && /UPSTASH_BOX_API_KEY/.test(r.err),
+    r.code === 1 && /browse box key/.test(r.err) && /UPSTASH_BOX_API_KEY/.test(r.err),
     `${r.code} ${r.err.slice(0, 160)}`);
   // …and where to GET one, so a first-time user is not left searching a console.
   check("…and where to make one",
@@ -211,7 +218,7 @@ console.log("\nbrowse-box");
   check("a key that is not one is refused", r.code === 1 && /box_/.test(r.err), `${r.code} ${r.err}`);
   r = box("key", "box_deadbeef");
   const keyFile = join(HOME, "boxhome", "box.json");
-  check("browse-box key saves it", r.code === 0 && existsSync(keyFile), `${r.code} ${r.err}`);
+  check("browse box key saves it", r.code === 0 && existsSync(keyFile), `${r.code} ${r.err}`);
   check("…mode 0600, since it is a credential now",
     existsSync(keyFile) && (statSync(keyFile).mode & 0o777) === 0o600,
     existsSync(keyFile) ? (statSync(keyFile).mode & 0o777).toString(8) : "missing");
@@ -299,9 +306,9 @@ if (!REMOTE_HOST) {
     const isBox = /@(?:[\w-]+\.)?box\.upstash\.com$/.test(REMOTE_HOST);
     check("a remote-only command that relays nothing fails loudly",
       r.code === 1 && /relays no output back/.test(r.err), `${r.code} ${r.err}`);
-    check(isBox ? "…and points a box at browse-box exec, not at ssh"
+    check(isBox ? "…and points a box at browse box exec, not at ssh"
                 : "…and points an ordinary host at an interactive ssh",
-      isBox ? /browse-box exec \S+ 'browse profiles'/.test(r.err) && !/instead: ssh/.test(r.err)
+      isBox ? /browse box exec \S+ 'browse profiles'/.test(r.err) && !/instead: ssh/.test(r.err)
             : /ssh /.test(r.err),
       r.err);
   }

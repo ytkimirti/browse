@@ -1261,6 +1261,8 @@ Parallel sessions (e.g. one browser per agent — fully isolated):
   browse sessions                   list live sessions (name, port, artifacts dir)
   browse whoami                     print the session name these commands resolve to
   browse setup                      install/repair deps (playwright, chromium, camoufox link)
+  browse install [<skills-dir>…]    put this clone on PATH, link it in as an agent skill, then
+                                    setup. No dirs = ~/.claude/skills and ~/.agents/skills
   browse version                    print the version
 
 Run the browser on another machine (keeps Chromium, ffmpeg and the dev server off
@@ -1280,9 +1282,10 @@ this one — see 'browse help --env' for the auth + install knobs):
                                     'ssh -R 3000:127.0.0.1:3000 <sshhost>'.
                                     'profiles', 'clear' and 'setup' read that machine's disk,
                                     so they run there; 'net' copies its log down first.
-                                    For an Upstash Box, 'browse-box' (next to this one) makes one
-                                    in ~13s, copies files onto it, runs its dev server, and
-                                    deletes it when you are done — 'browse-box help'.
+  browse box <cmd> …                disposable Upstash Boxes to be that <sshhost>: makes one in
+                                    ~13s, copies files onto it, runs its dev server, deletes it
+                                    when you are done. Needs a Box API key and nothing else —
+                                    'browse box help'.
 
 Launch flags (how the browser STARTS — put them before the command that opens the
 session; on an already-live session browse refuses rather than ignoring them):
@@ -1368,7 +1371,7 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_NET_BODY_MAX      max bytes kept per body (32768)
   BROWSE_NET_SECRETS=1     keep auth headers/cookie values verbatim (default: hashed)
   BROWSE_SSH_PASSWORD      password for a --remote that has no key (an Upstash Box falls back to
-                           its API key by itself: UPSTASH_BOX_API_KEY, else the one 'browse-box
+                           its API key by itself: UPSTASH_BOX_API_KEY, else the one 'browse box
                            key' saved in ~/.browse/box.json). Handed to ssh through an askpass
                            helper's env — never written to disk, never on a command line
   BROWSE_SSH_OPTS          extra ssh options for --remote, e.g. "-p 2222 -i ~/.ssh/box"
@@ -1754,7 +1757,7 @@ function mirrorDir(remoteOut) {
 
 const SSH_PASS_ENV = "BROWSE_SSH_PASSWORD";
 /** The Upstash Box API key: `UPSTASH_BOX_API_KEY`, else the `apiKey` in
- *  ~/.browse/box.json (which browse-box writes 0600).
+ *  ~/.browse/box.json (which 'browse box key' writes 0600).
  *
  *  The file is there so this credential does not have to be exported into every
  *  process on the machine just to be found by the two commands that want it.
@@ -1869,7 +1872,7 @@ function startTunnel(localPort, remotePort) {
     const why = (r.stderr || "").trim().split("\n").filter(Boolean).slice(-2).join("; ");
     throw new Error(
       `ssh to ${REMOTE} failed${why ? `: ${why}` : ""}\n` +
-      (sshPassword() ? "" : `  (no key? set ${SSH_PASS_ENV} for a password-auth host — for an Upstash Box run: browse-box key <key>)`));
+      (sshPassword() ? "" : `  (no key? set ${SSH_PASS_ENV} for a password-auth host — for an Upstash Box run: browse box key)`));
   }
   return localPort;
 }
@@ -1948,7 +1951,7 @@ async function spawnRemoteDaemon(remotePort) {
 async function boxExec(box, command) {
   const key = boxApiKey() || sshPassword();
   if (!key) throw new Error(
-    "no Box API key — set UPSTASH_BOX_API_KEY or run: browse-box key <key>");
+    "no Box API key — set UPSTASH_BOX_API_KEY or run: browse box key");
   const res = await fetch(`${box.base}/v2/box/${box.id}/exec`, {
     method: "POST",
     headers: { "X-Box-Api-Key": key, "content-type": "application/json" },
@@ -2098,10 +2101,10 @@ function sshPassthrough(argv) {
     process.stderr.write(
       `browse: ${REMOTE} ran '${argv[0]}' but relays no output back over ssh (an Upstash Box does this).\n` +
       // On a box the suggestion cannot be "ssh in": the gateway that swallowed
-      // this output is the same one an interactive session gets. `browse-box
+      // this output is the same one an interactive session gets. `browse box
       // exec` goes through the box's HTTP API instead, which does relay output.
       (upstashBox()
-        ? `        Run it through the box's API instead: browse-box exec ${upstashBox().id} '${REMOTE_BIN} ${argv.join(" ")}'.\n`
+        ? `        Run it through the box's API instead: browse box exec ${upstashBox().id} '${REMOTE_BIN} ${argv.join(" ")}'.\n`
         : `        Read the answer from an interactive session instead: ssh ${REMOTE}, then '${REMOTE_BIN} ${argv.join(" ")}'.\n`));
     return 1;
   }
