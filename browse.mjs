@@ -1017,7 +1017,7 @@ this one — see 'browse help --env' for the auth + install knobs):
                                     command, on EVERY command incl. close (BROWSE_REMOTE=<host>
                                     works too). <sshhost> is anything ssh takes: a ~/.ssh/config
                                     name, user@host, or an Upstash Box (<box-id>@us-east-1.box.
-                                    upstash.com — it authenticates with UPSTASH_BOX_API_KEY).
+                                    upstash.com — it authenticates with the Box API key).
                                     The remote needs 'browse' on its PATH and nothing else: no
                                     inbound port, no daemon of its own, nothing running until
                                     your first command.
@@ -1109,7 +1109,8 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_NET_BODY_MAX      max bytes kept per body (32768)
   BROWSE_NET_SECRETS=1     keep auth headers/cookie values verbatim (default: hashed)
   BROWSE_SSH_PASSWORD      password for a --remote that has no key (an Upstash Box falls back to
-                           UPSTASH_BOX_API_KEY by itself). Handed to ssh through an askpass
+                           its API key by itself: UPSTASH_BOX_API_KEY, else the one 'browse-box
+                           key' saved in ~/.browse/box.json). Handed to ssh through an askpass
                            helper's env — never written to disk, never on a command line
   BROWSE_SSH_OPTS          extra ssh options for --remote, e.g. "-p 2222 -i ~/.ssh/box"
   BROWSE_REMOTE_BIN        how to run browse on a --remote (default: browse)
@@ -1431,14 +1432,26 @@ function mirrorDir(remoteOut) {
 }
 
 const SSH_PASS_ENV = "BROWSE_SSH_PASSWORD";
+/** The Upstash Box API key: `UPSTASH_BOX_API_KEY`, else the `apiKey` in
+ *  ~/.browse/box.json (which browse-box writes 0600).
+ *
+ *  The file is there so this credential does not have to be exported into every
+ *  process on the machine just to be found by the two commands that want it.
+ *  The env var still wins — that is the CI/one-off path, and how you drive a
+ *  second account without editing anything. */
+function boxApiKey() {
+  if (process.env.UPSTASH_BOX_API_KEY) return process.env.UPSTASH_BOX_API_KEY;
+  try {
+    return JSON.parse(readFileSync(join(BROWSE_HOME, "box.json"), "utf8")).apiKey || null;
+  } catch { return null; }
+}
 /** The password for a password-auth host, or null when ssh has a key. Never
  *  written anywhere: it reaches ssh through the askpass helper's ENVIRONMENT. */
 function sshPassword() {
   if (process.env[SSH_PASS_ENV]) return process.env[SSH_PASS_ENV];
   // An Upstash Box offers password auth ONLY (its gateway takes no keys) and the
-  // password is the Box API key you already have exported.
-  if (/\.box\.upstash\.com$/.test(remoteHostname()) && process.env.UPSTASH_BOX_API_KEY)
-    return process.env.UPSTASH_BOX_API_KEY;
+  // password is the Box API key, which is the one credential the box side needs.
+  if (/\.box\.upstash\.com$/.test(remoteHostname())) return boxApiKey();
   return null;
 }
 /** ssh reads a password from a helper program, never from a pipe. SSH_ASKPASS
@@ -1529,7 +1542,7 @@ function startTunnel(localPort, remotePort) {
     const why = (r.stderr || "").trim().split("\n").filter(Boolean).slice(-2).join("; ");
     throw new Error(
       `ssh to ${REMOTE} failed${why ? `: ${why}` : ""}\n` +
-      (sshPassword() ? "" : `  (no key? set ${SSH_PASS_ENV} for a password-auth host — an Upstash Box uses UPSTASH_BOX_API_KEY)`));
+      (sshPassword() ? "" : `  (no key? set ${SSH_PASS_ENV} for a password-auth host — for an Upstash Box run: browse-box key <key>)`));
   }
   return localPort;
 }
@@ -1601,8 +1614,9 @@ async function spawnRemoteDaemon(remotePort) {
  *  have. Throws only on a refused request — a command that ran and failed is
  *  diagnosed by the health poll, with the daemon's own log to point at. */
 async function boxExec(box, command) {
-  const key = process.env.UPSTASH_BOX_API_KEY || sshPassword();
-  if (!key) throw new Error("no UPSTASH_BOX_API_KEY — an Upstash Box needs it to start the browser");
+  const key = boxApiKey() || sshPassword();
+  if (!key) throw new Error(
+    "no Box API key — set UPSTASH_BOX_API_KEY or run: browse-box key <key>");
   const res = await fetch(`${box.base}/v2/box/${box.id}/exec`, {
     method: "POST",
     headers: { "X-Box-Api-Key": key, "content-type": "application/json" },

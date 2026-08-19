@@ -161,9 +161,13 @@ try {
 // there is no way to fake a box that would prove anything about the real API.
 console.log("\nbrowse-box");
 {
+  // A throwaway BROWSE_HOME as well as an empty env var: the key now also lives
+  // in ~/.browse/box.json, so a machine that HAS one would otherwise sail past
+  // the no-key checks below and start talking to the real account.
   const box = (...args) => {
     const r = spawnSync(join(ROOT, "bin", "browse-box"), args, {
-      encoding: "utf8", env: { ...process.env, UPSTASH_BOX_API_KEY: "" }, timeout: 60000,
+      encoding: "utf8", timeout: 60000,
+      env: { ...process.env, UPSTASH_BOX_API_KEY: "", BROWSE_HOME: join(HOME, "boxhome") },
     });
     return { code: r.status, out: (r.stdout || "").trim(), err: (r.stderr || "").trim() };
   };
@@ -178,11 +182,34 @@ console.log("\nbrowse-box");
   r = box("nonsense");
   check("an unknown command exits non-zero with the usage", r.code === 1 && /^\s*up \[/m.test(r.out), `${r.code} ${r.out.slice(0, 80)}`);
 
-  // Without a key nothing can work, and the failure has to name the variable
-  // rather than surface a 401 from a request that should never have been made.
+  check("…and documents where the key is kept", /^\s*key <key>/m.test(r.out), r.out.slice(0, 200));
+
+  // Without a key nothing can work, and the failure has to name BOTH ways to
+  // supply one rather than surface a 401 from a request that should never have
+  // been made.
   r = box("ls");
-  check("no API key fails with the variable to set",
-    r.code === 1 && /UPSTASH_BOX_API_KEY/.test(r.err), `${r.code} ${r.err.slice(0, 120)}`);
+  check("no API key fails with the way to save one",
+    r.code === 1 && /browse-box key/.test(r.err) && /UPSTASH_BOX_API_KEY/.test(r.err),
+    `${r.code} ${r.err.slice(0, 160)}`);
+
+  // The key lives in a file so it need not be exported into every process; the
+  // file has to be unreadable by anyone else, and a typo has to be caught before
+  // it is written rather than at the first 401.
+  r = box("key", "not-a-key");
+  check("a key that is not one is refused", r.code === 1 && /box_/.test(r.err), `${r.code} ${r.err}`);
+  r = box("key", "box_deadbeef");
+  const keyFile = join(HOME, "boxhome", "box.json");
+  check("browse-box key saves it", r.code === 0 && existsSync(keyFile), `${r.code} ${r.err}`);
+  check("…mode 0600, since it is a credential now",
+    existsSync(keyFile) && (statSync(keyFile).mode & 0o777) === 0o600,
+    existsSync(keyFile) ? (statSync(keyFile).mode & 0o777).toString(8) : "missing");
+  check("…and the saved key is what the next command uses",
+    JSON.parse(readFileSync(keyFile, "utf8")).apiKey === "box_deadbeef", readFileSync(keyFile, "utf8"));
+  // Saving a key must not lose the image id sitting in the same file.
+  r = box("key", "box_second");
+  check("…and saving again keeps the rest of the file",
+    r.code === 0 && JSON.parse(readFileSync(keyFile, "utf8")).apiKey === "box_second",
+    readFileSync(keyFile, "utf8"));
 }
 
 /* ── a real remote, end to end ───────────────────────────────────────────── */

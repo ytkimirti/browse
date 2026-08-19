@@ -8,8 +8,11 @@
  * None of this is part of browse. browse only needs ssh and a `browse` on the
  * far side; this is one way to arrange that, and the cost control around it.
  *
- * Needs UPSTASH_BOX_API_KEY — the same key `browse --remote` hands the box's
- * ssh as its password, so once a box is up there is nothing else to configure.
+ * Needs the Box API key, which is also what `browse --remote` hands the box's
+ * ssh as its password — so once a box is up there is nothing else to configure.
+ * `browse-box key <key>` saves it 0600 in ~/.browse/box.json; UPSTASH_BOX_API_KEY
+ * still wins when set. It lives in a file rather than a shell export so one
+ * credential is not in the environment of every process on the machine.
  *
  * Everything goes through the box's HTTP API rather than ssh, on purpose: a
  * box's ssh gateway attaches into the container, relays back neither stdout nor
@@ -30,13 +33,12 @@
  *     `POST /v2/box` is silently ignored: you get an empty box and no error.
  */
 
-import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, stat, chmod } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { homedir } from "node:os";
 import { join, basename, resolve as resolvePath } from "node:path";
 
 const BASE = process.env.UPSTASH_BOX_URL || "https://us-east-1.box.upstash.com";
-const KEY = process.env.UPSTASH_BOX_API_KEY;
 const REPO = process.env.BROWSE_REPO || "https://github.com/ytkimirti/browse";
 // The box user's own, persistent half of the volume (see the header).
 const WORK = "/workspace/home";
@@ -55,7 +57,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function api(method, path, body, timeout = 120000) {
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: { "X-Box-Api-Key": KEY, ...(body ? { "content-type": "application/json" } : {}) },
+    headers: { "X-Box-Api-Key": await apiKey(), ...(body ? { "content-type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(timeout),
   }).catch((e) => die(`${method} ${path}: ${e.message}`));
@@ -76,11 +78,19 @@ const exec = (id, command, timeout) =>
 async function readState() {
   try { return JSON.parse(await readFile(STATE, "utf8")); } catch { return {}; }
 }
+// 0600 because the same file now holds the API key. It is rewritten on every
+// `up`/`down`, so the mode has to be set on the write, not once at setup.
 async function writeState(patch) {
   const next = { ...(await readState()), ...patch };
   await mkdir(join(STATE, ".."), { recursive: true });
-  await writeFile(STATE, JSON.stringify(next, null, 2) + "\n");
+  await writeFile(STATE, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+  await chmod(STATE, 0o600).catch(() => {}); // an existing file keeps its old mode
   return next;
+}
+/** The API key: the env var, else what `browse-box key` saved. Read per call
+ *  rather than at load so `key` itself can run without one. */
+async function apiKey() {
+  return process.env.UPSTASH_BOX_API_KEY || (await readState()).apiKey || null;
 }
 
 /* ── installing browse onto a box ─────────────────────────────────────────── */
@@ -168,7 +178,7 @@ async function push(id, paths, dest) {
   }
   if (!n) die("nothing to push");
   const res = await fetch(`${BASE}/v2/box/${id}/files/upload`, {
-    method: "POST", headers: { "X-Box-Api-Key": KEY }, body: form,
+    method: "POST", headers: { "X-Box-Api-Key": await apiKey() }, body: form,
     signal: AbortSignal.timeout(600000),
   }).catch((e) => die(`upload: ${e.message}`));
   if (!res.ok) die(`upload → ${res.status} ${(await res.text()).slice(0, 200)}`);
@@ -180,7 +190,7 @@ async function push(id, paths, dest) {
 
 async function pull(id, remote, dest) {
   const url = `${BASE}/v2/box/${id}/files/download?folder=${encodeURIComponent(remote)}`;
-  const res = await fetch(url, { headers: { "X-Box-Api-Key": KEY }, signal: AbortSignal.timeout(600000) })
+  const res = await fetch(url, { headers: { "X-Box-Api-Key": await apiKey() }, signal: AbortSignal.timeout(600000) })
     .catch((e) => die(`download: ${e.message}`));
   if (!res.ok) die(`download ${remote} → ${res.status}`);
   const out = dest || `./${basename(remote)}`;
@@ -254,6 +264,8 @@ const HELP = `box.mjs — disposable Upstash Boxes for 'browse --remote'
   image [--size medium]       build the warm image: a box, browse installed on it, snapshot
                               taken, box thrown away. Re-run after a browse update
   ls                          boxes and images on the account
+  key <key>                   save the Box API key 0600 in ~/.browse/box.json, so it does not
+                              have to be exported into every process. UPSTASH_BOX_API_KEY wins
 
   exec <box> <cmd…>           run a command on the box and show its output. This is how you
                               install and start a dev server there — ssh into a box relays
@@ -301,7 +313,9 @@ const rest = args.slice(1);
 // help) must answer on a machine that has no key yet — that is the command you
 // run to find out what to set.
 const NEEDS_KEY = new Set(["up", "down", "image", "ls", "exec", "push", "pull", "url", "install"]);
-if (NEEDS_KEY.has(cmd) && !KEY) die("set UPSTASH_BOX_API_KEY (Upstash console → Box)");
+if (NEEDS_KEY.has(cmd) && !(await apiKey()))
+  die("no Box API key — save one with: browse-box key <key>\n" +
+      "     (Upstash console → Box; UPSTASH_BOX_API_KEY overrides it)");
 
 switch (cmd) {
   case "up": {
@@ -335,6 +349,15 @@ switch (cmd) {
     say(`${box.id} up from ${snapshot} — ${String(ready.output).trim()}, expires in ${Math.round(ttl / 3600)}h`);
     say(`Delete it when you are done: browse-box down`);
     process.stdout.write(`${sshHost(box.id)}\n`);
+    break;
+  }
+  case "key": {
+    // Written through writeState so it lands 0600 next to the snapshot id, and
+    // so saving a key never clobbers the box/image already noted there.
+    const value = rest[0] || die("key needs the API key (Upstash console → Box)");
+    if (!/^box_/.test(value)) die(`that does not look like a Box API key (expected box_…): ${value.slice(0, 12)}…`);
+    await writeState({ apiKey: value });
+    say(`saved to ${STATE} (0600)`);
     break;
   }
   case "down": {

@@ -45,9 +45,11 @@ spawns, and pointing it at a dead port records the failure.
 
 `browse-box` (next to `browse`; `browse-box help` is its command surface) makes
 the box side disposable: `up` gives you a fresh box in about 12 seconds, `down`
-deletes it, and nothing of yours is left running in between. It needs
-`UPSTASH_BOX_API_KEY`, which is also what browse hands the box's ssh as a
-password, so a box needs no second credential.
+deletes it, and nothing of yours is left running in between. One credential
+covers both halves — browse hands the same Box API key to the box's ssh as its
+password — and `browse-box key` is how you save it.
+
+For the session-shaped version of all this, there is a `browse-box` skill.
 
 The shape of a session — the app runs on the box, so `browse open` at
 `127.0.0.1` finds it:
