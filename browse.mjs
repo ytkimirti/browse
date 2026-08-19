@@ -842,10 +842,17 @@ function cursorInitScript(scale) {
     let cx = Math.round(window.innerWidth / 2);
     let cy = Math.round(window.innerHeight / 2);
     let shape = "";
-    // Position the pointer so the current shape's hotspot lands on (cx,cy).
+    // Position the pointer so the current shape's hotspot lands on (cx,cy),
+    // ROUNDED to a whole CSS pixel. An element centre is routinely fractional
+    // (a link at y=249.5), and drawing the bitmap at a fractional offset makes
+    // the browser resample it — the pointer goes soft, which is the one way an
+    // exact copy of the macOS bitmap can still look nothing like macOS. macOS
+    // puts its cursor on whole pixels too. Sub-pixel motion is not lost here:
+    // cx/cy stay fractional, only the paint snaps.
     const xform = () => {
       const s = SHAPES[shape] || SHAPES.default;
-      return "translate(" + (cx - s.hx * S) + "px," + (cy - s.hy * S) + "px)";
+      return "translate(" + Math.round(cx - s.hx * S) + "px," +
+             Math.round(cy - s.hy * S) + "px)";
     };
     const paint = () => { ptr.style.transform = xform(); };
     // Swap the visible graphic (arrow <-> hand) and re-anchor to the hotspot.

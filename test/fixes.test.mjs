@@ -433,16 +433,19 @@ try {
       // hand. A third of that still separates a painted pointer from a canvas
       // whose bitmap never decoded, which is the failure this catches.
       "const t=document.querySelector('" + sel + "').getBoundingClientRect();" +
+      // Within half a pixel, not exactly on it: the pointer paints on whole
+      // pixels (a fractional offset would resample the bitmap and soften it),
+      // and an element centre is routinely a .5.
       "return [hand?'hand':'arrow',Math.round(r.width),ink>33," +
-      "Math.round(r.left+h[0]*S-(t.left+t.width/2))," +
-      "Math.round(r.top+h[1]*S-(t.top+t.height/2))].join(',');})()";
+      "Math.abs(r.left+h[0]*S-(t.left+t.width/2))<=0.5," +
+      "Math.abs(r.top+h[1]*S-(t.top+t.height/2))<=0.5].join(',');})()";
     works("back on the ui page", ["goto", `${BASE}/ui`], /ui/);
     browse("hover", "#btn");
     check("a button gets the macOS pointing hand, painted, fingertip on the button",
-      read(PTR("#btn")) === "hand,32,true,0,0", read(PTR("#btn")));
+      read(PTR("#btn")) === "hand,32,true,true,true", read(PTR("#btn")));
     browse("hover", "#clicks");
     check("plain text gets the macOS arrow, painted, tip on the text",
-      read(PTR("#clicks")) === "arrow,28,true,0,0", read(PTR("#clicks")));
+      read(PTR("#clicks")) === "arrow,28,true,true,true", read(PTR("#clicks")));
 
     // A 12x19 pointer is honest but small in a video someone watches at half
     // size, so the size is a knob - and scaling it must move the hotspot with
@@ -454,7 +457,7 @@ try {
       big("hover", "#btn");
       const got = big("eval", PTR("#btn")).out;
       check("BROWSE_CURSOR_SCALE=2 doubles the pointer and keeps the hotspot on target",
-        got === "hand,64,true,0,0", got);
+        got === "hand,64,true,true,true", got);
     } finally {
       browseIn(BIG, BIGOUT, {}, ["close"]);
       rmSync(BIGOUT, { recursive: true, force: true });
