@@ -429,8 +429,11 @@ try {
       "const r=c.getBoundingClientRect(), S=r.width/w;" +
       "const px=c.getContext('2d').getImageData(0,0,c.width,c.height).data;" +
       "let ink=0; for(let i=3;i<px.length;i+=4) if(px[i]>200) ink++;" +
+      // Opaque pixels in the smaller (1x) rep: 100 for the arrow, 155 for the
+      // hand. A third of that still separates a painted pointer from a canvas
+      // whose bitmap never decoded, which is the failure this catches.
       "const t=document.querySelector('" + sel + "').getBoundingClientRect();" +
-      "return [hand?'hand':'arrow',Math.round(r.width),ink>200," +
+      "return [hand?'hand':'arrow',Math.round(r.width),ink>33," +
       "Math.round(r.left+h[0]*S-(t.left+t.width/2))," +
       "Math.round(r.top+h[1]*S-(t.top+t.height/2))].join(',');})()";
     works("back on the ui page", ["goto", `${BASE}/ui`], /ui/);
