@@ -630,14 +630,17 @@ function logLabel(cmd, args) {
  * is not part of the page's rendered surface, so it never appears in the video —
  * a DOM cursor we move ourselves does). Set BROWSE_CURSOR=0 to disable.
  */
-// Off by default under camoufox: this overlay is injected into every page, and
-// on a bot-walled site that is the difference between passing and not. Measured
-// on akakce's Cloudflare challenge — with the overlay on it never cleared (the
-// page's CSP blocks the inline script and the challenge stalls); with it off it
-// cleared in under 4s. Demo recordings want the cursor, stealth runs do not, so
-// let the engine choose and keep BROWSE_CURSOR=1 as the explicit override.
-const CURSOR = USING_CAMOUFOX ? process.env.BROWSE_CURSOR === "1"
-                              : process.env.BROWSE_CURSOR !== "0";
+// On by default on BOTH engines: the recording is the deliverable, and a demo
+// video with no pointer in it is the failure that keeps happening. It is not
+// free on camoufox — this overlay is injected into every page, and on a
+// bot-walled site that is the difference between passing and not (measured on
+// akakce's Cloudflare challenge: with the overlay on it never cleared, with it
+// off it cleared in under 4s). A stealth run turns it off: --no-cursor.
+const CURSOR = process.env.BROWSE_CURSOR !== "0";
+/** How much bigger than macOS to draw the pointer. 1 = the real thing, which is
+ *  12x19 px — authentic, but small in a 1280x800 video watched at half size.
+ *  Clamped so a typo cannot paint a full-screen arrow. */
+const CURSOR_SCALE = Math.min(4, Math.max(0.5, Number(process.env.BROWSE_CURSOR_SCALE) || 1));
 /** Commands whose first arg is a selector we glide the cursor to before acting. */
 const ELEMENT_TARGETED = new Set([
   "click", "dblclick", "fill", "type", "press", "drag",
@@ -662,36 +665,88 @@ const AUTH_WALL_RE = /(\/(sign[-_]?in|sign[-_]?up|login|logon|auth|oauth|sso)(\/
 
 /**
  * Injected into every page (via addInitScript, so it survives navigations) BEFORE
- * the page's own scripts. Draws a fake SVG pointer + click ripples and exposes
+ * the page's own scripts. Draws the pointer + click ripples and exposes
  * `window.__browseCursor.moveTo(x,y,dur)` / `.click()` which the daemon calls to
- * animate the cursor. Must be fully self-contained (Playwright serializes it).
+ * animate the cursor. Must be fully self-contained (Playwright serializes it) —
+ * `scale` arrives as the addInitScript argument, never from a closure.
  */
-function cursorInitScript() {
+function cursorInitScript(scale) {
   if (window.self !== window.top) return; // top frame only
   const install = () => {
     if (window.__browseCursor) return;
 
-    // Two pointer graphics — a macOS arrow and a macOS pointing-hand — each a
-    // black-filled, white-bordered, soft-shadowed recreation (the real cursors
-    // are copyrighted bitmaps). `hx`/`hy` is the hotspot: the point in the SVG
-    // box that must sit exactly under (cx,cy) — the arrow's tip, the hand's
-    // fingertip — so swapping shapes never makes the pointer visibly jump.
+    // The two macOS pointers, not lookalikes: these are the @2x bitmaps AppKit
+    // hands out for NSCursor.arrow and NSCursor.pointingHand, with the hotspot
+    // AppKit reports for each. `w`/`h` is the image's POINT size — what macOS
+    // draws on a 1x screen, so 1 CSS px = 1 pt reproduces it exactly — `pw`/`ph`
+    // the bitmap's own pixels, and `hx`/`hy` the point in that box that must sit
+    // under (cx,cy): the arrow's tip, the hand's fingertip, so swapping shapes
+    // never makes the pointer jump. macOS bakes the drop shadow into the bitmap,
+    // which is why nothing here adds one.
     const SHAPES = {
       default: {
-        hx: 4, hy: 2.5,
-        svg:
-          '<svg width="26" height="30" viewBox="0 0 26 30" style="display:block">' +
-          '<path d="M4 2.5L7.1 22L11.3 17.9L15.7 25.5L18.3 24.2L13.4 16.5L21.2 16.5Z" ' +
-          'fill="#000" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+        w: 28, h: 40, pw: 56, ph: 80, hx: 5, hy: 5,
+        b64:
+          "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",
       },
       pointer: {
-        hx: 9, hy: 2,
-        svg:
-          '<svg width="25" height="29" viewBox="0 0 25 29" style="display:block">' +
-          '<path d="M9 2L11.3 4L11.3 12.4L13.5 9.8L14.1 12.2L16.3 9.8L16.9 12.1' +
-          'L19.1 10.2L20.4 12.8L21.3 15.4L21.3 21.6L20.1 25.4L9.5 25.4L8.1 21.6' +
-          'L7.9 18.2L3.7 16.6L5.4 13.4L6.7 12.4L6.7 4Z" ' +
-          'fill="#000" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+        w: 32, h: 32, pw: 64, ph: 64, hx: 13, hy: 8,
+        b64:
+          "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",
       },
     };
     // Elements treated as clickable even when they don't set cursor:pointer, so
@@ -704,11 +759,30 @@ function cursorInitScript() {
     root.setAttribute("aria-hidden", "true");
     root.style.cssText =
       "position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none;";
+    const S = Number(scale) > 0 ? Number(scale) : 1;
     const ptr = document.createElement("div");
     ptr.id = "__bc_ptr";
-    ptr.style.cssText =
-      "position:absolute;left:0;top:0;will-change:transform;" +
-      "filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));";
+    ptr.style.cssText = "position:absolute;left:0;top:0;will-change:transform;";
+    // One canvas per shape, painted from the PNG's BYTES. Deliberately not a
+    // data: url on an <img> or a background-image: a page whose CSP img-src
+    // omits data: would then record with no pointer in it at all, and the whole
+    // point of the overlay is that the video always has one.
+    const layers = {};
+    for (const k of Object.keys(SHAPES)) {
+      const s = SHAPES[k];
+      const cv = document.createElement("canvas");
+      cv.width = s.pw; cv.height = s.ph;
+      cv.style.cssText = "position:absolute;left:0;top:0;display:none;width:" +
+        (s.w * S) + "px;height:" + (s.h * S) + "px;";
+      const bin = atob(s.b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      createImageBitmap(new Blob([bytes], { type: "image/png" }))
+        .then((bmp) => { const g = cv.getContext("2d"); if (g) g.drawImage(bmp, 0, 0); })
+        .catch(() => { /* the glide still runs, it just has nothing to draw */ });
+      layers[k] = cv;
+      ptr.appendChild(cv);
+    }
     root.appendChild(ptr);
     (document.body || document.documentElement).appendChild(root);
 
@@ -718,7 +792,7 @@ function cursorInitScript() {
     // Position the pointer so the current shape's hotspot lands on (cx,cy).
     const xform = () => {
       const s = SHAPES[shape] || SHAPES.default;
-      return "translate(" + (cx - s.hx) + "px," + (cy - s.hy) + "px)";
+      return "translate(" + (cx - s.hx * S) + "px," + (cy - s.hy * S) + "px)";
     };
     const paint = () => { ptr.style.transform = xform(); };
     // Swap the visible graphic (arrow <-> hand) and re-anchor to the hotspot.
@@ -727,9 +801,10 @@ function cursorInitScript() {
     const setShape = (kind) => {
       const k = SHAPES[kind] ? kind : "default";
       if (k !== shape) {
+        if (layers[shape]) layers[shape].style.display = "none";
         shape = k;
-        ptr.innerHTML = SHAPES[k].svg;
-        ptr.style.transformOrigin = SHAPES[k].hx + "px " + SHAPES[k].hy + "px";
+        layers[k].style.display = "block";
+        ptr.style.transformOrigin = (SHAPES[k].hx * S) + "px " + (SHAPES[k].hy * S) + "px";
       }
       paint();
     };
@@ -801,9 +876,9 @@ function cursorInitScript() {
  * keys show as a chip, then it fades out after a short pause. Set BROWSE_KEYLOG=0
  * to disable. Exposes `window.__browseKeys.type(text)` / `.key(label)`.
  */
-// Same reasoning as CURSOR: injected into every page, so off under camoufox.
-const KEYLOG = USING_CAMOUFOX ? process.env.BROWSE_KEYLOG === "1"
-                              : process.env.BROWSE_KEYLOG !== "0";
+// Same reasoning as CURSOR, camoufox cost included: on by default on both
+// engines, --no-keylog for a stealth run.
+const KEYLOG = process.env.BROWSE_KEYLOG !== "0";
 /**
  * Per-keystroke delay (ms) so `fill`/`type` enter text like a person typing —
  * fast, but not an instant paste. BROWSE_TYPE_DELAY overrides (0 = instant). The
@@ -1122,9 +1197,11 @@ session; on an already-live session browse refuses rather than ignoring them):
   --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
                                     use to RECORD phone-shaped; 'browse emulate viewport=' only
                                     resizes the page inside an already-fixed frame
-  --cursor / --no-cursor            animated on-page cursor overlay
-  --keylog / --no-keylog            keystroke overlay — both default ON for chromium and OFF for
-                                    camoufox, where every injected script is a fingerprint
+  --cursor / --no-cursor            animated on-page cursor overlay — the real macOS pointer,
+                                    at its real size (BROWSE_CURSOR_SCALE to enlarge it)
+  --keylog / --no-keylog            keystroke overlay — both default ON on both engines. Each is
+                                    a script injected into every page, so on camoufox they are
+                                    also a fingerprint: turn both off for a stealth run
   --popups / --no-popups            let target=_blank open REAL popups, vs rewriting them into
                                     same-tab navigation so the recording stays one file
   --net / --no-net                  network logging (default on — see 'browse net')
@@ -1184,6 +1261,7 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_PORT              pin the localhost control port (default: any free port)
   BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
   BROWSE_WIDTH / _HEIGHT   viewport one dimension at a time (BROWSE_VIEWPORT sets both)
+  BROWSE_CURSOR_SCALE      draw the pointer N× macOS size for a video (1, max 4)
   BROWSE_IDLE_MODE         auto-detected dead air: cut (default) | speed | keep
   BROWSE_IDLE_SPEED        fast-forward factor for =speed, and default N for 'browse speed' (10)
   BROWSE_FPS               output frame rate of the finalized mp4 (30)
@@ -2524,10 +2602,18 @@ function camoufoxLaunchOptions() {
   // recordVideo.size — comes out magnified with the right/bottom of the page cut
   // off. Pinning the screen to at least the viewport keeps window == viewport,
   // which is also the anti-detection invariant below.
+  //
+  // `showcursor` is camoufox's own debug pointer — a red dot the BROWSER paints
+  // into the content area, so it lands in the recording and cannot be styled
+  // from the page. Off, always: this session draws the real macOS pointer
+  // itself (cursorInitScript), and two cursors on one screen is worse than
+  // either. `humanize` stays: it is the stealth part (a curved, human-timed
+  // path for the REAL pointer), and it is what the red dot was only showing.
   const script =
     "import json,sys;from browserforge.fingerprints import Screen;" +
     "from camoufox.utils import launch_options;" +
-    `print(json.dumps(launch_options(headless=True,humanize=True,window=(${VIEWPORT.width},${VIEWPORT.height}),` +
+    `print(json.dumps(launch_options(headless=True,humanize=True,config={'showcursor':False},` +
+    `window=(${VIEWPORT.width},${VIEWPORT.height}),` +
     `screen=Screen(min_width=${VIEWPORT.width},min_height=${VIEWPORT.height}),i_know_what_im_doing=True)))`;
   // camoufox is a Python package but this skill is global, so a project venv is
   // no good. `uv tool install camoufox` is the normal way in, and its venv
@@ -2720,7 +2806,7 @@ async function daemon() {
   // Draw the animated cursor + keystroke overlay into every page (before the
   // page's own scripts run, and re-run on each navigation) so the recording shows
   // the pointer moving and the keys being pressed, like screen-recording software.
-  if (CURSOR) await context.addInitScript(cursorInitScript);
+  if (CURSOR) await context.addInitScript(cursorInitScript, CURSOR_SCALE);
   if (KEYLOG) await context.addInitScript(keylogInitScript);
   // Keep "open in a new tab" in THIS tab, so the demo never splits across two
   // video files (see popupSameTabInitScript). BROWSE_POPUPS=1 opts out.

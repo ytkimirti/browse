@@ -215,7 +215,8 @@ console.log("\nhelp");
     r.code === 0 && r.out.includes("--headful") && r.out.includes("--viewport"), `${r.code}`);
   r = browse("help", "--env");
   check("help --env lists the env-only knobs",
-    r.code === 0 && r.out.includes("BROWSE_IDLE_MODE") && r.out.includes("BROWSE_NET_SECRETS"), `${r.code}`);
+    r.code === 0 && r.out.includes("BROWSE_IDLE_MODE") && r.out.includes("BROWSE_NET_SECRETS") &&
+    r.out.includes("BROWSE_CURSOR_SCALE"), `${r.code}`);
   check("…and maps every flag back to its env var",
     r.out.includes("BROWSE_HEADFUL") && r.out.includes("--headful"), r.out.slice(0, 200));
 }
@@ -245,6 +246,15 @@ try {
 
   r = browseLive("eval", "window.innerWidth + 'x' + window.innerHeight");
   check("--viewport sized the real page", r.code === 0 && r.out.includes("800x600"), `${r.code} ${r.out}${r.err}`);
+
+  // Both overlays default ON on BOTH engines now - under camoufox they used to
+  // default off, which recorded demos with no pointer and no keystrokes in them.
+  r = browseLive("eval", "JSON.stringify([!!window.__browseCursor, !!window.__browseKeys])");
+  check(`the cursor AND keystroke overlays are on by default on ${ENGINE}`,
+    r.code === 0 && /\[true,true\]/.test(r.out.replace(/\s/g, "")), `${r.code} ${r.out}${r.err}`);
+  r = browseLive("--no-cursor", "url");
+  check("…and --no-cursor is still refused mid-session rather than ignored",
+    r.code === 1 && /already live/.test(r.err), `${r.code} ${r.err}`);
 
   // The session is up now, so a launch flag can no longer be honoured.
   r = browseLive("--headful", "url");
