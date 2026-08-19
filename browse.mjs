@@ -692,17 +692,32 @@ function cursorInitScript(scale) {
   const install = () => {
     if (window.__browseCursor) return;
 
-    // The two macOS pointers, not lookalikes: these are the @2x bitmaps AppKit
-    // hands out for NSCursor.arrow and NSCursor.pointingHand, with the hotspot
-    // AppKit reports for each. `w`/`h` is the image's POINT size — what macOS
-    // draws on a 1x screen, so 1 CSS px = 1 pt reproduces it exactly — `pw`/`ph`
-    // the bitmap's own pixels, and `hx`/`hy` the point in that box that must sit
-    // under (cx,cy): the arrow's tip, the hand's fingertip, so swapping shapes
-    // never makes the pointer jump. macOS bakes the drop shadow into the bitmap,
-    // which is why nothing here adds one.
+    // The two macOS pointers, not lookalikes: these are the bitmaps AppKit hands
+    // out for NSCursor.arrow and NSCursor.pointingHand, with the hotspot AppKit
+    // reports for each. `w`/`h` is the image's POINT size — what macOS draws on
+    // a 1x screen, so 1 CSS px = 1 pt reproduces it exactly — `hx`/`hy` the point
+    // in that box that must sit under (cx,cy): the arrow's tip, the hand's
+    // fingertip, so swapping shapes never makes the pointer jump. macOS bakes
+    // the drop shadow into the bitmap, which is why nothing here adds one.
+    //
+    // Both reps ship because Apple hints them separately: at 1x the 2x rep
+    // squeezed into 28x40 is visibly softer than the 1x bitmap macOS itself
+    // would draw, and above 1x the 1x bitmap is the one that falls apart.
     const SHAPES = {
       default: {
-        w: 28, h: 40, pw: 56, ph: 80, hx: 5, hy: 5,
+        w: 28, h: 40, hx: 5, hy: 5,
+        b64x1:
+          "iVBORw0KGgoAAAANSUhEUgAAABwAAAAoCAYAAADt5povAAAAAXNSR0IArs4c6QAAADhlWElmTU0AKgAAAAgAAYdp" +
+          "AAQAAAABAAAAGgAAAAAAAqACAAQAAAABAAAAHKADAAQAAAABAAAAKAAAAAAT1MjeAAACKUlEQVRYCe2Uu48SURTG" +
+          "wVWyixoRlwQ0lmKhhY08GrPJbkEDJj4KQ02BBX8CjR0FobMiFBYUa2UHHYWxIFlC2EACCY8sHQkZQgjDqnv8volj" +
+          "SHYVZ2FsnJN8uXPnPn5zvrnn2mz/Y9iRNGVKXFnalZCtyWTyZjQaPeMzZBqYXMKvi8ipqqqLbrf7Cv1rkGnQq9jc" +
+          "A6AEg0FRFGXR6XRemwllNj4C0S5DTcuUwHs68F9AzwEJDYVCmr2tVusl+hv9pxcCl6DqpqG/BRIaDoeZ6UahfwTq" +
+          "UNSp2m63X2zC3pVAHTqdTuflcvkJ+rwcDMXyTfNXC6vVqq1Wq217vd6nWMDavfTFcC5Dh8Mhdrtdq8t6vc6KYZzh" +
+          "6juKRCIPAdteF3iXO2ITcblcUqlUJBaLaf1EIiG9Xu8Lxvagx9AuxI9cK0PfbDY7yWQy0mw2pd/vH5VKJQ3odDpl" +
+          "PB5/T6VS+4B4IGZn+Jdgza/gAbiTTqefNxqNj8Vi8Z3b7Y7M53PF7/dr0Gw2K4PB4D3m3YDWgpFKa5yQD3oA+aFH" +
+          "OCAfcrmcBgwEAoITeoz3t6C1gdhDO+a0ihnchDzJZPIAtbeIx+OSz+dlOBx+wns3ZLgksObCYKb8emoHul8oFN4C" +
+          "9BlX22E0GmU5XDrDVSeMWdDm2xCz/gYp0AQ6hWi1oVgF5DihDoglcAYR9PXnMxpjsQqo78Z5+lztAOkDVms5YDlg" +
+          "OWA5YDlgOWDcgR/qgR1CKi58bwAAAABJRU5ErkJggg==",
         b64:
           "iVBORw0KGgoAAAANSUhEUgAAADgAAABQCAYAAABMIbYpAAAAAXNSR0IArs4c6QAAADhlWElmTU0AKgAAAAgAAYdp" +
           "AAQAAAABAAAAGgAAAAAAAqACAAQAAAABAAAAOKADAAQAAAABAAAAUAAAAACH3XblAAAFZElEQVR4Ae2ZTUijRxjH" +
@@ -729,7 +744,23 @@ function cursorInitScript(scale) {
           "D2gPaA9oD2gPaA9oD2gPaA9oD2gPaA9oD2gPaA9oD2gPaA9oD2gPaA9YwwP/AS2bG2T4YyXvAAAAAElFTkSuQmCC",
       },
       pointer: {
-        w: 32, h: 32, pw: 64, ph: 64, hx: 13, hy: 8,
+        w: 32, h: 32, hx: 13, hy: 8,
+        b64x1:
+          "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAADhlWElmTU0AKgAAAAgAAYdp" +
+          "AAQAAAABAAAAGgAAAAAAAqACAAQAAAABAAAAIKADAAQAAAABAAAAIAAAAACPTkDJAAADHklEQVRYCe2W32tSYRjH" +
+          "/W2WmkuTYUUxFRLKEdKFlyF4Xxf9D3bjjRBUXvQPrD9gbBe7qAuFBkHrIio28CJRaQQJWZPKfthKnGXTqWffr0up" +
+          "0Pecs2AE7Qsf9p6d53mf533e932OGs2+9ivwv1dAq7IAtNeBgV8PY7InYlATuAoaIAeOAT3YtdQ409YG7tZqtfr6" +
+          "+vpWoVBgNZ6CLtiVOIFS0fYQsNpsNrfP55MwdgFWZbAlGKqTmgQYxDiYXpIk+rIqBrAnCTD2MBAS4HgCnAJMQs1i" +
+          "YL4jNU7D4HRlAk6n86LL5XqExxsgCLhFauaUNWZQru70iMm1s7Ozb3O5XE2v11/zer1LsMkA3gxu1W8J43mkRNly" +
+          "AjOY93g8KyaTaQXjw4NZWIFer6c7AE1PT38qlUqTwWDQqdPp1mBzG1iAaP7+VCIDvjsILqyurjbn5uZaGF/qe2F1" +
+          "oVBI6/f7zQhoMJuZp0bjcDikYrFYxrvzeLwMWL1di86T4MHi4uLzVqvVsFqtL/AsdTqdNiowVLPZ/MaHTCbzqt1u" +
+          "NxcWFp7Bbh6wb4gWKX4JZzaYpZmZGRu2wBqPx0fuq8Vi4eHThMPhKaPRaHG73UzeDWTPgqhE7PEs++Pl5eWb6H5f" +
+          "EomEG+V+iUPnx//HSgvhpaIeISoPE2iDDfAknU5XsccTyWRSGBy2mnq9zi65ybGcRAnQtwOa4B62gW2XE8uqXC7T" +
+          "pgoU2dN4nJggD1IAlPP5/Nrw5AkGuJYfYH8FHAHcir8SPzbHQTIQCFRxGzYFsaVsNvsatp/BGSB7C2AjK67AAc6C" +
+          "h9Fo9E2j0dgYlQR6wDu0Zp6ZBDgBdhoEBuM08lr9YUwbVoHlPAmu43McicVilUgkorXb7bpKpdJNpVIGHNSj3W73" +
+          "FmzugPeAP1yEvxWUJIA5+v2Cq3ECNqdzIAqmAJP7Ctik7gNuwUfASmwB4UFUmgDmGSbBfeU3gX+ZFA8qb8sPwKB1" +
+          "8B3IBoeNsi8WDX+KCbN5cdUMzk5HDXoG+wYDs+zCleN9X2oqMPDhX/px5b/6MwkGVRQYdvv6NyqwDekKM/CAfV5l" +
+          "AAAAAElFTkSuQmCC",
         b64:
           "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAADhlWElmTU0AKgAAAAgAAYdp" +
           "AAQAAAABAAAAGgAAAAAAAqACAAQAAAABAAAAQKADAAQAAAABAAAAQAAAAABlmWCKAAAH30lEQVR4Ae2YXWwUVRTH" +
@@ -784,14 +815,19 @@ function cursorInitScript(scale) {
     // data: url on an <img> or a background-image: a page whose CSP img-src
     // omits data: would then record with no pointer in it at all, and the whole
     // point of the overlay is that the video always has one.
+    // One device pixel per bitmap pixel: the 1x rep for the ordinary case (a 1x
+    // recording, pointer at its real size), the 2x rep as soon as either the
+    // screen or the scale asks for more.
+    const hi = S * (window.devicePixelRatio || 1) > 1;
     const layers = {};
     for (const k of Object.keys(SHAPES)) {
       const s = SHAPES[k];
       const cv = document.createElement("canvas");
-      cv.width = s.pw; cv.height = s.ph;
+      cv.width = hi ? s.w * 2 : s.w; cv.height = hi ? s.h * 2 : s.h;
+      cv.dataset.shape = k; // read back by the test suite; nothing here uses it
       cv.style.cssText = "position:absolute;left:0;top:0;display:none;width:" +
         (s.w * S) + "px;height:" + (s.h * S) + "px;";
-      const bin = atob(s.b64);
+      const bin = atob(hi ? s.b64 : s.b64x1);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       createImageBitmap(new Blob([bytes], { type: "image/png" }))

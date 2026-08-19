@@ -425,11 +425,12 @@ try {
     const PTR = (sel) => "(() => {" +
       "const c=[...document.querySelectorAll('#__bc_ptr canvas')].find(x=>x.style.display!=='none');" +
       "if(!c) return 'no-pointer';" +
-      "const r=c.getBoundingClientRect(), S=r.width/(c.width/2), h=c.width===64?[13,8]:[5,5];" +
+      "const hand=c.dataset.shape==='pointer', w=hand?32:28, h=hand?[13,8]:[5,5];" +
+      "const r=c.getBoundingClientRect(), S=r.width/w;" +
       "const px=c.getContext('2d').getImageData(0,0,c.width,c.height).data;" +
       "let ink=0; for(let i=3;i<px.length;i+=4) if(px[i]>200) ink++;" +
       "const t=document.querySelector('" + sel + "').getBoundingClientRect();" +
-      "return [c.width===64?'hand':'arrow',Math.round(r.width),ink>200," +
+      "return [hand?'hand':'arrow',Math.round(r.width),ink>200," +
       "Math.round(r.left+h[0]*S-(t.left+t.width/2))," +
       "Math.round(r.top+h[1]*S-(t.top+t.height/2))].join(',');})()";
     works("back on the ui page", ["goto", `${BASE}/ui`], /ui/);
