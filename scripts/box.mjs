@@ -20,7 +20,7 @@
  * none of that.
  *
  * The model: a box is DISPOSABLE. `up` makes one from a snapshot that already
- * has browse, Chromium and ffmpeg on it (~18s, no install), and `down` deletes
+ * has browse, Chromium and ffmpeg on it (~13s, no install), and `down` deletes
  * it. Nothing is left running, and nothing bills between sessions except the
  * one snapshot's storage. The snapshot is built once by `image`, which is the
  * only slow step (~6 min) and the only thing worth keeping.
@@ -33,7 +33,7 @@
  *     `POST /v2/box` is silently ignored: you get an empty box and no error.
  */
 
-import { readFile, writeFile, mkdir, readdir, stat, chmod } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, stat, chmod, rename } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { homedir } from "node:os";
 import { join, basename, resolve as resolvePath } from "node:path";
@@ -50,9 +50,20 @@ const STATE = join(process.env.BROWSE_HOME || join(homedir(), ".browse"), "box.j
 // caps it at three days.
 const TTL_DEFAULT = 28800;
 
-const die = (msg) => { process.stderr.write(`box: ${msg}\n`); process.exit(1); };
+/** Fail the command. A THROW, not process.exit: `buildImage` deletes its builder
+ *  box in a `finally`, and process.exit skips finally blocks — so an install that
+ *  failed used to leave a box nobody was watching. Caught at the bottom of the
+ *  file, which prints and sets the exit status. */
+class BoxError extends Error {}
+const die = (msg) => { throw new BoxError(msg); };
 const say = (msg) => process.stderr.write(`${msg}\n`); // stdout stays machine-readable
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Cut long API/error bodies, and SAY that they were cut — a silently clipped
+ *  error reads as the whole error. */
+const clip = (text, n) => {
+  const t = String(text ?? "").trim();
+  return t.length <= n ? t : `${t.slice(0, n)}… (${t.length - n} more chars)`;
+};
 
 async function api(method, path, body, timeout = 120000) {
   const res = await fetch(`${BASE}${path}`, {
@@ -62,7 +73,7 @@ async function api(method, path, body, timeout = 120000) {
     signal: AbortSignal.timeout(timeout),
   }).catch((e) => die(`${method} ${path}: ${e.message}`));
   const text = await res.text();
-  if (!res.ok) die(`${method} ${path} → ${res.status} ${text.slice(0, 300)}`);
+  if (!res.ok) die(`${method} ${path} → ${res.status} ${clip(text, 300)}`);
   return text ? JSON.parse(text) : {};
 }
 
@@ -83,9 +94,21 @@ async function readState() {
 async function writeState(patch) {
   const next = { ...(await readState()), ...patch };
   await mkdir(join(STATE, ".."), { recursive: true });
-  await writeFile(STATE, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
-  await chmod(STATE, 0o600).catch(() => {}); // an existing file keeps its old mode
+  // Write-then-rename: writeFile truncates in place, so a process killed midway
+  // through leaves JSON that will not parse — and readState swallows that, which
+  // would silently lose the API key the file now holds.
+  const tmp = `${STATE}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+  await chmod(tmp, 0o600).catch(() => {}); // umask can widen the create mode
+  await rename(tmp, STATE);
   return next;
+}
+/** Everything on stdin, for a secret that should not be an argument. */
+async function readStdin() {
+  if (process.stdin.isTTY) return "";
+  let out = "";
+  for await (const chunk of process.stdin) out += chunk;
+  return out;
 }
 /** The API key: the env var, else what `browse-box key` saved. Read per call
  *  rather than at load so `key` itself can run without one. */
@@ -125,12 +148,16 @@ async function runScript(id, script, label) {
   // dir, a box that is not up) looks exactly like a slow one, and this would
   // poll a file that is never going to exist.
   const probe = await exec(id, `rm -f ${log} && touch ${log} && echo ok`);
-  if (probe.exit_code !== 0) die(`cannot write ${log} on ${id}: ${(probe.error || probe.output || "").trim().slice(0, 200)}`);
+  if (probe.exit_code !== 0) die(`cannot write ${log} on ${id}: ${clip(probe.error || probe.output, 200)}`);
   // base64, not a quoted script: a multi-line one loses its newlines on the way
   // across (they arrive as a literal \n, the whole thing collapses onto one
   // line, and the first `then` is a syntax error).
-  const payload = Buffer.from(`${script}\necho __DONE__ $?\n`).toString("base64");
-  await exec(id, `nohup setsid sh -c "echo ${payload} | base64 -d | sh" > ${log} 2>&1 </dev/null &`);
+  // The marker runs in the PARENT shell, not inside the script: INSTALL opens with
+  // `set -e`, so appending the echo to the script itself meant a failing step
+  // exited before it ever printed — the failure branch below was unreachable and
+  // every broken install was reported 20 minutes later as a timeout.
+  const payload = Buffer.from(script).toString("base64");
+  await exec(id, `nohup setsid sh -c "echo ${payload} | base64 -d | sh; echo __DONE__ \$?" > ${log} 2>&1 </dev/null &`);
   let seen = 0;
   for (let i = 0; i < 240; i++) {
     await sleep(5000);
@@ -151,14 +178,20 @@ async function runScript(id, script, label) {
 /* ── file transfer ────────────────────────────────────────────────────────── */
 
 async function filesUnder(path) {
-  const st = await stat(path);
+  const st = await stat(path); // stat, not lstat: a symlinked target is what we want
   if (!st.isDirectory()) return [{ abs: resolvePath(path), rel: basename(path) }];
   const out = [];
   const walk = async (dir, prefix) => {
     for (const e of await readdir(dir, { withFileTypes: true })) {
       if (e.name === ".git" || e.name === "node_modules") continue; // never worth uploading
       const abs = join(dir, e.name), rel = `${prefix}/${e.name}`;
-      if (e.isDirectory()) await walk(abs, rel);
+      // isDirectory() is false for a SYMLINK to a directory, which then got
+      // queued as a file and blew up on readFile with a raw EISDIR. Resolve the
+      // link to decide; a dangling one is skipped rather than fatal.
+      let dir_;
+      try { dir_ = (e.isSymbolicLink() ? await stat(abs) : e).isDirectory(); }
+      catch { say(`  skipping ${rel} (broken symlink)`); continue; }
+      if (dir_) await walk(abs, rel);
       else out.push({ abs, rel });
     }
   };
@@ -171,8 +204,9 @@ async function push(id, paths, dest) {
   let n = 0;
   for (const p of paths) {
     for (const f of await filesUnder(p).catch(() => die(`no such file: ${p}`))) {
+      const body = await readFile(f.abs).catch((e) => die(`cannot read ${f.abs}: ${e.code || e.message}`));
       form.append("paths", `${dest}/${f.rel}`);
-      form.append("files", new Blob([await readFile(f.abs)]), f.rel);
+      form.append("files", new Blob([body]), f.rel);
       n++;
     }
   }
@@ -219,12 +253,20 @@ const newestImage = async () => (await listImages())[0];
  *  has nothing left to install. Snapshots outlive the box they came from. */
 async function buildImage(size) {
   say(`creating a ${size} box to build the image on…`);
-  let box = await api("POST", "/v2/box", { name: "browse-image-builder", size, runtime: "node", labels: ["browse"] }, 300000);
+  // ephemeral + a ttl on the BUILDER too. It lives ~6 minutes and is deleted in
+  // the finally below, but that window is long enough to lose a laptop or hit
+  // Ctrl-C in, and a builder with no expiry is a box that bills until someone
+  // reads the console. An hour outlasts any real build.
+  let box = await api("POST", "/v2/box",
+    { name: "browse-image-builder", size, runtime: "node", labels: ["browse"], ephemeral: true, ttl: 3600 }, 300000);
   for (let i = 0; i < 90 && box.status === "creating"; i++) {
     await sleep(2000);
     box = await api("GET", `/v2/box/${box.id}`);
   }
-  if (box.status === "creating") die(`${box.id} is still creating — check the console`);
+  if (box.status === "creating") {
+    await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
+    die(`${box.id} never finished creating — deleted it; try again`);
+  }
   try {
     await runScript(box.id, INSTALL, "install");
     say("snapshotting it…");
@@ -247,6 +289,7 @@ async function buildImage(size) {
     // nobody is watching. The snapshot survives it.
     await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
     say(`builder ${box.id} deleted`);
+
   }
 }
 
@@ -256,7 +299,7 @@ const HELP = `box.mjs — disposable Upstash Boxes for 'browse --remote'
 
   up [--ttl <sec>] [--size small] [--snapshot <id>]
                               make a box from the warm image and print its --remote host.
-                              ~18s, nothing to install. Builds the image first if there
+                              ~13s, nothing to install. Builds the image first if there
                               isn't one yet (~6 min, once). The box also deletes itself
                               after --ttl (default ${TTL_DEFAULT}s) if you never call down
   down [box]                  DELETE it. Defaults to the LAST box 'up' made, so name the box
@@ -264,8 +307,10 @@ const HELP = `box.mjs — disposable Upstash Boxes for 'browse --remote'
   image [--size medium]       build the warm image: a box, browse installed on it, snapshot
                               taken, box thrown away. Re-run after a browse update
   ls                          boxes and images on the account
-  key <key>                   save the Box API key 0600 in ~/.browse/box.json, so it does not
-                              have to be exported into every process. UPSTASH_BOX_API_KEY wins
+  key [<key>]                 save the Box API key 0600 in ~/.browse/box.json, so it does not
+                              have to be exported into every process. With no argument it reads
+                              stdin, which keeps it out of 'ps' and your shell history.
+                              UPSTASH_BOX_API_KEY still wins when set
 
   exec <box> <cmd…>           run a command on the box and show its output. This is how you
                               install and start a dev server there — ssh into a box relays
@@ -299,12 +344,6 @@ function flag(name, fallback) {
   const [, value] = rest.splice(i, 2);
   return value ?? fallback;
 }
-function has(name) {
-  const i = rest.indexOf(`--${name}`);
-  if (i === -1) return false;
-  rest.splice(i, 1);
-  return true;
-}
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -313,6 +352,8 @@ const rest = args.slice(1);
 // help) must answer on a machine that has no key yet — that is the command you
 // run to find out what to set.
 const NEEDS_KEY = new Set(["up", "down", "image", "ls", "exec", "push", "pull", "url", "install"]);
+
+try {
 if (NEEDS_KEY.has(cmd) && !(await apiKey()))
   die("no Box API key — save one with: browse-box key <key>\n" +
       "     (Upstash console → Box; UPSTASH_BOX_API_KEY overrides it)");
@@ -320,7 +361,11 @@ if (NEEDS_KEY.has(cmd) && !(await apiKey()))
 switch (cmd) {
   case "up": {
     const size = flag("size", "small");
-    const ttl = Number(flag("ttl", TTL_DEFAULT));
+    const ttlRaw = String(flag("ttl", TTL_DEFAULT));
+    // Unvalidated, `--ttl 8h` became NaN, serialized to null, and the box got
+    // whatever the API defaults to while we printed "expires in NaNh".
+    if (!/^\d+$/.test(ttlRaw)) die(`--ttl wants whole seconds, e.g. --ttl 3600 (got: ${ttlRaw})`);
+    const ttl = Number(ttlRaw);
     // The account is the source of truth for which images exist — a local note
     // of the last one is a convenience, not a record, and a machine that has
     // never run this should still find the image you built on another one.
@@ -354,8 +399,15 @@ switch (cmd) {
   case "key": {
     // Written through writeState so it lands 0600 next to the snapshot id, and
     // so saving a key never clobbers the box/image already noted there.
-    const value = rest[0] || die("key needs the API key (Upstash console → Box)");
-    if (!/^box_/.test(value)) die(`that does not look like a Box API key (expected box_…): ${value.slice(0, 12)}…`);
+    //
+    // Reads stdin when given no argument (or `-`): an argument is visible in `ps`
+    // to every user on the machine and lands in the shell's history file, which
+    // is most of what keeping the key out of the environment was for.
+    const value = (rest[0] && rest[0] !== "-" ? rest[0] : await readStdin()).trim();
+    if (!value) die("key needs the API key: browse-box key <key>, or pipe it in (Upstash console → Box)");
+    // Never echo the rejected value: pasting the wrong Upstash token here is the
+    // likely mistake, and that token is live somewhere else.
+    if (!/^box_\w+$/.test(value)) die("that does not look like a Box API key (they start with box_)");
     await writeState({ apiKey: value });
     say(`saved to ${STATE} (0600)`);
     break;
@@ -391,14 +443,21 @@ switch (cmd) {
     const command = rest.slice(1).join(" ");
     if (!command) die("exec needs a command");
     const run = await exec(id, command, 600000);
+    // process.exitCode, NOT process.exit: exit() drops whatever is still in the
+    // stdout pipe buffer, which on macOS is 64KB — an `npm i` whose error is in
+    // the tail came back looking like it succeeded quietly.
     if (run.output) process.stdout.write(run.output.endsWith("\n") ? run.output : run.output + "\n");
     if (run.error) process.stderr.write(run.error.endsWith("\n") ? run.error : run.error + "\n");
-    process.exit(run.exit_code || 0);
+    // A run with no status is a run we cannot vouch for; the probe in runScript
+    // already treats a missing one as failure, and success is the wrong guess.
+    process.exitCode = run.exit_code == null ? 1 : run.exit_code;
     break;
   }
   case "push": {
-    const id = boxId(rest[0]) || die("push needs a box");
+    // flag() splices out of `rest`, so it has to run BEFORE the positional read:
+    // `push --to /x $BOX ./app` otherwise takes "--to" as the box id.
     const dest = flag("to", WORK);
+    const id = boxId(rest[0]) || die("push needs a box");
     const paths = rest.slice(1);
     if (!paths.length) die("push needs at least one path");
     await push(id, paths, dest.replace(/\/$/, ""));
@@ -424,6 +483,15 @@ switch (cmd) {
     break;
   }
   default:
-    process.stdout.write(HELP);
-    process.exit(cmd && cmd !== "help" ? 1 : 0);
+    // Usage on the ERROR path goes to stderr, so `browse-box $typo | …` does not
+    // feed a help page into whatever was expecting output.
+    (cmd && cmd !== "help" ? process.stderr : process.stdout).write(HELP);
+    process.exitCode = cmd && cmd !== "help" ? 1 : 0;
+}
+} catch (e) {
+  // die() throws rather than exiting so that `finally` blocks run — buildImage's
+  // deletes the builder box. This is where that lands.
+  if (!(e instanceof BoxError)) throw e;
+  process.stderr.write(`box: ${e.message}\n`);
+  process.exitCode = 1;
 }

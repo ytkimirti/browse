@@ -13,7 +13,7 @@ the `browse` skill for the session itself; read this for the box around it.
 
 Why bother: a browser plus a dev server plus ffmpeg is the heaviest thing an
 agent runs, and a box has RAM the laptop is already spending on other agents. A
-box is disposable — about 12 seconds to make, deleted when you are done, nothing
+box is disposable — about 13 seconds to make, deleted when you are done, nothing
 billed in between.
 
 ## The session
@@ -46,7 +46,7 @@ each time.
 - **Always `down`.** The box expires on its own eventually, but that is a
   backstop for a crashed session, not the ending.
 - **The engine will be chromium**, because no server has camoufox. Fine for a
-  demo; it matters only against a bot wall (`skill/engines.md`).
+  demo; it matters only against a bot wall (`../engines.md`).
 
 ## Handing over something clickable
 
@@ -67,5 +67,5 @@ to share one. Say plainly that the link dies with the box.
 - **The image is stale** after a browse update: `browse-box image` re-bakes it
   (~6 min, once). `up` is only fast because that image exists.
 
-`skill/remote.md` has the `--remote` mechanics underneath this — tunnels, what
+`../remote.md` has the `--remote` mechanics underneath this — tunnels, what
 gets mirrored, and pointing browse at a machine that is not a box.

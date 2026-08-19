@@ -1168,7 +1168,7 @@ this one — see 'browse help --env' for the auth + install knobs):
                                     'profiles', 'clear' and 'setup' read that machine's disk,
                                     so they run there; 'net' copies its log down first.
                                     For an Upstash Box, 'browse-box' (next to this one) makes one
-                                    in ~12s, copies files onto it, runs its dev server, and
+                                    in ~13s, copies files onto it, runs its dev server, and
                                     deletes it when you are done — 'browse-box help'.
 
 Launch flags (how the browser STARTS — put them before the command that opens the
@@ -1565,12 +1565,30 @@ function netCommand(argv) {
 //     remote disk; the caller can only read local ones. So each reply's named
 //     artifacts are copied down and the paths rewritten to where they landed.
 
-/** Short, filesystem-safe label for the remote — the login half of user@host if
- *  there is one (a box id), else the hostname. Namespaces run files and the
- *  local mirror dir so two hosts never share either. */
+/** Short, filesystem-safe label for the remote. Namespaces the ssh control
+ *  socket, the run file and the local mirror dir, so two hosts never share any
+ *  of them.
+ *
+ *  It has to include the HOSTNAME. Keying on the login alone made `root@A` and
+ *  `root@B` the same tag — and a multiplexed ssh IGNORES the destination
+ *  argument when a master socket already exists, so the second host's commands
+ *  ran on the first host's box, mirrored artifacts into a dir named for the
+ *  second, and reported success. `clear` and `setup` went to the wrong machine
+ *  the same way. Any username that repeats across servers hits this: root,
+ *  ubuntu, ec2-user.
+ *
+ *  A box id is unique on its own, so it keeps its bare, readable tag. */
 function remoteTag() {
-  const first = String(REMOTE || "").split("@")[0];
-  return sanitizeName((first.includes(".") ? remoteHostname() : first) || "remote").slice(0, 24);
+  const raw = String(REMOTE || "");
+  const box = upstashBox();
+  if (box) return sanitizeName(box.id).slice(0, 32);
+  const host = remoteHostname();
+  const login = raw.includes("@") ? raw.split("@")[0] : "";
+  // Truncate the PARTS, not the join: cutting the whole thing at N could drop
+  // the host and reintroduce the collision this exists to prevent. The total is
+  // bounded because ctlPath() is a unix socket path (~104 bytes on macOS).
+  const tag = [login.slice(0, 12), host.slice(0, 24)].filter(Boolean).join("-");
+  return sanitizeName(tag || "remote");
 }
 function remoteHostname() { return String(REMOTE || "").split("@").pop().split(":")[0]; }
 
@@ -1702,6 +1720,12 @@ const REMOTE_ENV_DENY = new Set([
   "BROWSE_SSH_PASSWORD", "BROWSE_SSH_OPTS",
   "BROWSE_HOME", "BROWSE_OUT", "BROWSE_PORT", "BROWSE_BIND",
   "BROWSE_SESSION", "BROWSE_PROFILE",
+  // bin/browse sets this to a LOCAL absolute path on every invocation, so it is
+  // always present and always wrong over there. Harmless with the default
+  // remote bin (the far launcher re-sets it), fatal with BROWSE_REMOTE_BIN
+  // pointed straight at browse.mjs: createRequire() then resolves playwright
+  // against a mac path and the daemon dies before it ever listens.
+  "BROWSE_PW_BASE",
 ]);
 function forwardedEnv() {
   const out = {};
@@ -1771,10 +1795,15 @@ async function spawnRemoteDaemon(remotePort) {
     ...forwardedEnv(),
     BROWSE_SESSION: SESSION, BROWSE_PORT: String(remotePort),
     // A forward into a CONTAINER arrives on its external interface, not its
-    // loopback, so a loopback-only daemon would be unreachable through the very
-    // tunnel that started it. Set BROWSE_BIND to override for a host where
-    // binding wide open is not what you want.
-    BROWSE_BIND: process.env.BROWSE_BIND || "0.0.0.0",
+    // loopback, so a loopback-only daemon there is unreachable through the very
+    // tunnel that started it. On an ordinary host the forward target resolves on
+    // the host itself and loopback is reachable — so bind wide open ONLY where it
+    // is actually required. It used to be unconditional, which put an
+    // unauthenticated control port (it dispatches `eval`, and serves the
+    // session's recordings and network log) on the public interface of every VPS
+    // browse was pointed at. BROWSE_BIND=0.0.0.0 is the way back for another
+    // container runtime; the start-up error names it.
+    BROWSE_BIND: process.env.BROWSE_BIND || (upstashBox() ? "0.0.0.0" : HOST),
     ...(PROFILE ? { BROWSE_PROFILE: PROFILE } : {}), ...LAUNCH_ENV,
   };
   const assigns = Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join(" ");
@@ -2074,7 +2103,16 @@ function postTimeout(cmd, args) {
   // daemon happily kept waiting.
   const bare = cmd === "wait" && /^\d+$/.test(String(args[0] ?? "")) ? Number(args[0]) : NaN;
   const n = Math.max(i >= 0 ? Number(args[i + 1]) : NaN, bare) || (i >= 0 ? Number(args[i + 1]) : bare);
-  return Number.isFinite(n) && n > 90_000 ? n + 30_000 : 120_000;
+  if (Number.isFinite(n) && n > 90_000) return n + 30_000;
+  // A remote `close` is the one command that cannot afford to time out. It
+  // flushes the video, analyses dead air and encodes the mp4 on the far machine,
+  // and only after the reply lands does the client copy anything down. Give up at
+  // 120s on a long session and the recording is stranded: the daemon finishes,
+  // but the retry finds `closing` already set, gets back "no video captured",
+  // names no mp4 for the mirror to pull, and then deletes the run file — with the
+  // finished file still sitting on the box and no command left that fetches it.
+  if (cmd === "close" && REMOTE) return 900_000;
+  return 120_000;
 }
 
 function post(port, body, timeoutMs = 120000) {

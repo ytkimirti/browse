@@ -44,7 +44,7 @@ spawns, and pointing it at a dead port records the failure.
 ## Upstash Box
 
 `browse-box` (next to `browse`; `browse-box help` is its command surface) makes
-the box side disposable: `up` gives you a fresh box in about 12 seconds, `down`
+the box side disposable: `up` gives you a fresh box in about 13 seconds, `down`
 deletes it, and nothing of yours is left running in between. One credential
 covers both halves — browse hands the same Box API key to the box's ssh as its
 password — and `browse-box key` is how you save it.
@@ -55,7 +55,7 @@ The shape of a session — the app runs on the box, so `browse open` at
 `127.0.0.1` finds it:
 
 ```sh
-export BROWSE_REMOTE=$(browse-box up)          # fresh box, ~12s
+export BROWSE_REMOTE=$(browse-box up)          # fresh box, ~13s
 browse-box push $BROWSE_REMOTE ./my-app        # copy the code over
 browse-box exec $BROWSE_REMOTE 'cd /workspace/home/my-app && npm i && (npm run dev &)'
 browse open http://127.0.0.1:3000

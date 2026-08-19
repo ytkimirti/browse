@@ -183,11 +183,15 @@ console.log("\nbrowse-box");
   check("…and says a box is deleted, not parked", /DELETE it/.test(r.out), r.out.slice(0, 200));
   check("…and says what the standing cost is", /storage/.test(r.out) && /CPU seconds/.test(r.out), r.out.slice(0, 200));
   check("…and hands the host to browse --remote", /BROWSE_REMOTE=\$\(browse-box up\)/.test(r.out), r.out.slice(0, 200));
+  check("…and documents where the key is kept",
+    /^\s*key \[<key>\]/m.test(r.out) && /box\.json/.test(r.out), r.out.slice(0, 300));
 
+  // Usage on the ERROR path belongs on stderr, so a piped `browse-box $typo`
+  // does not feed a help page to whatever was reading stdout.
   r = box("nonsense");
-  check("an unknown command exits non-zero with the usage", r.code === 1 && /^\s*up \[/m.test(r.out), `${r.code} ${r.out.slice(0, 80)}`);
-
-  check("…and documents where the key is kept", /^\s*key <key>/m.test(r.out), r.out.slice(0, 200));
+  check("an unknown command exits non-zero with the usage",
+    r.code === 1 && /^\s*up \[/m.test(r.err), `${r.code} ${r.err.slice(0, 80)}`);
+  check("…on stderr, leaving stdout empty", r.out === "", JSON.stringify(r.out.slice(0, 80)));
 
   // Without a key nothing can work, and the failure has to name BOTH ways to
   // supply one rather than surface a 401 from a request that should never have
