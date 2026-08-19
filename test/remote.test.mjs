@@ -14,7 +14,7 @@
 // Asserts stdout AND exit status for both the success and the failure paths.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, statSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -157,6 +157,41 @@ try {
   check("/file with no path is refused", res.status === 400, `${res.status}`);
 } finally {
   browseLive("close");
+}
+
+/* ── the launcher's install gate ──────────────────────────────────────────── */
+
+// bin/browse installs Playwright before it runs anything it does not recognise,
+// so what counts as "recognised" has to survive leading flags. It used to match
+// $1 alone: `browse --remote <host> setup` installs on the REMOTE, but the flag
+// hid the command and a browser was downloaded HERE first.
+console.log("\nthe install gate");
+{
+  // A BROWSE_HOME with nothing in it, so an install would be unmistakable: it
+  // creates node_modules there and announces itself.
+  // /tmp, not tmpdir(): macOS's is deep enough that the ssh ControlPath built
+  // under it blows the 104-byte socket limit before ssh ever runs.
+  let gateN = 0;
+  // Short timeout and the BANNER as the signal, not node_modules: the gate
+  // announces the install before starting it, so there is no reason to sit
+  // through a 170MB download to find out it opened.
+  const gate = (...args) => {
+    const home = mkdtempSync(join("/tmp", `browse-gate-${gateN++}-`));
+    const r = spawnSync(BIN, args, {
+      encoding: "utf8", timeout: 5000,
+      env: { ...process.env, BROWSE_HOME: home, BROWSE_REMOTE: "" },
+    });
+    rmSync(home, { recursive: true, force: true });
+    return { err: r.stderr || "", out: r.stdout || "", installed: /installing playwright/.test(r.stderr || "") };
+  };
+  let r = gate("--remote", "no-such-host.invalid", "setup");
+  check("a flag before 'setup' no longer hides it from the gate", !r.installed, r.err.slice(0, 160));
+  check("…and the command went to the remote", /ssh|resolve/i.test(r.err), r.err.slice(0, 160));
+  check("a flag before 'help' does not install either", !gate("-s", "x", "help").installed);
+  check("…nor before 'version'", !gate("--headful", "version").installed);
+  // The flip side: `box` is a legal session name, so the walk must not mistake
+  // one for the box command — that session needs a real browser.
+  check("a session called 'box' is not the box command", gate("-s", "box", "whoami").installed);
 }
 
 /* ── browse box: the Upstash Box side ─────────────────────────────────────── */

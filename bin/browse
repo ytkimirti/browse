@@ -49,17 +49,46 @@ if (( NODE_MAJOR < 18 )); then
   echo "browse: node v18+ required (found v$(node -p process.versions.node))" >&2; exit 1
 fi
 
+# `box` takes over the whole command line, so it is matched on $1 only — which
+# is also what keeps `browse -s box open …` working, since `box` is a perfectly
+# legal session name, profile name and selector.
+if [[ "${1:-}" == "box" ]]; then
+  shift; exec node "$REPO_ROOT/scripts/box.mjs" "$@"
+fi
+
+# Which command is this? The flags that may precede it take a value or not, so
+# finding it means walking them. Worth the walk: matching $1 alone missed
+# `browse --remote <host> setup`, which runs over THERE, and so downloaded a
+# browser here first. An unrecognised flag ends the walk with no command, which
+# only falls through to the install below — never wrong, just unhelpful.
+CMD=""; REMOTE_SEEN=""
+if (( $# )); then
+  _argv=("$@"); _i=0
+  while (( _i < ${#_argv[@]} )); do
+    case "${_argv[$_i]}" in
+      --remote) REMOTE_SEEN=1; _i=$((_i + 2)) ;;
+      -s|--session|-p|--profile|--viewport|--type-delay|--idle) _i=$((_i + 2)) ;;
+      --headful|--headless|--camoufox|--chromium|--cursor|--no-cursor|\
+      --keylog|--no-keylog|--popups|--no-popups|--net|--no-net) _i=$((_i + 1)) ;;
+      -*) break ;;
+      *) CMD="${_argv[$_i]}"; break ;;
+    esac
+  done
+fi
+
 # `help` must never trigger a 400MB download — it is the first thing anyone runs
-# after cloning. Same for version/setup/install, which either need no browser or
-# do the installing themselves, and for `box`, which never touches a browser here.
-# Matched on $1 only: `box` is also a legal session name, profile name and
-# selector, so scanning the whole argv would break `browse -s box open …`.
-case "${1:-help}" in
-  help|-h|--help|version|-v|--version)
+# after cloning. Same for version. (`-h`/`--version` and friends end the walk
+# with no command, which the default below sends the same way.)
+case "${CMD:-help}" in
+  help|version)
     exec node "$REPO_ROOT/browse.mjs" "$@" ;;
-  box)
-    shift; exec node "$REPO_ROOT/scripts/box.mjs" "$@" ;;
 esac
+
+# `setup` aimed at a remote installs the deps on THAT machine, so this one needs
+# none of it. Local `setup` is the block further down, which does the installing.
+if [[ "$CMD" == "setup" && ( -n "$REMOTE_SEEN" || -n "${BROWSE_REMOTE:-}" ) ]]; then
+  exec node "$REPO_ROOT/browse.mjs" "$@"
+fi
 
 # Is camoufox (the optional stealth engine) actually installed on this machine?
 have_camoufox() {
