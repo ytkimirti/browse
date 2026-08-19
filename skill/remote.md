@@ -5,16 +5,16 @@ another machine and copies the artifacts back. Reach for it when the browser is
 the thing you cannot afford locally: RAM, CPU, battery, or a laptop already
 running several agents. `browse help` has the flag and its env vars.
 
-Everything else is unchanged. Same commands, same output, same loop — the paths
-it prints are local files, because each reply's artifacts are copied down as it
-names them.
+Everything else is unchanged. Same commands, same output, same loop, and the
+paths it prints are local files, because each reply's artifacts are copied down
+as it names them.
 
 ## The one thing that changes: what `127.0.0.1` means
 
 `browse open` (and every relative URL) resolves on the REMOTE machine. A dev
 server on your laptop does not exist to it. Either run the app on that machine
-too — which is usually the point, since a dev server is the other thing eating
-your RAM — or lend it yours with `ssh -R 3000:127.0.0.1:3000 <sshhost>` and keep
+too, which is usually the point since a dev server is the other thing eating
+your RAM, or lend it yours with `ssh -R 3000:127.0.0.1:3000 <sshhost>` and keep
 that connection open for the whole session.
 
 Start the server there and confirm it listens *before* the first `browse`
@@ -28,76 +28,68 @@ spawns, and pointing it at a dead port records the failure.
   action, which is not noticeable against a page load.
 - **The engine will usually be chromium.** Camoufox is rarely installed on a
   server, and browse falls back and says so. If the site has a bot wall, that
-  matters — see `skill/engines.md`.
+  matters, see `engines.md`.
 - **The mp4 only comes back on `close`.** Kill the session without closing and
   the recording stays on the remote (browse tells you where). Close it properly.
-- Commands that read the remote's disk — `profiles`, `clear`, `setup` — run over
-  there, because that is the machine they are about. `net` still answers here: it
-  copies the session's request log down first. On a box those three run but their
-  OUTPUT is swallowed by the ssh gateway, so browse tells you to re-run them
-  through `browse-box exec` instead.
+- **`--remote` goes on every command**, `close` included. Export `BROWSE_REMOTE`
+  once and stay in that shell.
+- Commands that read the remote's disk, `profiles`, `clear` and `setup`, run
+  over there, because that is the machine they are about. `net` still answers
+  here: it copies the session's request log down first.
 - **`BROWSE_OUT` is the one knob that does nothing here.** The browser writes on
   the remote and the copies land in a mirror dir; take the artifact paths from
   `close` and `dir` rather than choosing them. Every other browser-side env var
   reaches the remote daemon, so a flag and its env twin still agree.
 
-## Upstash Box
+## Upstash Box: a machine that exists only for this session
 
-`browse-box` (next to `browse`; `browse-box help` is its command surface) makes
-the box side disposable: `up` gives you a fresh box in about 13 seconds, `down`
-deletes it, and nothing of yours is left running in between. One credential
-covers both halves — browse hands the same Box API key to the box's ssh as its
-password — and `browse-box key` is how you save it.
+`browse-box` makes the remote side disposable. `up` restores a pre-baked image
+into a fresh box in about 13 seconds, `down` deletes it, and nothing of the
+user's runs in between. Prefer it over a standing server: the laptop keeps its
+RAM and there is nothing to clean up or pay for afterwards.
 
-For the session-shaped version of all this, there is a `browse-box` skill.
+`browse-box help` is the command surface and ends with the whole session, both
+CLIs interleaved. Read it before the first command. One credential covers both
+halves, browse hands the same Box API key to the box's ssh as its password, and
+`browse-box key` saves it. If there is no key yet, the README's setup section is
+two lines and the error message names them too.
 
-The shape of a session — the app runs on the box, so `browse open` at
-`127.0.0.1` finds it:
+What a box changes on top of `--remote`:
 
-```sh
-export BROWSE_REMOTE=$(browse-box up)          # fresh box, ~13s
-browse-box push $BROWSE_REMOTE ./my-app        # copy the code over
-browse-box exec $BROWSE_REMOTE 'cd /workspace/home/my-app && npm i && (npm run dev &)'
-browse open http://127.0.0.1:3000
-...
-browse close                                   # the mp4 lands here
-browse-box down                                # box deleted
-```
+- **The app must run on the box.** That is the point, and `127.0.0.1` is the
+  box's. Confirm the server listens *there* before the first `browse` command.
+- **`browse-box exec`, never `ssh`.** A box's ssh gateway throws away stdout and
+  the exit status, and kills whatever the command left running, so a
+  backgrounded dev server dies the moment ssh returns. `exec` goes through the
+  box's API and does none of that. This is also why `profiles`, `clear` and
+  `setup` come back empty over `--remote` on a box: browse refuses and names the
+  `exec` form instead.
+- **Keep everything under `/workspace/home`**, the box user's half of the
+  volume, and where `push` and the provisioning both default.
+- **Always `down`.** Boxes from `up` expire on their own (`--ttl`, 8h), but that
+  is a backstop for a crashed session, not the ending.
+- **Never create a keep-alive box.** They bill a flat monthly rate whether used
+  or not, the opposite of what this is for. A box that ran and was deleted costs
+  CPU seconds; the only standing cost is the image (~0.6GB, cents a month).
 
-**Why it is fast: the image.** Installing browse on a bare box takes ~6 minutes
-(Chromium alone is ~1GB). `browse-box image` does that once and snapshots the
-result; `up` restores that snapshot instead of installing. A snapshot restores
-the **whole disk** — the apt packages and `/usr/local/bin/browse` come back with
-it, not just `/workspace` — and it outlives the box it was taken from, so the
-image is the only thing you keep. Re-run `image` after a browse update.
+**Why `up` is fast: the image.** Installing browse on a bare box takes ~6
+minutes, Chromium alone is ~1GB. `browse-box image` does that once and snapshots
+the result, and a snapshot restores the whole disk, so the apt packages and
+`/usr/local/bin/browse` come back with it, not just `/workspace`. It outlives
+the box it came from, so the image is the only thing kept. Re-run `image` after
+a browse update; a fresh box where `browse` is missing means the image is stale.
 
-**Boxes made by `up` expire on their own** (`--ttl`, 8h by default), so a session
-you walk away from does not become an account full of boxes. `down` is still the
-right ending; the TTL is the backstop.
+**Handing over something clickable.** `browse-box url` gives a port a public
+`https://…preview.box.upstash.com` URL, worth offering alongside the video when
+the user will want to poke at the app themselves. The proxy reaches the
+container from outside, so it only answers if the server is bound to `0.0.0.0`;
+a dev server on `127.0.0.1` records perfectly and 502s on the link. Start it
+with `--host 0.0.0.0` when you plan to share one, and say plainly that the link
+dies with the box.
 
-**Use `exec`, not ssh, to run things on a box.** A box's ssh gateway runs your
-command and then throws its output and exit status away, and kills whatever it
-left running — so an `ssh box 'npm run dev &'` dev server dies the moment the
-command returns. `browse-box exec` goes through the box's API, which does
-neither.
-
-**What it costs.** CPU seconds while the box actually runs, plus the image's
-storage between sessions (~0.6GB, cents a month). Nothing is billed for a box
-that no longer exists. Avoid keep-alive boxes here: they bill a flat monthly rate
-whether you use them or not, which is the opposite of what this is for.
-
-**Keep everything under `/workspace/home`.** It is the box user's half of the
-volume; `push` and the provisioning both default there.
-
-`browse-box url <box> <port>` gives a port a public
-`https://<box-id>-<port>.preview.box.upstash.com` URL — the link to hand someone
-who wants to click around the app themselves rather than watch the video. It
-works on these boxes despite what the Box docs' feature table says, but only if
-the server is bound to `0.0.0.0`: the proxy reaches the container from outside,
-so a dev server on `127.0.0.1` answers 502. `browse open` does not care either
-way, so a server started the usual way records fine and only the shareable link
-is dead. Start it with `--host 0.0.0.0` (or your framework's equivalent) when you
-want both.
+**When `browse` fails with an ssh error**, the box is usually gone, deleted or
+expired. `browse-box ls` says. The recording went with it and there is nothing
+to recover, so start over rather than hunting.
 
 ## Before you point it at a shared machine
 
@@ -105,5 +97,5 @@ To be reachable through the tunnel from outside a container, the daemon binds
 `0.0.0.0` on the remote. Anything that can route to that machine can then drive
 your browser and read the session's recordings. That is fine for a box (its
 network is its own) and fine for a VPS only you reach. On anything shared, set
-`BROWSE_BIND` yourself — and remember a live session holds real logins if you
+`BROWSE_BIND` yourself, and remember a live session holds real logins if you
 used `-p`.

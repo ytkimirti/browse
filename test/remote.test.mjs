@@ -200,6 +200,9 @@ console.log("\nbrowse-box");
   check("no API key fails with the way to save one",
     r.code === 1 && /browse-box key/.test(r.err) && /UPSTASH_BOX_API_KEY/.test(r.err),
     `${r.code} ${r.err.slice(0, 160)}`);
+  // …and where to GET one, so a first-time user is not left searching a console.
+  check("…and where to make one",
+    /console\.upstash\.com/.test(r.err), r.err.slice(0, 200));
 
   // The key lives in a file so it need not be exported into every process; the
   // file has to be unreadable by anyone else, and a typo has to be caught before

@@ -355,8 +355,9 @@ const NEEDS_KEY = new Set(["up", "down", "image", "ls", "exec", "push", "pull", 
 
 try {
 if (NEEDS_KEY.has(cmd) && !(await apiKey()))
-  die("no Box API key — save one with: browse-box key <key>\n" +
-      "     (Upstash console → Box; UPSTASH_BOX_API_KEY overrides it)");
+  die("no Box API key. Make one at https://console.upstash.com (Box), then:\n" +
+      "       browse-box key          # paste it (reads stdin, stays out of ps and history)\n" +
+      "     UPSTASH_BOX_API_KEY overrides the saved one when set.");
 
 switch (cmd) {
   case "up": {
@@ -404,7 +405,8 @@ switch (cmd) {
     // to every user on the machine and lands in the shell's history file, which
     // is most of what keeping the key out of the environment was for.
     const value = (rest[0] && rest[0] !== "-" ? rest[0] : await readStdin()).trim();
-    if (!value) die("key needs the API key: browse-box key <key>, or pipe it in (Upstash console → Box)");
+    if (!value) die("key needs the API key: browse-box key <key>, or pipe it in.\n" +
+                     "     Make one at https://console.upstash.com (Box); they start with box_");
     // Never echo the rejected value: pasting the wrong Upstash token here is the
     // likely mistake, and that token is live somewhere else.
     if (!/^box_\w+$/.test(value)) die("that does not look like a Box API key (they start with box_)");
