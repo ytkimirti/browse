@@ -310,9 +310,9 @@ if (!REMOTE_HOST) {
 
   // A remote is where the camoufox fallback actually happens: no server has
   // camoufox, so EVERY default remote session is a chromium one that was asked
-  // for camoufox. The overlays have to follow the engine that launched, not the
-  // one requested — the recording is the deliverable, and a video with no cursor
-  // and no keystrokes is the failure this catches. Both overlays announce
+  // for camoufox. The recording is the deliverable, and a video with no cursor
+  // and no keystrokes is the failure this catches — whichever engine the daemon
+  // ended up on, and whether it announced the fallback or not. Both overlays announce
   // themselves on `window`, which is the only observable that does not require
   // reading pixels back out of the mp4.
   const OVERLAYS = 'JSON.stringify([!!window.__browseCursor, !!window.__browseKeys])';

@@ -338,6 +338,9 @@ try {
     const vid = (...args) => browseIn(VID, VIDOUT, {}, args);
     try {
       vid("open", `${BASE}/corner`);
+      // Move the real pointer: camoufox's own virtual cursor is what the red
+      // check below is about, and it is drawn where that pointer is.
+      vid("hover", "body");
       vid("wait", "1500");
       vid("close", 300000);
       const mp4 = join(VIDOUT, "recording.mp4");
@@ -352,6 +355,25 @@ try {
       check("the bottom-right of the page is in the recorded frame",
         !!rgb && rgb[2] > 150 && rgb[1] < 100,
         `sampled rgb=${rgb} from ${mp4} (green there means a magnified crop)`);
+
+      // Camoufox paints its OWN pointer - a red blob - into the content area, so
+      // it lands in the mp4 next to the one browse draws. Two cursors on one
+      // screen is not a demo anyone can use, so browse launches it with
+      // showcursor off. The page here is pure green + blue: any strongly red
+      // pixel in the frame is that blob coming back.
+      if (ENGINE !== "camoufox") {
+        console.log("  skip camoufox's own red pointer (chromium has none)");
+      } else {
+        const full = spawnSync("ffmpeg", ["-v", "error", "-sseof", "-0.4", "-i", mp4, "-frames:v", "1",
+          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+          { encoding: "buffer", maxBuffer: 2e7 });
+        const buf = full.stdout || Buffer.alloc(0);
+        let red = 0;
+        for (let i = 0; i + 2 < buf.length; i += 3)
+          if (buf[i] > 150 && buf[i + 1] < 90 && buf[i + 2] < 90) red++;
+        check("camoufox's own red pointer is not in the recording",
+          buf.length > 0 && red === 0, `${red} red px in ${buf.length / 3} sampled from ${mp4}`);
+      }
     } finally {
       rmSync(VIDOUT, { recursive: true, force: true });
     }
@@ -383,6 +405,62 @@ try {
     } finally {
       fit("close");
       rmSync(FITOUT, { recursive: true, force: true });
+    }
+  }
+
+  /* ------------------------------------------------------- the pointer drawn */
+  // The overlay pointer IS the macOS one: the @2x bitmaps AppKit hands out for
+  // NSCursor.arrow / NSCursor.pointingHand, drawn at their true point size with
+  // AppKit's hotspot. A lookalike that is a few pixels off reads as "some tool's
+  // cursor" in every demo, so the assertions are the exact numbers - which
+  // graphic is showing, that it actually PAINTED (a bitmap nobody could decode
+  // leaves an invisible pointer, not an error), and that the hotspot lands on
+  // what was hovered. Runs on both engines: the overlay used to be off under
+  // camoufox, and a video with no pointer in it is the failure that caused.
+  console.log("\nthe on-page pointer is the macOS one");
+  {
+    // Reads the VISIBLE canvas layer: its bitmap size says which graphic, its
+    // alpha says whether anything got painted, and its box + the hotspot for
+    // that graphic says where the tip actually is, in page coordinates.
+    const PTR = (sel) => "(() => {" +
+      "const c=[...document.querySelectorAll('#__bc_ptr canvas')].find(x=>x.style.display!=='none');" +
+      "if(!c) return 'no-pointer';" +
+      "const hand=c.dataset.shape==='pointer', w=hand?32:28, h=hand?[13,8]:[5,5];" +
+      "const r=c.getBoundingClientRect(), S=r.width/w;" +
+      "const px=c.getContext('2d').getImageData(0,0,c.width,c.height).data;" +
+      "let ink=0; for(let i=3;i<px.length;i+=4) if(px[i]>200) ink++;" +
+      // Opaque pixels in the smaller (1x) rep: 100 for the arrow, 155 for the
+      // hand. A third of that still separates a painted pointer from a canvas
+      // whose bitmap never decoded, which is the failure this catches.
+      "const t=document.querySelector('" + sel + "').getBoundingClientRect();" +
+      // Within half a pixel, not exactly on it: the pointer paints on whole
+      // pixels (a fractional offset would resample the bitmap and soften it),
+      // and an element centre is routinely a .5.
+      "return [hand?'hand':'arrow',Math.round(r.width),ink>33," +
+      "Math.abs(r.left+h[0]*S-(t.left+t.width/2))<=0.5," +
+      "Math.abs(r.top+h[1]*S-(t.top+t.height/2))<=0.5].join(',');})()";
+    works("back on the ui page", ["goto", `${BASE}/ui`], /ui/);
+    browse("hover", "#btn");
+    check("a button gets the macOS pointing hand, painted, fingertip on the button",
+      read(PTR("#btn")) === "hand,32,true,true,true", read(PTR("#btn")));
+    browse("hover", "#clicks");
+    check("plain text gets the macOS arrow, painted, tip on the text",
+      read(PTR("#clicks")) === "arrow,28,true,true,true", read(PTR("#clicks")));
+
+    // A 12x19 pointer is honest but small in a video someone watches at half
+    // size, so the size is a knob - and scaling it must move the hotspot with
+    // it, or the enlarged arrow points somewhere the click did not land.
+    const BIG = `${SESSION}-big`, BIGOUT = mkdtempSync(join(tmpdir(), "browse-ptr-"));
+    try {
+      const big = (...args) => browseIn(BIG, BIGOUT, { BROWSE_CURSOR_SCALE: "2" }, args);
+      big("open", `${BASE}/ui`);
+      big("hover", "#btn");
+      const got = big("eval", PTR("#btn")).out;
+      check("BROWSE_CURSOR_SCALE=2 doubles the pointer and keeps the hotspot on target",
+        got === "hand,64,true,true,true", got);
+    } finally {
+      browseIn(BIG, BIGOUT, {}, ["close"]);
+      rmSync(BIGOUT, { recursive: true, force: true });
     }
   }
 

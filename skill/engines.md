@@ -8,18 +8,20 @@ which Chromium cannot do at all: its new-headless is handed an unsolved
 installed, browse logs it and falls back to Chromium on its own, and says so in
 the `browse open` output.
 
-Reach for `--chromium` when you need a polished demo recording (the overlays
-below), `browse emulate tz= locale= cpu= net=` (CDP-only), a `.pdf`
+Reach for `--chromium` when you need `browse emulate tz= locale= cpu= net=`
+(CDP-only), a `.pdf`
 (`page.pdf()` is Chromium-only), or **`goBack`/`goForward`** — this camoufox
 build ignores history navigation completely (even an in-page `history.back()`
 leaves the url where it was), so browse fails those commands there instead of
 reporting a move that never happened. Navigate with `goto <url>` under camoufox.
 All of these raise a clear error rather than a Playwright stack trace.
 
-Under camoufox the three init scripts browse normally injects (cursor overlay,
-keystroke overlay, same-tab popup rewrite) default **off**: they are injected into
-every page, and on a bot-walled site that is the difference between passing and
-not. Force any back on with `--cursor`, `--keylog`, `--no-popups`.
+The cursor and keystroke overlays are on under camoufox too, so a demo records
+the same on either engine. They are scripts injected into every page, though, and
+on a bot-walled site that is the difference between clearing the challenge and
+sitting on it forever: on a stealth run pass `--no-cursor --no-keylog`. (Camoufox
+paints its own red debug pointer; browse turns that off, since it draws the real
+macOS one itself.)
 
 ## Log in on the engine you will drive with
 

@@ -14,8 +14,10 @@ clipping before you record.
 
 ## Pacing
 
-The video shows an animated cursor gliding to elements (a pointing hand over
-links/buttons), click ripples and a keystroke overlay. Pace steps naturally: a
+The video shows the macOS pointer gliding to elements (a pointing hand over
+links/buttons), click ripples and a keystroke overlay. It is drawn at its true
+macOS size; `BROWSE_CURSOR_SCALE=1.5` enlarges it when the recording will be
+watched small. Pace steps naturally: a
 short `browse wait 800` after key moments reads better.
 
 Dead time while you think is cut automatically. For a long but visibly-active wait
