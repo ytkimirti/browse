@@ -71,12 +71,26 @@ pkg_install() { # <dir> <spec…> — bun if present, else npm; both are quiet-i
   else (cd "$dir" && npm install --no-fund --no-audit "$@"); fi
 }
 
+# On Linux the browser also needs system libraries (libatspi, libnss…) that a
+# desktop already has and a container does not — without them Chromium dies at
+# launch on "error while loading shared libraries", which is the first wall a
+# remote box hits. Playwright installs them itself given root, so ask for that
+# where it is both needed and free: root, or sudo that wants no password.
+deps_flag() {
+  [[ "$(uname -s)" == "Linux" ]] || return 0
+  if [[ "$(id -u)" == "0" ]] || sudo -n true 2>/dev/null; then echo "--with-deps"; fi
+}
+
 install_main() {
   # ffmpeg bundle too: browse.mjs falls back to it for the mp4 finalize when no
   # system ffmpeg exists (system one still preferred — it can draw speed badges)
   pkg_install "$PW_DIR" "playwright@$PW_VERSION"
-  if command -v bun >/dev/null; then (cd "$PW_DIR" && bunx playwright install chromium ffmpeg)
-  else (cd "$PW_DIR" && npx --yes playwright install chromium ffmpeg); fi
+  # `bun x`, not `bunx`: a bun installed without its bunx shim (some container
+  # images) would otherwise pass the `command -v bun` test and then die on the
+  # very next line with "bunx: command not found".
+  local deps; deps="$(deps_flag)"
+  if command -v bun >/dev/null; then (cd "$PW_DIR" && bun x playwright install $deps chromium ffmpeg)
+  else (cd "$PW_DIR" && npx --yes playwright install $deps chromium ffmpeg); fi
 }
 
 # Only worth the download once camoufox itself is on the machine — playwright-core
@@ -129,7 +143,16 @@ PATCH_EOF
 installed_version() { # <dir> <pkg>
   node -p "require('$1/node_modules/$2/package.json').version" 2>/dev/null || true
 }
-main_installed()    { [[ "$(installed_version "$PW_DIR" playwright)" == "$PW_VERSION" ]]; }
+# The npm package being at the pin does NOT mean the browser it drives was ever
+# downloaded: an interrupted `playwright install`, or a bun without its bunx
+# shim, leaves the package installed and the binary missing. Claiming "installed"
+# there costs a whole session — the daemon launches, dies on Playwright's own
+# "Please run … playwright install" banner, and the caller reads that as browse
+# being broken. So readiness means the package AND the binary.
+chromium_present() {
+  node -e "const p=require('$PW_DIR/node_modules/playwright').chromium.executablePath();process.exit(require('fs').existsSync(p)?0:1)" 2>/dev/null
+}
+main_installed()    { [[ "$(installed_version "$PW_DIR" playwright)" == "$PW_VERSION" ]] && chromium_present; }
 # Ready means installed AT the pin AND carrying the current video patch — a copy
 # from before the patch existed is worse than none, since it records nothing.
 camoufox_pw_ready() {

@@ -8,8 +8,8 @@
   "homepage": "https://github.com/ytkimirti/browse#readme",
   "bugs": { "url": "https://github.com/ytkimirti/browse/issues" },
   "keywords": ["browser", "automation", "playwright", "cli", "recording", "agent", "screencast"],
-  "bin": { "browse": "bin/browse" },
-  "files": ["bin/", "browse.mjs", "SKILL.md", "README.md"],
+  "bin": { "browse": "bin/browse", "browse-box": "bin/browse-box" },
+  "files": ["bin/", "browse.mjs", "scripts/", "SKILL.md", "README.md"],
   "engines": { "node": ">=18" },
   "private": false
 }
