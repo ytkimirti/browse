@@ -3172,12 +3172,19 @@ function camoufoxLaunchOptions() {
   // into the content area, so it lands in the recording and cannot be styled
   // from the page. Off, always: this session draws the real macOS pointer
   // itself (cursorInitScript), and two cursors on one screen is worse than
-  // either. `humanize` stays: it is the stealth part (a curved, human-timed
-  // path for the REAL pointer), and it is what the red dot was only showing.
+  // either.
+  //
+  // `humanize` is the stealth part and stays on: it moves the REAL pointer along
+  // a curved, human-timed path instead of teleporting it. Uncapped it takes up
+  // to ~1.5s per move (measured: a `hover` costs 2.5s on camoufox vs 0.8s on
+  // chromium) while the pointer we DRAW lands in 340ms — so the recording shows
+  // the cursor sitting on a button for over a second before the button reacts.
+  // The number caps that duration, so the path stays human and the page reacts
+  // as the drawn pointer arrives.
   const script =
     "import json,sys;from browserforge.fingerprints import Screen;" +
     "from camoufox.utils import launch_options;" +
-    `print(json.dumps(launch_options(headless=True,humanize=True,config={'showcursor':False},` +
+    `print(json.dumps(launch_options(headless=True,humanize=0.5,config={'showcursor':False},` +
     `window=(${VIEWPORT.width},${VIEWPORT.height}),` +
     `screen=Screen(min_width=${VIEWPORT.width},min_height=${VIEWPORT.height}),i_know_what_im_doing=True)))`;
   // camoufox is a Python package but this skill is global, so a project venv is
