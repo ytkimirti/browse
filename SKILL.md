@@ -45,8 +45,9 @@ port. Start the dev server first, redirect its output to a log
 (`bun run dev > /tmp/dev.log 2>&1 &`), and wait until it really listens
 (`until curl -sf http://127.0.0.1:<port> >/dev/null; do sleep 1; done`, checking
 the real port). `browse` only sees the browser; server-side stack traces are ONLY
-in that log. After `open`, confirm with `snapshot`/`text` that the page is not
-blank, connection-refused, or a framework error overlay.
+in that log. With `--remote`, that port has to be on the REMOTE machine
+(`skill/remote.md`). After `open`, confirm with `snapshot`/`text` that the page
+is not blank, connection-refused, or a framework error overlay.
 
 ## Decide these before the first command
 
@@ -96,4 +97,6 @@ be candid and specific; a few bullets is enough.
 - `skill/recording.md` — recording craft, when the video is the deliverable
 - `skill/engines.md` — camoufox (default, clears bot walls) vs chromium (needed for
   `emulate`, PDF, and polished demos)
+- `skill/remote.md` — running the browser on another machine (`--remote`), and on
+  an Upstash Box
 - `skill/troubleshooting.md` — daemon won't start, selector misses, install, ffmpeg

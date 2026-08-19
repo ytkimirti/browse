@@ -101,16 +101,24 @@
  */
 
 import http from "node:http";
+import net from "node:net";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync, createReadStream, createWriteStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, basename } from "node:path";
 
 const SELF = fileURLToPath(import.meta.url);
 const HOST = "127.0.0.1";
+// What the DAEMON binds. Loopback is right on a machine you sit at: the control
+// port drives a browser and reads its recordings, so nothing off-box should
+// reach it. A container is the exception — an ssh port-forward into one lands on
+// the container's external interface, not its loopback, so a daemon meant to be
+// reached with `browse --remote` from outside has to bind 0.0.0.0 and rely on the
+// container's own network isolation instead (see the remote-host section).
+const BIND = process.env.BROWSE_BIND || HOST;
 // Each named session runs its OWN daemon + Chromium, so parallel agents don't
 // step on each other. A daemon binds a free port (or BROWSE_PORT if pinned) and
 // publishes it in a run file the clients look up by session name.
@@ -190,7 +198,16 @@ let SESSION = sanitizeName(process.env.BROWSE_SESSION || defaultSession());
 // Persistent profile (`-p <name>` / BROWSE_PROFILE): its own user-data dir so
 // logins+localStorage survive close→open. null = throwaway context (the default).
 let PROFILE = process.env.BROWSE_PROFILE ? sanitizeName(process.env.BROWSE_PROFILE) : null;
-function runFile(name) { return join(RUN_DIR, `${name}.json`); }
+// Remote host (`--remote <sshhost>` / BROWSE_REMOTE). Set, the browser, the
+// recording, ffmpeg and every artifact live on THAT machine and this process is
+// only a client: it opens one ssh master carrying a port-forward to that
+// machine's daemon, talks the same localhost protocol down it, and mirrors the
+// artifacts a reply names back into a local session dir. Unset = all local.
+let REMOTE = process.env.BROWSE_REMOTE ? String(process.env.BROWSE_REMOTE).trim() : null;
+/** Run files are per (host, session): the same session name on two machines is
+ *  two browsers, and a remote entry additionally holds the local end of the
+ *  tunnel, so it must not collide with a local session of that name. */
+function runFile(name) { return join(RUN_DIR, `${REMOTE ? remoteTag() + "~" : ""}${name}.json`); }
 
 // ── Profile storage ────────────────────────────────────────────────────────
 // ONE profile name, up to TWO dirs on disk: a Firefox profile and a Chromium
@@ -394,7 +411,7 @@ const HEADFUL = process.env.BROWSE_HEADFUL === "1";
 // `BROWSE_ENGINE=chromium` switches back — needed for `emulate` and PDF export,
 // which are CDP-only (see engineSupportsCdp).
 const ENGINE = (process.env.BROWSE_ENGINE || "camoufox").toLowerCase();
-const USING_CAMOUFOX = ENGINE === "camoufox";
+let USING_CAMOUFOX = ENGINE === "camoufox";
 const IDLE_MS = process.env.BROWSE_IDLE_MS === undefined
   ? 30 * 60 * 1000
   : Math.max(0, Number(process.env.BROWSE_IDLE_MS) || 0);
@@ -447,8 +464,8 @@ const KEEP_WEBM = process.env.BROWSE_KEEP_WEBM === "1";
 // because that rewrite is another init script injected into every page, and
 // under camoufox the point is to look like an untouched browser. Set
 // BROWSE_POPUPS=0 to force the same-tab rewrite back on.
-const POPUPS = USING_CAMOUFOX ? process.env.BROWSE_POPUPS !== "0"
-                              : process.env.BROWSE_POPUPS === "1";
+let POPUPS = USING_CAMOUFOX ? process.env.BROWSE_POPUPS !== "0"
+                            : process.env.BROWSE_POPUPS === "1";
 
 /** `browse emulate net=<preset>` - Chrome DevTools' own throttling numbers
  *  (latency in ms, throughput in BYTES/sec). `net=off` clears the override. */
@@ -630,12 +647,12 @@ function logLabel(cmd, args) {
  * is not part of the page's rendered surface, so it never appears in the video —
  * a DOM cursor we move ourselves does). Set BROWSE_CURSOR=0 to disable.
  */
-// On by default on BOTH engines: the recording is the deliverable, and a demo
-// video with no pointer in it is the failure that keeps happening. It is not
-// free on camoufox — this overlay is injected into every page, and on a
-// bot-walled site that is the difference between passing and not (measured on
-// akakce's Cloudflare challenge: with the overlay on it never cleared, with it
-// off it cleared in under 4s). A stealth run turns it off: --no-cursor.
+// On by default on BOTH engines, so the engine that actually launched can never
+// cost a recording its pointer. It is not free on camoufox — this overlay is
+// injected into every page, and on a bot-walled site that is the difference
+// between passing and not (measured on akakce's Cloudflare challenge: with the
+// overlay on it never cleared, with it off it cleared in under 4s). A stealth
+// run turns it off: --no-cursor.
 const CURSOR = process.env.BROWSE_CURSOR !== "0";
 /** How much bigger than macOS to draw the pointer. 1 = the real thing, which is
  *  12x19 px — authentic, but small in a 1280x800 video watched at half size.
@@ -879,6 +896,19 @@ function cursorInitScript(scale) {
 // Same reasoning as CURSOR, camoufox cost included: on by default on both
 // engines, --no-keylog for a stealth run.
 const KEYLOG = process.env.BROWSE_KEYLOG !== "0";
+/**
+ * Re-derive the engine-chosen default above once the engine is actually KNOWN.
+ * It is not always the one asked for: camoufox is the default and the daemon
+ * falls back to chromium whenever it is not installed — which is every box,
+ * since a server has no camoufox. Only POPUPS is still decided by engine; the
+ * cursor and keystroke overlays are on either way, which is what stopped every
+ * fallback session from recording with no pointer and no keystrokes in it.
+ */
+function adoptEngineDefaults(engine) {
+  USING_CAMOUFOX = engine === "camoufox";
+  POPUPS = USING_CAMOUFOX ? process.env.BROWSE_POPUPS !== "0"
+                          : process.env.BROWSE_POPUPS === "1";
+}
 /**
  * Per-keystroke delay (ms) so `fill`/`type` enter text like a person typing —
  * fast, but not an instant paste. BROWSE_TYPE_DELAY overrides (0 = instant). The
@@ -1190,6 +1220,27 @@ Parallel sessions (e.g. one browser per agent — fully isolated):
   browse setup                      install/repair deps (playwright, chromium, camoufox link)
   browse version                    print the version
 
+Run the browser on another machine (keeps Chromium, ffmpeg and the dev server off
+this one — see 'browse help --env' for the auth + install knobs):
+  browse --remote <sshhost> <cmd>   drive a browser on <sshhost> over ssh. Put it before the
+                                    command, on EVERY command incl. close (BROWSE_REMOTE=<host>
+                                    works too). <sshhost> is anything ssh takes: a ~/.ssh/config
+                                    name, user@host, or an Upstash Box (<box-id>@us-east-1.box.
+                                    upstash.com — it authenticates with the Box API key).
+                                    The remote needs 'browse' on its PATH and nothing else: no
+                                    inbound port, no daemon of its own, nothing running until
+                                    your first command.
+                                    Artifacts are recorded THERE and copied back as the replies
+                                    name them, so every path printed is one you can open HERE.
+                                    'browse open' means 127.0.0.1 ON THAT MACHINE — run the dev
+                                    server there too, or lend it this one with
+                                    'ssh -R 3000:127.0.0.1:3000 <sshhost>'.
+                                    'profiles', 'clear' and 'setup' read that machine's disk,
+                                    so they run there; 'net' copies its log down first.
+                                    For an Upstash Box, 'browse-box' (next to this one) makes one
+                                    in ~12s, copies files onto it, runs its dev server, and
+                                    deletes it when you are done — 'browse-box help'.
+
 Launch flags (how the browser STARTS — put them before the command that opens the
 session; on an already-live session browse refuses rather than ignoring them):
   --headful / --headless            show the browser window while driving it (still records)
@@ -1254,11 +1305,15 @@ Every launch flag is also an env var (a flag on the command WINS over the env):
   BROWSE_NET=0|1           --no-net/--net       BROWSE_TYPE_DELAY=<ms>           --type-delay
   BROWSE_IDLE_MS=<ms>      --idle
   BROWSE_SESSION=<name>    -s <name>            BROWSE_PROFILE=<name>            -p <name>
+  BROWSE_REMOTE=<sshhost>  --remote <sshhost>
 
 Env-only (set once in a shell profile — no flag):
   BROWSE_HOME              data home for profiles/sessions/deps (default ~/.browse)
-  BROWSE_OUT               override this session's artifacts dir
-  BROWSE_PORT              pin the localhost control port (default: any free port)
+  BROWSE_OUT               override this session's artifacts dir (LOCAL sessions only — with
+                           --remote the browser writes on the remote and the copies land in a
+                           mirror dir, which 'close' and 'dir' print)
+  BROWSE_PORT              pin the control port (default: any free port — but with --remote it is
+                           derived from the session name, and this overrides that)
   BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
   BROWSE_WIDTH / _HEIGHT   viewport one dimension at a time (BROWSE_VIEWPORT sets both)
   BROWSE_CURSOR_SCALE      draw the pointer N× macOS size for a video (1, max 4)
@@ -1269,6 +1324,18 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_NET_BODIES=0      don't capture request/response bodies
   BROWSE_NET_BODY_MAX      max bytes kept per body (32768)
   BROWSE_NET_SECRETS=1     keep auth headers/cookie values verbatim (default: hashed)
+  BROWSE_SSH_PASSWORD      password for a --remote that has no key (an Upstash Box falls back to
+                           its API key by itself: UPSTASH_BOX_API_KEY, else the one 'browse-box
+                           key' saved in ~/.browse/box.json). Handed to ssh through an askpass
+                           helper's env — never written to disk, never on a command line
+  BROWSE_SSH_OPTS          extra ssh options for --remote, e.g. "-p 2222 -i ~/.ssh/box"
+  BROWSE_REMOTE_BIN        how to run browse on a --remote (default: browse)
+  BROWSE_REMOTE_SPAWN      command that starts the daemon on a --remote that plain ssh can't
+                           spawn into; the remote command line is in $BROWSE_SPAWN_CMD. An
+                           Upstash Box is handled without this (it uses its own exec API)
+  BROWSE_BIND              address the DAEMON listens on (default 127.0.0.1). --remote already
+                           passes 0.0.0.0 down, since a forward into a container lands on its
+                           external interface — set this only to override that
   BROWSE_FFMPEG            path to the ffmpeg used for the mp4 finalize
   BROWSE_PW_BASE           path whose parent dir holds node_modules/playwright
   BROWSE_CAMOUFOX_PYTHON   python that can 'import camoufox' (default python3)`;
@@ -1553,18 +1620,435 @@ function netCommand(argv) {
   return 0;
 }
 
+/* ============================================================ remote host */
+// `--remote <sshhost>` moves the BROWSER SIDE of browse onto another machine —
+// the daemon, Chromium, ffmpeg, the video, the screenshots. This process keeps
+// doing what it always did (POST a command to a localhost port, print the
+// reply); an ssh port-forward is what makes that port the remote daemon's.
+//
+// Provider-neutral on purpose: anything you can `ssh` into works (a VPS, an
+// Upstash Box, a CI runner) and browse never learns which it is. The remote
+// machine needs `browse` on its PATH — nothing else, and no inbound port.
+//
+// Two things the local case doesn't need:
+//   • a PINNED remote port. The client has to know which port to forward before
+//     the daemon exists, so it derives one from the session name instead of
+//     letting the daemon pick a free one.
+//   • ARTIFACT MIRRORING. Every path a reply hands back names a file on the
+//     remote disk; the caller can only read local ones. So each reply's named
+//     artifacts are copied down and the paths rewritten to where they landed.
+
+/** Short, filesystem-safe label for the remote — the login half of user@host if
+ *  there is one (a box id), else the hostname. Namespaces run files and the
+ *  local mirror dir so two hosts never share either. */
+function remoteTag() {
+  const first = String(REMOTE || "").split("@")[0];
+  return sanitizeName((first.includes(".") ? remoteHostname() : first) || "remote").slice(0, 24);
+}
+function remoteHostname() { return String(REMOTE || "").split("@").pop().split(":")[0]; }
+
+/** The remote daemon's control port. Pinned to the session name (rather than
+ *  free-chosen like a local daemon's) so a later command reattaches by simply
+ *  forwarding the same port again, without asking the remote anything. The
+ *  price of pinning is that something else on that machine can already hold the
+ *  port — BROWSE_PORT is the way out, and ensureRemoteDaemon says so when it
+ *  sees a port that answers but isn't browse. */
+function remotePortFor(session) {
+  if (FIXED_PORT) return FIXED_PORT;
+  const h = createHash("sha256").update(session).digest();
+  return 41000 + (((h[0] << 8) | h[1]) % 8000);
+}
+
+/** What is on the far end of the tunnel: a browse daemon, something else, or
+ *  nothing. Not a TCP connect — an `ssh -L` listener ACCEPTS every local
+ *  connection and only then finds out whether the remote target exists, so a
+ *  connect always "succeeds" and would call every free port taken. Bytes coming
+ *  back is the only signal that distinguishes the three. */
+function probePort(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: HOST, port, path: "/health", timeout: 8000 }, (res) => {
+      let buf = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => (buf += c));
+      res.on("end", () => {
+        try {
+          const health = JSON.parse(buf);
+          if (health && health.session) return resolve({ kind: "browse", health });
+        } catch { /* answered, but not with browse's /health */ }
+        resolve({ kind: "other" });
+      });
+    });
+    req.on("error", () => resolve({ kind: "none" })); // forward refused: nothing there
+    req.on("timeout", () => { req.destroy(); resolve({ kind: "none" }); });
+  });
+}
+
+/** Where a remote session's artifacts are mirrored locally. Derived from the
+ *  remote dir name (stable across commands) — NOT from defaultOut(), which
+ *  stamps a fresh dir on every invocation and would scatter one session's
+ *  screenshots over a dozen local dirs. */
+function mirrorDir(remoteOut) {
+  return join(BROWSE_HOME, "sessions", `${basename(remoteOut)}-${remoteTag()}`);
+}
+
+const SSH_PASS_ENV = "BROWSE_SSH_PASSWORD";
+/** The Upstash Box API key: `UPSTASH_BOX_API_KEY`, else the `apiKey` in
+ *  ~/.browse/box.json (which browse-box writes 0600).
+ *
+ *  The file is there so this credential does not have to be exported into every
+ *  process on the machine just to be found by the two commands that want it.
+ *  The env var still wins — that is the CI/one-off path, and how you drive a
+ *  second account without editing anything. */
+function boxApiKey() {
+  if (process.env.UPSTASH_BOX_API_KEY) return process.env.UPSTASH_BOX_API_KEY;
+  try {
+    return JSON.parse(readFileSync(join(BROWSE_HOME, "box.json"), "utf8")).apiKey || null;
+  } catch { return null; }
+}
+/** The password for a password-auth host, or null when ssh has a key. Never
+ *  written anywhere: it reaches ssh through the askpass helper's ENVIRONMENT. */
+function sshPassword() {
+  if (process.env[SSH_PASS_ENV]) return process.env[SSH_PASS_ENV];
+  // An Upstash Box offers password auth ONLY (its gateway takes no keys) and the
+  // password is the Box API key, which is the one credential the box side needs.
+  if (/\.box\.upstash\.com$/.test(remoteHostname())) return boxApiKey();
+  return null;
+}
+/** ssh reads a password from a helper program, never from a pipe. SSH_ASKPASS
+ *  is that program; REQUIRE=force is what makes ssh use it with no tty. */
+function askpassShim() {
+  const f = join(RUN_DIR, "askpass.sh");
+  mkdirSync(RUN_DIR, { recursive: true });
+  writeFileSync(f, `#!/bin/sh\nprintf '%s\\n' "$${SSH_PASS_ENV}"\n`, { mode: 0o700 });
+  return f;
+}
+function sshEnv() {
+  const pw = sshPassword();
+  if (!pw) return process.env;
+  return { ...process.env, [SSH_PASS_ENV]: pw, SSH_ASKPASS: askpassShim(), SSH_ASKPASS_REQUIRE: "force" };
+}
+
+/** One master connection per (host, session): its socket is both the tunnel's
+ *  handle (`-O check` / `-O exit`) and the way every later ssh call skips
+ *  re-authenticating. */
+function ctlPath() { return join(RUN_DIR, `${remoteTag()}~${SESSION}.ctl`); }
+const SSH_OPTS = (process.env.BROWSE_SSH_OPTS || "").split(/\s+/).filter(Boolean);
+function sshArgs(extra) {
+  return ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=20",
+    "-S", ctlPath(), ...SSH_OPTS, ...extra];
+}
+function ssh(extra, opts = {}) {
+  return spawnSync("ssh", sshArgs(extra), { env: sshEnv(), encoding: "utf8", timeout: 120000, ...opts });
+}
+function tunnelAlive() {
+  if (!existsSync(ctlPath())) return false;
+  return ssh(["-O", "check", REMOTE], { stdio: "ignore", timeout: 20000 }).status === 0;
+}
+function stopTunnel() {
+  if (existsSync(ctlPath())) ssh(["-O", "exit", REMOTE], { stdio: "ignore", timeout: 20000 });
+  rmSync(ctlPath(), { force: true });
+}
+/** The BROWSE_* knobs that belong to the machine running the BROWSER, carried
+ *  from this shell into the remote daemon's spawn env.
+ *
+ *  `browse help` promises every launch flag is also an env var, and that the
+ *  rarer knobs (BROWSE_IDLE_MODE, BROWSE_TYPE_DELAY, …) are env-only. Without
+ *  this, --remote kept that promise for the flags — which travel as LAUNCH_ENV —
+ *  and quietly broke it for the env vars, which were read by the CLIENT and
+ *  never sent anywhere. `BROWSE_CURSOR=0 browse --remote … open` recorded a
+ *  cursor.
+ *
+ *  A deny-list, not an allow-list, so an env-only knob added later travels
+ *  without anyone remembering to list it. What it denies is the vars that
+ *  describe THIS side: where ssh goes, how it authenticates, which port and
+ *  address the tunnel uses, and where the local files live — BROWSE_HOME above
+ *  all, since a mac path handed to the box points its data dir at a directory
+ *  that does not exist there.
+ *
+ *  BROWSE_OUT is denied for a subtler reason: it names a LOCAL directory the
+ *  caller wants artifacts in, and the remote's artifacts arrive through the
+ *  mirror, not through the remote's own out dir. Forwarding it would make the
+ *  box write to the caller's mac path. `close` prints where the mp4 really is.
+ */
+const REMOTE_ENV_DENY = new Set([
+  "BROWSE_REMOTE", "BROWSE_REMOTE_BIN", "BROWSE_REMOTE_SPAWN",
+  "BROWSE_SSH_PASSWORD", "BROWSE_SSH_OPTS",
+  "BROWSE_HOME", "BROWSE_OUT", "BROWSE_PORT", "BROWSE_BIND",
+  "BROWSE_SESSION", "BROWSE_PROFILE",
+]);
+function forwardedEnv() {
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("BROWSE_") && !REMOTE_ENV_DENY.has(k) && v !== undefined) out[k] = String(v);
+  }
+  return out;
+}
+
+/** Bring up the master + forward. ExitOnForwardFailure so a taken local port
+ *  fails HERE instead of leaving a connection whose forward silently isn't. */
+function startTunnel(localPort, remotePort) {
+  mkdirSync(RUN_DIR, { recursive: true });
+  // Never ask for a master while a socket for one is still on disk — alive or
+  // not, `ssh -M` warns and falls back to a NON-multiplexed connection, whose
+  // forward works but which `-O exit` can then never reach, so every later
+  // command leaks another idle ssh. Reaching here means the existing tunnel was
+  // no use anyway (its daemon is gone, or it answers for another session), so
+  // take it down first. stopTunnel handles both live and stale.
+  if (existsSync(ctlPath())) stopTunnel();
+  const r = ssh(["-M", "-f", "-N", "-T",
+    "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
+    "-L", `${HOST}:${localPort}:${HOST}:${remotePort}`, REMOTE], { timeout: 60000 });
+  if (r.status !== 0) {
+    const why = (r.stderr || "").trim().split("\n").filter(Boolean).slice(-2).join("; ");
+    throw new Error(
+      `ssh to ${REMOTE} failed${why ? `: ${why}` : ""}\n` +
+      (sshPassword() ? "" : `  (no key? set ${SSH_PASS_ENV} for a password-auth host — for an Upstash Box run: browse-box key <key>)`));
+  }
+  return localPort;
+}
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on("error", reject);
+    srv.listen(0, HOST, () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+  });
+}
+
+const REMOTE_BIN = process.env.BROWSE_REMOTE_BIN || "browse";
+/** Where a remote spawn's own output lands, on the remote. */
+const SPAWN_LOG = "~/.browse/spawn.log";
+const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+/** An Upstash Box, as `<box-id>@<region>.box.upstash.com`, or null. Its ssh is a
+ *  gateway that attaches into the container rather than an sshd, which changes
+ *  what a spawn can rely on — see spawnRemoteDaemon. */
+function upstashBox() {
+  const m = /^([^@]+)@((?:[\w-]+\.)?box\.upstash\.com)$/.exec(String(REMOTE || ""));
+  return m ? { id: m[1], base: `https://${m[2]}` } : null;
+}
+
+/** Start the daemon on the remote. Three ways, in order of specificity:
+ *
+ *  1. BROWSE_REMOTE_SPAWN — you supply the mechanism. The remote command line is
+ *     in $BROWSE_SPAWN_CMD; anything that runs it on the right machine will do.
+ *  2. An Upstash Box's HTTP exec API. A box CANNOT be spawned into over ssh: the
+ *     gateway kills whatever the attach leaves behind, nohup and setsid
+ *     included, so the daemon dies the moment the ssh call returns. Its exec API
+ *     has no such teardown, and authenticates with the key ssh just used.
+ *  3. Plain `ssh <host> <cmd>` — every ordinary machine.
+ *
+ *  None of the three is checked for an exit status: a box relays neither that
+ *  nor stdout back over ssh, so the only honest proof is /health answering on
+ *  the forwarded port, which ensureRemoteDaemon is already waiting for. */
+async function spawnRemoteDaemon(remotePort) {
+  const env = {
+    ...forwardedEnv(),
+    BROWSE_SESSION: SESSION, BROWSE_PORT: String(remotePort),
+    // A forward into a CONTAINER arrives on its external interface, not its
+    // loopback, so a loopback-only daemon would be unreachable through the very
+    // tunnel that started it. Set BROWSE_BIND to override for a host where
+    // binding wide open is not what you want.
+    BROWSE_BIND: process.env.BROWSE_BIND || "0.0.0.0",
+    ...(PROFILE ? { BROWSE_PROFILE: PROFILE } : {}), ...LAUNCH_ENV,
+  };
+  const assigns = Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join(" ");
+  // Keep the start-up output: everything that can go wrong BEFORE browse runs
+  // (not on PATH, not executable, no node) leaves no session dir and therefore
+  // no browsed.log, and on a host whose ssh swallows output this file is the
+  // only place that failure is written down at all.
+  const remoteCmd =
+    `mkdir -p ~/.browse && nohup setsid env ${assigns} ${REMOTE_BIN} __serve ` +
+    `>${SPAWN_LOG} 2>&1 </dev/null &`;
+
+  if (process.env.BROWSE_REMOTE_SPAWN) {
+    spawnSync("sh", ["-c", process.env.BROWSE_REMOTE_SPAWN],
+      { env: { ...process.env, ...env, BROWSE_SPAWN_CMD: remoteCmd }, stdio: "inherit", timeout: 120000 });
+    return;
+  }
+  const box = upstashBox();
+  if (box) return boxExec(box, remoteCmd);
+  ssh([REMOTE, remoteCmd]);
+}
+
+/** POST one command to a box's exec API. The API key is the same one its ssh
+ *  takes as a password, so a box needs no credential browse doesn't already
+ *  have. Throws only on a refused request — a command that ran and failed is
+ *  diagnosed by the health poll, with the daemon's own log to point at. */
+async function boxExec(box, command) {
+  const key = boxApiKey() || sshPassword();
+  if (!key) throw new Error(
+    "no Box API key — set UPSTASH_BOX_API_KEY or run: browse-box key <key>");
+  const res = await fetch(`${box.base}/v2/box/${box.id}/exec`, {
+    method: "POST",
+    headers: { "X-Box-Api-Key": key, "content-type": "application/json" },
+    body: JSON.stringify({ command: ["sh", "-c", command] }),
+  }).catch((e) => { throw new Error(`box exec unreachable: ${e.message}`); });
+  if (!res.ok) throw new Error(`box exec refused (${res.status}) — is ${box.id} the right box id?`);
+}
+
+/** Reattach to a live remote session WITHOUT starting anything: reuse the
+ *  tunnel if it survived, re-open it if it didn't (a slept laptop drops the
+ *  connection while the remote daemon and its recording keep running). */
+async function findRemoteDaemon() {
+  let info = null;
+  try { info = JSON.parse(readFileSync(runFile(SESSION), "utf8")); } catch { return null; }
+  if (!info || !info.port) return null;
+  if (tunnelAlive()) {
+    const h = await healthInfo(info.port);
+    if (h && h.session === SESSION) return { ...info, ...h };
+  }
+  stopTunnel();
+  let local;
+  try { local = startTunnel(await freePort(), info.remotePort || remotePortFor(SESSION)); }
+  catch { return null; }
+  const h = await healthInfo(local);
+  if (!h || h.session !== SESSION) { stopTunnel(); return null; }
+  return saveRemoteRun({ ...info, port: local, ...h });
+}
+
+function saveRemoteRun(rec) {
+  mkdirSync(RUN_DIR, { recursive: true });
+  writeFileSync(runFile(SESSION), JSON.stringify(rec));
+  return rec;
+}
+
+async function ensureRemoteDaemon() {
+  const found = await findRemoteDaemon();
+  if (found) return found;
+  const remotePort = remotePortFor(SESSION);
+  const local = startTunnel(await freePort(), remotePort);
+  // The run file can be gone while the daemon is not (a cleared ~/.browse, a
+  // `sessions` sweep during a dropped tunnel). The port is derived from the
+  // session name, so ASK before spawning a second browser onto the same one.
+  const probe = await probePort(local);
+  if (probe.kind === "browse" && probe.health.session === SESSION) {
+    return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...probe.health });
+  }
+  // Anything ELSE on that port means a daemon spawned now would fail to bind, so
+  // say so here rather than wait out the whole start-up poll to report a browser
+  // that "did not come up".
+  if (probe.kind !== "none") {
+    stopTunnel();
+    throw new Error(
+      `port ${remotePort} on ${REMOTE} is already taken by ` +
+      `${probe.kind === "browse" ? `browse session '${probe.health.session}'` : "something that is not browse"}\n` +
+      `  Re-run with BROWSE_PORT=<a free port there>, or use a different -s name.`);
+  }
+  await spawnRemoteDaemon(remotePort);
+  // A cold remote installs Playwright + a browser on this first command, which
+  // is minutes, not seconds — so this waits far longer than the local spawn.
+  let h = null;
+  for (let i = 0; i < 300; i++) {
+    h = await healthInfo(local);
+    if (h && h.session === SESSION) break;
+    h = null;
+    await sleep(1000);
+  }
+  if (!h) {
+    stopTunnel();
+    throw new Error(
+      `browse daemon for session '${SESSION}' did not come up on ${REMOTE} (port ${remotePort})\n` +
+      `  its start-up output is in ${SPAWN_LOG} on ${REMOTE}, and once it gets as far as\n` +
+      `  launching a browser, ~/.browse/sessions/*/browsed.log. Check '${REMOTE_BIN}' is\n` +
+      `  on PATH and executable there.`);
+  }
+  return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...h });
+}
+
+/** GET one artifact out of the remote session dir into `dest`. Returns false
+ *  for an artifact that isn't there (a .gif still encoding, a session with no
+ *  network log) — a missing extra must not fail the command that named it. */
+function pullFile(port, rel, dest) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: HOST, port, path: `/file?p=${encodeURIComponent(rel)}`, timeout: 300000 },
+      (res) => {
+        if (res.statusCode !== 200) { res.resume(); return resolve(false); }
+        mkdirSync(join(dest, ".."), { recursive: true });
+        const tmp = `${dest}.part`;
+        const out = createWriteStream(tmp);
+        res.pipe(out);
+        out.on("error", () => resolve(false));
+        out.on("finish", () => {
+          try { renameSync(tmp, dest); resolve(true); } catch { resolve(false); }
+        });
+      });
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+  });
+}
+
+/** Copy down every artifact this reply NAMES, then rewrite the remote paths in
+ *  it to the local copies — so a caller reading `[shots/step-03-click.png]` or
+ *  the mp4 path out of the text finds a file at that path.
+ *
+ *  `full` (on close) adds the session-level files nothing names explicitly but
+ *  the caller will want: transcript, network log. */
+async function mirrorResult(d, text, { full = false } = {}) {
+  const local = mirrorDir(d.out);
+  const rels = new Set();
+  for (const m of String(text).matchAll(/\[(shots\/[\w.@-]+)\]/g)) rels.add(m[1]);
+  // Absolute (`saved /home/you/.browse/…/x.png`) and tilde-shortened (the close
+  // block runs every path through tildePath) both name the same file.
+  const forms = [d.out, d.home && d.out.startsWith(d.home + "/") ? "~" + d.out.slice(d.home.length) : null].filter(Boolean);
+  for (const form of forms) {
+    const esc = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (const m of String(text).matchAll(new RegExp(`${esc}/([\\w./@-]+)`, "g"))) rels.add(m[1]);
+  }
+  if (full) for (const f of ["transcript.md", "network.jsonl"]) rels.add(f);
+  mkdirSync(local, { recursive: true });
+  const missed = [];
+  for (const rel of rels) {
+    if (rel.includes("..")) continue;
+    if (!(await pullFile(d.port, rel, join(local, rel)))) missed.push(rel);
+  }
+  let out = String(text);
+  for (const form of forms) out = out.split(form).join(local);
+  return { text: out, local, missed };
+}
+
+/** Run one of the client-answered commands that reads the remote's DISK
+ *  (`profiles`, `clear`, `setup`) over there instead — answered here they would
+ *  describe this laptop's profiles and this laptop's Playwright. */
+function sshPassthrough(argv) {
+  // The selectors were consumed by the flag parser here, so they have to be put
+  // back: `--remote box -p acme clear` reaching the far side as a bare `clear`
+  // would be refused for having no profile — or, worse, wipe the wrong one.
+  const env = { BROWSE_SESSION: SESSION, ...(PROFILE ? { BROWSE_PROFILE: PROFILE } : {}), ...LAUNCH_ENV };
+  const assigns = Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join(" ");
+  const cmd = `env ${assigns} ${REMOTE_BIN} ${argv.map(shq).join(" ")}`;
+  const r = ssh([REMOTE, cmd], { encoding: "utf8", timeout: 600000 });
+  if (r.stdout) process.stdout.write(r.stdout);
+  if (r.stderr) process.stderr.write(r.stderr);
+  // An Upstash Box's ssh gateway runs the command and then throws its output and
+  // exit status away. Silence would read as "no profiles", "no live sessions",
+  // "setup did nothing" — all wrong. Say which it is rather than invent an answer.
+  if (!r.stdout && !r.stderr && r.status !== 0) {
+    process.stderr.write(
+      `browse: ${REMOTE} ran '${argv[0]}' but relays no output back over ssh (an Upstash Box does this).\n` +
+      // On a box the suggestion cannot be "ssh in": the gateway that swallowed
+      // this output is the same one an interactive session gets. `browse-box
+      // exec` goes through the box's HTTP API instead, which does relay output.
+      (upstashBox()
+        ? `        Run it through the box's API instead: browse-box exec ${upstashBox().id} '${REMOTE_BIN} ${argv.join(" ")}'.\n`
+        : `        Read the answer from an interactive session instead: ssh ${REMOTE}, then '${REMOTE_BIN} ${argv.join(" ")}'.\n`));
+    return 1;
+  }
+  return r.status === null ? 1 : r.status;
+}
+
 /* ============================================================ client mode */
 
-/** GET /health — resolves the answering daemon's session name, or null. */
-function healthSession(port) {
+/** GET /health — the answering daemon's { session, out, home }, or null. Over a
+ *  tunnel this is also the tunnel's own liveness check. */
+function healthInfo(port) {
   return new Promise((resolve) => {
-    const req = http.get({ host: HOST, port, path: "/health", timeout: 1500 }, (res) => {
+    const req = http.get({ host: HOST, port, path: "/health", timeout: REMOTE ? 8000 : 1500 }, (res) => {
       let buf = "";
       res.setEncoding("utf8");
       res.on("data", (c) => (buf += c));
       res.on("end", () => {
         if (res.statusCode !== 200) return resolve(null);
-        try { resolve(JSON.parse(buf).session ?? null); } catch { resolve(null); }
+        try { resolve(JSON.parse(buf)); } catch { resolve(null); }
       });
     });
     req.on("error", () => resolve(null));
@@ -1574,10 +2058,12 @@ function healthSession(port) {
 
 /** Find THIS session's live daemon via its run file; null if none/stale. */
 async function findDaemon() {
+  if (REMOTE) return findRemoteDaemon();
   let info = null;
   try { info = JSON.parse(readFileSync(runFile(SESSION), "utf8")); } catch { return null; }
   if (!info || !info.port) return null;
-  return (await healthSession(info.port)) === SESSION ? info : null;
+  const h = await healthInfo(info.port);
+  return h && h.session === SESSION ? { ...info, ...h } : null;
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -1595,6 +2081,7 @@ function pidAlive(pid) {
 
 /** Spawn this session's detached daemon (if not up) and wait for its run file. */
 async function ensureDaemon() {
+  if (REMOTE) return ensureRemoteDaemon();
   let d = await findDaemon();
   if (d) return d;
   // One spawner per session: take an atomic lock; losing it means another
@@ -1757,9 +2244,12 @@ const LAUNCH_ENV = {};
  *  apply. (`clear` is the exception: it reads the engine flags to pick which
  *  half of a profile to wipe.) */
 const LOCAL_CMDS = new Set(["help", "version", "whoami", "sessions", "profiles", "clear", "net", "setup"]);
+/** …and the subset of those that describe the machine the BROWSER lives on, so
+ *  `--remote` has to run them there instead (see the remote-host section). */
+const REMOTE_ONLY = new Set(["profiles", "clear", "setup"]);
 /** Session/profile selectors. Like the launch flags, they only mean anything
  *  before the command; after it they are just another argument. */
-const SELECT_FLAGS = new Set(["-s", "--session", "-p", "--profile"]);
+const SELECT_FLAGS = new Set(["-s", "--session", "-p", "--profile", "--remote"]);
 
 async function client(argv) {
   // Leading flags (any order): `-s <name>` selects a named parallel session,
@@ -1775,6 +2265,13 @@ async function client(argv) {
       if (!process.env.BROWSE_OUT) setOut(defaultOut());
     } else if (a === "-p" || a === "--profile") {
       PROFILE = argv[1] ? sanitizeName(argv[1]) : null;
+      argv = argv.slice(2);
+    } else if (a === "--remote") {
+      REMOTE = String(argv[1] || "").trim();
+      if (!REMOTE || REMOTE.startsWith("-")) {
+        process.stderr.write("browse: --remote wants an ssh destination, e.g. --remote my-box or --remote user@1.2.3.4\n");
+        return 1;
+      }
       argv = argv.slice(2);
     } else if (LAUNCH_FLAGS[a]) {
       const [env, val] = LAUNCH_FLAGS[a];
@@ -1807,8 +2304,9 @@ async function client(argv) {
   const lateSel = argv.slice(1).find((a) => SELECT_FLAGS.has(a));
   if (lateSel) {
     const val = argv[argv.indexOf(lateSel, 1) + 1];
-    const pair = `${lateSel}${val && !val.startsWith("-") ? ` ${val}` : " <name>"}`;
-    process.stderr.write(`browse: ${lateSel} picks which session/profile the command runs against, so it goes BEFORE the command, e.g. \`browse ${pair} ${cmd} …\`\n`);
+    const pair = `${lateSel}${val && !val.startsWith("-") ? ` ${val}` : lateSel === "--remote" ? " <sshhost>" : " <name>"}`;
+    const what = lateSel === "--remote" ? "which MACHINE" : "which session/profile";
+    process.stderr.write(`browse: ${lateSel} picks ${what} the command runs against, so it goes BEFORE the command, e.g. \`browse ${pair} ${cmd} …\`\n`);
     return 1;
   }
   // `<name>-camoufox` is where profile `<name>` keeps its camoufox half, so a
@@ -1843,17 +2341,35 @@ async function client(argv) {
     process.stderr.write(`browse: unknown flag ${cmd} — run \`browse help\` (or \`browse help --env\` for the env-only knobs)\n`);
     return 1;
   }
+  // These read the REMOTE's disk — the profiles it stores, the Playwright it
+  // installed — so with --remote they run there rather than describe this laptop
+  // and call it an answer. `whoami` and `sessions` stay here: they are about
+  // which session THESE commands drive, and the run files that answer that are
+  // local. `net` stays too, by copying the log down (below).
+  if (REMOTE && REMOTE_ONLY.has(cmd)) return sshPassthrough(argv);
+  // `net` reads a file, and for a remote session that file is over there. Copy
+  // the live session's log into its mirror and query that, so diagnosing a
+  // request works the same as it does locally — including on a host whose ssh
+  // relays no output back.
+  if (REMOTE && (cmd === "net" || cmd === "network" || cmd === "requests") && !argv.includes("--dir")) {
+    const live = await findDaemon();
+    if (live) {
+      const local = mirrorDir(live.out);
+      if (await pullFile(live.port, "network.jsonl", join(local, "network.jsonl"))) argv = [...argv, "--dir", local];
+    }
+  }
   // List every live daemon across all session names (and sweep stale run files).
   // Which session do these commands actually drive? Useful when the name is
   // auto-derived from the calling agent rather than passed with -s.
   if (cmd === "whoami") {
     const live = await findDaemon();
-    process.stdout.write(`${SESSION}${live ? `  (live, port ${live.port})  ${live.out}` : "  (not running)"}\n`);
+    const where = REMOTE ? `  on ${REMOTE}` : "";
+    process.stdout.write(`${SESSION}${live ? `  (live, port ${live.port})${where}  ${live.out}` : `  (not running)${where}`}\n`);
     return 0;
   }
   if (cmd === "sessions") {
-    let names = [];
-    try { names = readdirSync(RUN_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)); } catch { /* no run dir yet */ }
+    let files = [];
+    try { files = readdirSync(RUN_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)); } catch { /* no run dir yet */ }
     // Spawn locks whose holder is gone. This already sweeps dead run files; the
     // locks are the other half of the same litter (a client killed mid-spawn
     // leaves one behind), and a leftover lock costs the NEXT session 90s.
@@ -1872,11 +2388,17 @@ async function client(argv) {
       }
     } catch { /* no run dir yet */ }
     const lines = [];
-    for (const name of names) {
+    for (const file of files) {
       try {
-        const info = JSON.parse(readFileSync(runFile(name), "utf8"));
-        if ((await healthSession(info.port)) === name) lines.push(`${name}  (port ${info.port})  ${info.out}`);
-        else rmSync(runFile(name), { force: true });
+        const path = join(RUN_DIR, `${file}.json`);
+        const info = JSON.parse(readFileSync(path, "utf8"));
+        // `<host>~<session>` is a session whose browser lives on another
+        // machine; the port in it is this end of the tunnel, and the name to
+        // match against /health is the session half.
+        const name = file.includes("~") ? file.slice(file.indexOf("~") + 1) : file;
+        const h = await healthInfo(info.port);
+        if (h && h.session === name) lines.push(`${name}  (port ${info.port})${info.host ? `  on ${info.host}` : ""}  ${info.out}`);
+        else rmSync(path, { force: true });
       } catch { /* unreadable — skip */ }
     }
     process.stdout.write(lines.length ? lines.join("\n") + "\n" : "(no live sessions)\n");
@@ -2032,13 +2554,56 @@ async function client(argv) {
   // the session was first opened from - a relative path would resolve against a
   // directory the caller never chose. Resolve it here, where the cwd is theirs.
   const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
-  const res = await post(d.port, { cmd, args }, postTimeout(cmd, args));
+  const res = await post(d.port, { cmd, args, hold: !!REMOTE }, postTimeout(cmd, args));
   if (res.ok) {
-    if (res.result != null && res.result !== "") process.stdout.write(String(res.result) + "\n");
+    let text = res.result == null ? "" : String(res.result);
+    if (REMOTE) text = await landArtifacts(d, cmd, text);
+    if (text !== "") process.stdout.write(text + "\n");
     return 0;
   }
   process.stderr.write(`browse: ${res.error || "error"}\n`);
   return 1;
+}
+
+/** The remote half of a successful reply: copy down every artifact it names,
+ *  repoint the paths at the local copies, and — on close — let the held-open
+ *  daemon go and take the tunnel with it. */
+async function landArtifacts(d, cmd, text) {
+  const closing = CLOSERS.has(cmd);
+  let { text: out, local, missed } = await mirrorResult(d, text, { full: closing });
+  if (closing) {
+    // The gif is encoded AFTER the reply, so it does not exist yet at mirror
+    // time. It is the one artifact worth waiting on rather than reporting as
+    // missing — everything else the close block names is already written.
+    if (missed.includes("recording.gif")) {
+      for (let i = 0; i < 30 && missed.includes("recording.gif"); i++) {
+        await sleep(2000);
+        if (await pullFile(d.port, "recording.gif", join(local, "recording.gif")))
+          missed = missed.filter((m) => m !== "recording.gif");
+      }
+    }
+    await sayBye(d.port);
+    stopTunnel();
+    rmSync(runFile(SESSION), { force: true });
+  }
+  if (cmd === "dir") out = `${out}\n  remote: ${d.out} on ${REMOTE} (the browser's own copy)`;
+  if (missed.length) {
+    out = `${out}\n  note: still only on ${REMOTE} (${d.out}) — ${missed.join(", ")}`;
+  }
+  return out;
+}
+
+/** Tell a held-open remote daemon the artifacts are down and it can exit. */
+function sayBye(port) {
+  return new Promise((resolve) => {
+    const req = http.request({ host: HOST, port, path: "/bye", method: "POST", timeout: 10000 }, (res) => {
+      res.resume();
+      res.on("end", resolve);
+    });
+    req.on("error", resolve);
+    req.on("timeout", () => { req.destroy(); resolve(); });
+    req.end();
+  });
 }
 
 /* ==================================================== recording finalizer */
@@ -2802,6 +3367,9 @@ async function daemon() {
     ({ browser, context } = await launchWith(engine));
   }
   context.__engine = engine; // read by the CDP-only guards below
+  // Both fallbacks above can have changed the engine out from under the
+  // overlay defaults; this is the last point before they are acted on.
+  adoptEngineDefaults(engine);
   context.__engineNote = engineNote; // surfaced once, on the first `open`
   // Draw the animated cursor + keystroke overlay into every page (before the
   // page's own scripts run, and re-run on each navigation) so the recording shows
@@ -4718,8 +5286,31 @@ async function daemon() {
 
   const server = http.createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
+      // `home` is what lets a remote client recognise this dir in a reply that
+      // ran it through tildePath, and rewrite it to where it mirrored the files.
       res.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT }));
+        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir() }));
+      return;
+    }
+    // Artifact read-out, for a client on another machine (see the remote-host
+    // section). Confined to the session dir: reaching this port buys you this
+    // recording's files, not the disk.
+    if (req.method === "GET" && req.url.startsWith("/file?")) {
+      const rel = new URL(req.url, "http://localhost").searchParams.get("p") || "";
+      const abs = join(OUT, rel);
+      if (!rel || rel.includes("..") || !abs.startsWith(OUT + "/")) { res.writeHead(400).end("bad path"); return; }
+      let st = null;
+      try { st = statSync(abs); } catch { /* not written (yet) */ }
+      if (!st || !st.isFile()) { res.writeHead(404).end("no such artifact"); return; }
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": st.size });
+      createReadStream(abs).pipe(res);
+      return;
+    }
+    // A remote client asks the daemon to stay up past `close` so it can pull the
+    // finished mp4 down (see the `hold` reply path); this is it saying it has.
+    if (req.method === "POST" && req.url === "/bye") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+      setTimeout(() => process.exit(0), 50);
       return;
     }
     if (req.method !== "POST") { res.writeHead(405).end(); return; }
@@ -4728,8 +5319,8 @@ async function daemon() {
     req.setEncoding("utf8");
     req.on("data", (c) => (body += c));
     req.on("end", async () => {
-      let cmd = "?", args = [];
-      try { ({ cmd, args = [] } = JSON.parse(body)); } catch { /* ignore */ }
+      let cmd = "?", args = [], hold = false;
+      try { ({ cmd, args = [], hold = false } = JSON.parse(body)); } catch { /* ignore */ }
       const send = (obj) => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obj)); };
       try {
         // Timestamped BEFORE the command so the chapter lands on the moment the
@@ -4765,7 +5356,12 @@ async function daemon() {
           // always reaches the caller even if the gif takes minutes or fails.
           setTimeout(() => {
             if (wantGif) makeGif(saved.mp4);
-            process.exit(0);
+            // `hold`: a client on another machine still has to COPY those files
+            // off this one, and it cannot do that from a dead process. It says
+            // POST /bye when it is done; the timer is the backstop for a client
+            // that dies mid-pull.
+            if (!hold) process.exit(0);
+            setTimeout(() => process.exit(0), 600000);
           }, 100);
           return;
         }
@@ -4819,7 +5415,7 @@ async function daemon() {
   });
   // Only report healthy once the browser/page are ready (server starts last).
   // Publishing the run file is what makes this daemon discoverable by name.
-  server.listen(FIXED_PORT, HOST, () => {
+  server.listen(FIXED_PORT, BIND, () => {
     const port = server.address().port;
     try {
       mkdirSync(RUN_DIR, { recursive: true });
