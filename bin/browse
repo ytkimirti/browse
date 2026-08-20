@@ -76,6 +76,17 @@ fi
 # `browse -s box open …` working: there `box` is the SESSION name, so it is
 # skipped and CMD is `open`.
 if [[ "$CMD" == "box" ]]; then
+  # --remote picks which MACHINE a command runs on, and `box` is the thing that
+  # MAKES those machines — it always talks to the Upstash API from here. Dropping
+  # it with the other flags would be the silent ignore browse refuses everywhere
+  # else. (-s/-p and the launch flags are about a browser `box` never starts, so
+  # those are simply not its business.)
+  if [[ -n "$REMOTE_SEEN" || -n "${BROWSE_REMOTE:-}" ]]; then
+    _box_args=("${@:CMD_AT+2}")   # what was written AFTER the word `box`
+    echo "browse: 'box' makes the machines --remote points AT, so it takes no --remote of its own." >&2
+    echo "browse: Run 'browse box ${_box_args[*]}' plain; use --remote <box-id>@… for the browse commands that drive it." >&2
+    exit 1
+  fi
   shift "$((CMD_AT + 1))"
   exec node "$REPO_ROOT/scripts/box.mjs" "$@"
 fi

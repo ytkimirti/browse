@@ -102,7 +102,10 @@ try {
   fails("a doubled letter", ["screenshoot"], /did you mean 'screenshot'\?/);
   // Neither of these is within any safe edit distance — they are caught by
   // containment, which is the half that edit distance alone would miss.
-  fails("a substring of a real command", ["shot"], /did you mean '(screen|snap)shot'\?/);
+  // `shot` is genuinely both. Naming one sends the agent to a command that
+  // SUCCEEDS at the wrong thing (`snapshot` dumps a 6000-char aria tree instead
+  // of saving a PNG), so equally-good candidates are all named.
+  fails("an ambiguous substring names both", ["shot"], /did you mean 'snapshot' or 'screenshot'\?/);
   fails("a playwright method name", ["scrollIntoView", "#x"], /did you mean 'scroll'\?/);
   // …and a word that resembles nothing gets NO suggestion. A wrong guess is
   // worse than none: it sends the next command somewhere real and wrong.
@@ -113,14 +116,21 @@ try {
   // `waitForTimeout` by containment; first-seen handed back waitForTimeout,
   // whose argument is a NUMBER — so following the advice ran
   // `waitForTimeout(NaN)`, which resolves instantly and answers ok.
-  fails("a tie goes to the shorter command", ["waitFor", "#x"], /did you mean 'wait'\?/);
+  // Same reason, and the sharper case: `waitForTimeout` takes a NUMBER, so a
+  // caller sent there with a selector runs `waitForTimeout(NaN)` — which resolves
+  // at once and answers ok. Shortest is named first, but both are named.
+  fails("a tie names both, shortest first", ["waitFor", "#x"], /did you mean 'wait' or 'waitForTimeout'\?/);
   // `box`/`setup`/`install` are matched on $1 in bin/browse, so a leading -s used
   // to land them here — and the suggester answered "did you mean 'box'?" with the
   // word just typed. They now dispatch off the flag walk instead (below), but the
   // suggester must never echo its own input either way.
-  for (const self of ["errors", "console"]) {
-    const r = browse(self.slice(0, 2) + "zzz");
-    check(`'${self.slice(0, 2)}zzz' is never told to run itself`, !new RegExp(`did you mean '${self.slice(0, 2)}zzz'`).test(r.err), r.err);
+  // browse.mjs is also run DIRECTLY (these suites do it, and so does anything
+  // that skips bin/browse), and there `box`/`install` are not commands at all —
+  // so the suggester must not answer "unknown command 'box' — did you mean 'box'?".
+  for (const self of ["box", "install"]) {
+    const r = spawnSync(process.execPath, [join(ROOT, "browse.mjs"), self, "ls"], { encoding: "utf8" });
+    check(`'${self}' run directly is never told to run itself`,
+      r.status === 1 && !new RegExp(`did you mean '${self}'`).test(r.stderr || ""), `exit ${r.status} · ${r.stderr}`);
   }
 
   /* ---------------------------------------------- dispatch past the flags */
@@ -133,6 +143,13 @@ try {
   check("box help works", boxDirect.status === 0 && /disposable Upstash Boxes/.test(boxDirect.stdout || ""), boxDirect.stdout);
   check("...and still works behind -s", boxAfterFlag.status === 0 && /disposable Upstash Boxes/.test(boxAfterFlag.stdout || ""),
     `exit ${boxAfterFlag.status} · ${boxAfterFlag.stdout}${boxAfterFlag.stderr}`);
+  // Dropping the leading flags is right for -s/-p (box starts no browser), but
+  // --remote picks a MACHINE and box is what makes the machines — silently
+  // discarding it would be the ignore browse refuses everywhere else.
+  const boxRemote = spawnSync(BIN, ["--remote", "nosuchhost", "box", "ls"], { encoding: "utf8" });
+  check("box refuses a --remote", boxRemote.status === 1 && /takes no --remote of its own/.test(boxRemote.stderr || ""),
+    `exit ${boxRemote.status} · ${boxRemote.stderr}`);
+  check("...and names the plain command to run", /Run 'browse box ls' plain/.test(boxRemote.stderr || ""), boxRemote.stderr);
   // `install` links THIS clone into THIS machine's PATH, and ends by running
   // `setup` — so honouring a --remote next to it would download a browser here
   // for a session meant to run over there. Dispatching install off the walk is
@@ -306,6 +323,11 @@ try {
     /is not a BCP-47 language tag/);
   check("...and the viewport still never moved", width() === 1280, String(width()));
   fails("a dark value that is neither", ["emulate", "dark=maybe"], /emulate dark: expected 1\|0/);
+  // The BARE key is the obvious shorthand, and it fell through the same hole:
+  // `browse emulate dark` answered "emulate: dark=0" and turned dark mode OFF.
+  works("a bare dark key turns it ON", ["emulate", "dark"], /dark=1/);
+  check("...and the page really is dark", dark() === "true", dark());
+  browse("emulate", "off");
   // …and the whole documented line still applies, in one go.
   works("a fully valid line applies", ["emulate", "viewport=390x844", "dark=1", "net=3g", "tz=Europe/Istanbul", "cpu=2"], /viewport=390x844/);
   check("...the viewport moved", width() === 390, String(width()));

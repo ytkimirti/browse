@@ -626,16 +626,24 @@ function parseMiddleware(args) {
   // was forgotten or a handler whose pattern was. Refusing it is what lets
   // logLabel below promise never to echo source.
   if (words.length < 2) return { error: MW_USAGE };
-  // A glob is matched against the FULL url, so one that does not start with a
-  // wildcard and is not an absolute url can never match anything - and it
-  // registered happily, printed "middleware + /api/user", and then let every
-  // request through to the real API. The mock silently not existing is the worst
-  // shape this command has: the page shows live data, and a recording of it
-  // presents live data as mocked.
+  // A glob is matched against the FULL url, so one that covers neither the scheme
+  // nor the host can never match anything - and it registered happily, printed
+  // "middleware + /api/user", and then let every request through to the real API.
+  // The mock silently not existing is the worst shape this command has: the page
+  // shows live data, and a recording of it presents live data as mocked.
+  //
+  // The two forms that CAN match, and why one `*` is not one of them: Playwright
+  // compiles `*` to `[^/]*`, which cannot cross a `/` - so `*/api/user` and
+  // `*.js` are as dead as `/api/user`, one character away from the case this
+  // catches. Only `**` (compiled to `.*`) spans the `scheme://host` part. The
+  // other form is an absolute url, whose scheme may itself be globbed or
+  // alternated - `*://`, `http*://` and `{http,https}://` are all real patterns.
   const pattern = words[0];
-  if (!/^[*?]/.test(pattern) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(pattern)) {
+  const SCHEMED = /^(\{[^}]+\}|[A-Za-z0-9+.*-]+):\/\//;
+  if (!pattern.startsWith("**") && !SCHEMED.test(pattern)) {
     return { error: `middleware: '${pattern}' can never match - the glob is tested against the WHOLE url, `
-      + `so it has to start with ** (try '**/${pattern.replace(/^\/+/, "")}') or be an absolute url.` };
+      + `so it has to start with ** (try '**/${pattern.replace(/^[*?/]+/, "")}') or carry a scheme `
+      + `(https://…, or {http,https}://… for both). A single * stops at the next '/', so it cannot cover 'scheme://host'.` };
   }
   // Joined the same way `eval` joins its expression, so an unquoted handler still
   // works; a properly quoted one arrives as a single arg anyway.
@@ -2330,8 +2338,11 @@ const CLOSERS = new Set(["close"]);
 /** "unknown command 'shot'" sent real sessions to `browse help` and back for a
  *  name that was one edit away. Levenshtein, capped at a third of the word so a
  *  wrong GUESS is never offered as a correction — no suggestion beats a bad one.
- *  Prefix matches count too: `shot` → `screenshot`, which no edit distance
- *  short enough to be safe would ever reach. */
+ *  Containment counts too: `shot` and `scrollIntoView` are nowhere near their
+ *  real commands by edit distance, but they contain (or are contained by) them.
+ *  When several score the same it names them ALL rather than picking - `shot` is
+ *  genuinely both `screenshot` and `snapshot`, and guessing one sends the agent
+ *  to a command that succeeds at the wrong thing. */
 function nearestCommand(cmd) {
   // Damerau, not plain Levenshtein: swapping two neighbours is the commonest
   // typo there is, and at plain Levenshtein it costs 2 — so `clcik` scored the
@@ -2353,7 +2364,7 @@ function nearestCommand(cmd) {
   };
   const q = String(cmd).toLowerCase();
   const all = [...DAEMON_COMMANDS, ...LOCAL_CMDS, "box", "install", "sessions"];
-  let best = null, bestScore = Infinity;
+  let best = [], bestScore = Infinity;
   for (const c of all) {
     const lc = c.toLowerCase();
     // Containment either way, since the real misses were `shot` (inside
@@ -2362,17 +2373,21 @@ function nearestCommand(cmd) {
     // minimum on each side so `net`/`url` don't match an unrelated word.
     const near = (q.length >= 4 && lc.includes(q)) || (lc.length >= 4 && q.includes(lc));
     const s = near ? 0 : dist(q, lc);
-    // Ties go to the SHORTER name. `waitFor` matched `waitForTimeout` and `wait`
-    // equally, and first-seen handed back waitForTimeout — whose own arg is a
-    // NUMBER, so following the suggestion ran `waitForTimeout(NaN)`, which
-    // resolves at once and answers ok. A suggestion that lies is worse than none.
-    if (s < bestScore || (s === bestScore && best && c.length < best.length)) { bestScore = s; best = c; }
+    if (s < bestScore) { bestScore = s; best = [c]; }
+    else if (s === bestScore) best.push(c);
   }
-  // Never hand back the word that was just typed: `box`/`setup`/`install` are
-  // matched on $1 only in bin/browse, so `browse -s x box ls` reaches here and
-  // would otherwise answer "unknown command 'box' — did you mean 'box'?".
-  if (!best || best.toLowerCase() === q) return "";
-  return bestScore <= Math.max(1, Math.floor(q.length / 3)) ? ` — did you mean '${best}'?` : "";
+  // Never hand back the word that was just typed. `box`/`install` dispatch in
+  // bin/browse, but browse.mjs is also run directly (the test suites do), and
+  // "unknown command 'box' — did you mean 'box'?" helps nobody.
+  best = best.filter((c) => c.toLowerCase() !== q);
+  if (!best.length || bestScore > Math.max(1, Math.floor(q.length / 3))) return "";
+  // Shortest first, and at most two: `waitFor` is equally `wait` and
+  // `waitForTimeout`, and `waitForTimeout` takes a NUMBER - sent there with a
+  // selector it runs `waitForTimeout(NaN)`, which resolves at once and answers
+  // ok. Naming both costs the caller one glance and never points at a lie.
+  best.sort((a2, b2) => a2.length - b2.length || a2.localeCompare(b2));
+  const named = best.slice(0, 2).map((c) => `'${c}'`).join(" or ");
+  return ` — did you mean ${named}?`;
 }
 
 /** Commands that USED to exist, mapped to what to run instead. Only worth an
@@ -5455,10 +5470,12 @@ async function daemon() {
           const v = eq < 0 ? "" : kv.slice(eq + 1);
           if (k === "off") return { k, v };
           if (k === "dark") {
-            // Unvalidated, `dark=maybe` quietly meant light.
+            // Unvalidated, `dark=maybe` quietly meant light. The BARE key is the
+            // obvious shorthand and used to fall through the same way - `browse
+            // emulate dark` answered "emulate: dark=0" and turned dark mode OFF.
             if (!/^(1|0|true|false|on|off|yes|no|dark|light|)$/i.test(v))
               throw new Error(`emulate dark: expected 1|0 (or dark|light) - got '${v}'`);
-            return { k, v };
+            return { k, v: v === "" ? "1" : v };
           }
           if (k === "locale") {
             // Left to CDP, a malformed tag threw at APPLY time - which is exactly

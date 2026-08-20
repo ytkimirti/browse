@@ -125,11 +125,15 @@ try {
   // print "middleware + /api/user" and then let every request through to the real
   // API — the mock silently not existing, with a recording that presents live
   // data as mocked. Refused in the shared parser, so it costs no browser.
-  for (const bad of ["/api/user", "api/user"]) {
+  // Playwright compiles `*` to `[^/]*`, which cannot cross a `/`, so a SINGLE
+  // leading star is as dead as a bare path — `*.js` looks like a working asset
+  // blocker and matches nothing. Only `**` (compiled to `.*`) spans `scheme://host`.
+  for (const bad of ["/api/user", "api/user", "*/api/user", "*.js", "?api/user"]) {
     r = browse("middleware", bad, "route => route.fulfill({json: {}})");
     check(`'${bad}' is refused as unmatchable`, r.code === 1 && /can never match/.test(r.err), `${r.code} ${r.err}`);
-    check(`...and is told the ** spelling`, /\*\*\/api\/user/.test(r.err), r.err);
   }
+  check("...and the fix is spelled out", /try '\*\*\/api\/user'/.test(
+    browse("middleware", "/api/user", "route => route.fulfill({json: {}})").err), "");
 
   check("no browser was spawned by any of that", browse("whoami").out.includes("not running"), browse("whoami").out);
 
@@ -138,6 +142,15 @@ try {
   r = browse("middleware", "**/api/user", "route => route.fulfill({json: {id: 1, name: 'mocked'}})");
   check("mock registers, exit 0", r.code === 0 && /^middleware \+ \*\*\/api\/user/.test(r.out), `${r.code} ${r.out}${r.err}`);
   check("registration does not echo the handler", !r.out.includes("fulfill"), r.out);
+  // The unmatchable-pattern guard must not refuse a pattern that DOES match. A
+  // globbed or alternated scheme is the ordinary way to cover http and https in
+  // one rule, and neither starts with `**`.
+  for (const good of ["https://api.example.com/**", "*://api.example.com/**",
+                      "http*://api.example.com/**", "{http,https}://api.example.com/**"]) {
+    const g = browse("middleware", good, "route => route.fulfill({json: {}})");
+    check(`'${good}' is accepted`, g.code === 0 && /^middleware \+/.test(g.out), `${g.code} ${g.out}${g.err}`);
+    browse("middleware", good, "--remove");
+  }
 
   // The engine actually in use, not the one we asked for: browse falls back to
   // chromium when camoufox can't launch, and it only says so in the daemon log.
