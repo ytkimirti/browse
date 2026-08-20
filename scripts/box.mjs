@@ -251,6 +251,26 @@ async function pull(id, remote, dest) {
   process.stdout.write(`${out}\n`);
 }
 
+/** Every box on the account, flattened out of the two shapes the API answers in. */
+async function listBoxes() {
+  const boxes = await api("GET", "/v2/box");
+  return Array.isArray(boxes) ? boxes : boxes.boxes || [];
+}
+/** A box THIS made: the label it is created with, or the name `up` gives it.
+ *  Only ever consulted to decide what an argument-less `down` is allowed to
+ *  delete — an explicit id is always obeyed. */
+const isBrowseBox = (b) => (b?.labels || []).includes("browse") || /^browse-/.test(b?.name || "");
+/** Does this `--remote` target point at a box on THIS API, rather than at some
+ *  other ssh host? `down` reads $BROWSE_REMOTE, and deleting by an id parsed out
+ *  of `--remote nerd` would be a DELETE against an id that is not a box's.
+ *  The hostname alone, not host:port — the API base carries a port in tests and
+ *  an ssh target may carry one anywhere. */
+const isBoxHost = (s) => {
+  const after = String(s || "").split("@")[1];
+  const hostOf = (h) => String(h).split(":")[0];
+  return !!after && hostOf(after) === hostOf(new URL(BASE).host);
+};
+
 /** Every browse image on the account, newest first. Snapshots outlive the box
  *  they were taken from, so this is the only durable list of them — the box a
  *  snapshot names is usually long deleted. */
@@ -312,13 +332,19 @@ async function buildImage(size) {
 
 const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
 
-  up [--ttl <sec>] [--size small] [--snapshot <id>]
+  up [--ttl <sec>] [--size medium|small] [--name <n>] [--snapshot <id>]
                               make a box from the warm image and print its --remote host.
                               ~13s, nothing to install. Builds the image first if there
                               isn't one yet (~6 min, once). The box also deletes itself
-                              after --ttl (default ${TTL_DEFAULT}s) if you never call down
-  down [box]                  DELETE it. Defaults to the LAST box 'up' made, so name the box
-                              when you are running more than one
+                              after --ttl (default ${TTL_DEFAULT}s) if you never call down.
+                              --size picks the DISK and nothing else (same CPU and RAM
+                              either way): medium is 10GB, small is 5GB — of which the warm
+                              image already uses ~2.5GB, so 'small' does not fit an app's
+                              node_modules. Each box gets a unique name; --name overrides it
+  down [box]                  DELETE it. With no argument: the box in $BROWSE_REMOTE, else the
+                              only browse box up. It REFUSES to guess between several — box.json
+                              is shared by every process here, so guessing deletes the box
+                              another agent is recording on
   image [--size medium]       build the warm image: a box, browse installed on it, snapshot
                               taken, box thrown away. Re-run after a browse update
   ls                          boxes and images on the account
@@ -329,7 +355,10 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
 
   exec <box> <cmd…>           run a command on the box and show its output. This is how you
                               install and start a dev server there — ssh into a box relays
-                              nothing back
+                              nothing back. Leave something RUNNING with 'setsid nohup <cmd>
+                              >/tmp/x.log 2>&1 &'. Note a 'pkill -f <pattern>' in here matches
+                              exec's OWN shell (the pattern is in its command line) and kills
+                              the command that is doing the killing — go by port or pid file
   push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}, skips .git/node_modules)
   pull <box> <remote> [local]       copy one file out
   url <box> <port>            public https URL for a port, to hand someone who wants to click
@@ -342,10 +371,11 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
 A session, end to end:
   export BROWSE_REMOTE=$(browse box up)
   browse box push $BROWSE_REMOTE ./my-app
-  browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && npm i && (npm run dev &)'
+  browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && npm i'
+  browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && setsid nohup npm run dev >/tmp/dev.log 2>&1 &'
   browse open http://127.0.0.1:3000     # 127.0.0.1 is the BOX's
   browse close                          # the mp4 lands here
-  browse box down                       # gone
+  browse box down                       # gone — $BROWSE_REMOTE says which one
 
 Costs: CPU seconds while it runs, and the image's storage (~0.6GB, cents a month)
 between sessions. A box you forget still bills nothing once idle, and expires by
@@ -376,7 +406,14 @@ if (NEEDS_KEY.has(cmd) && !(await apiKey()))
 
 switch (cmd) {
   case "up": {
-    const size = flag("size", "small");
+    // medium, not small: on this platform `size` buys DISK and nothing else —
+    // small and medium hand out the same 48 cores and the same 185GB of RAM, and
+    // differ only in the overlay (5GB vs 10GB). 5GB is about 2.5GB once the warm
+    // image is restored, which a real app's `node_modules` + a Next build fills.
+    // A full disk there does not say so: chromium's renderer dies and playwright
+    // reports "Target crashed", which reads as a browse fault (browse now checks
+    // the disk when a target crashes, but not paying for the crash is better).
+    const size = flag("size", "medium");
     const ttlRaw = String(flag("ttl", TTL_DEFAULT));
     // Unvalidated, `--ttl 8h` became NaN, serialized to null, and the box got
     // whatever the API defaults to while we printed "expires in NaNh".
@@ -396,19 +433,31 @@ switch (cmd) {
     // expire on their own, which is what makes a box safe to just make one of.
     const box = await api("POST", "/v2/box/from-snapshot", {
       snapshot_id: snapshot, ephemeral: true, ttl, size, runtime: "node",
-      name: flag("name", "browse-session"), labels: ["browse"],
+      // Unique per box, not a fixed "browse-session": the API rejects a duplicate
+      // name outright (409 "already in use"), so a second agent's `up` failed
+      // while the first one's box was alive — and two agents at once is the whole
+      // reason to run the browser somewhere else. Still `browse-`-prefixed, which
+      // is what `down` recognises as ours.
+      name: flag("name", `browse-${Date.now().toString(36)}`), labels: ["browse"],
     }, 600000);
     if (!box.id) die(`from-snapshot returned no box: ${JSON.stringify(box).slice(0, 200)}`);
-    const ready = await exec(box.id, "command -v browse >/dev/null && browse version");
+    // One exec for both: is browse really on this image, and how much disk is
+    // left for the app that is about to be pushed here.
+    const ready = await exec(box.id, "command -v browse >/dev/null && browse version && df -Pm / | tail -1");
     if (ready.exit_code !== 0) {
       await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
       die(`image ${snapshot} has no browse on it — rebuild it with: browse box image`);
     }
+    const [version = "", dfLine = ""] = String(ready.output).trim().split("\n");
+    const freeMb = Number(dfLine.trim().split(/\s+/)[3]);
     // Remember the image too, so a one-off `--snapshot` becomes the default and
     // the next `up` needs no arguments.
     await writeState({ box: box.id, snapshot });
-    say(`${box.id} up from ${snapshot} — ${String(ready.output).trim()}, expires in ${Math.round(ttl / 3600)}h`);
-    say(`Delete it when you are done: browse box down`);
+    say(`${box.id} up from ${snapshot} — ${version.trim()}, expires in ${Math.round(ttl / 3600)}h` +
+        (freeMb ? `, ${(freeMb / 1024).toFixed(1)}GB disk free` : ""));
+    // Named, because `down` with no argument now refuses when the account has
+    // more than one box up rather than guessing at one.
+    say(`Delete it when you are done: browse box down ${box.id}`);
     process.stdout.write(`${sshHost(box.id)}\n`);
     break;
   }
@@ -430,10 +479,45 @@ switch (cmd) {
     break;
   }
   case "down": {
-    const id = boxId(rest[0]) || boxId((await readState()).box) || die("down needs a box");
+    // Three ways to name the box, in order of how sure each one is:
+    //   1. the argument
+    //   2. $BROWSE_REMOTE — the box THIS shell is driving
+    //   3. the note `up` left in box.json
+    //
+    // (3) used to be the only fallback, and box.json is one file shared by every
+    // process on the machine: a second agent's `up` overwrites it, so the first
+    // agent's bare `down` deleted the SECOND agent's box, mid-session, and said
+    // it had deleted its own. That is unrecoverable — the recording goes with the
+    // box — so the note is now only trusted when it is the account's only browse
+    // box. Anything else refuses and prints the list, which costs a turn instead
+    // of a session.
+    let id = boxId(rest[0]);
+    let why = "";
+    if (!id && isBoxHost(process.env.BROWSE_REMOTE)) {
+      id = boxId(process.env.BROWSE_REMOTE);
+      why = " (from $BROWSE_REMOTE)";
+    }
+    if (!id) {
+      const noted = boxId((await readState()).box);
+      const mine = (await listBoxes()).filter(isBrowseBox);
+      if (!mine.length) {
+        // Teardown runs at the end of a session, often after the box already
+        // expired or someone else deleted it. Nothing to do is not a failure.
+        if (noted) await writeState({ box: null });
+        say(noted ? `${noted} is already gone (expired or deleted)` : "no browse box is up");
+        break;
+      }
+      if (mine.length > 1 || (noted && mine[0].id !== noted)) {
+        die(`${mine.length} browse boxes are up, so 'down' will not guess which one is yours.\n` +
+            `     Name it: browse box down <box>   (or set BROWSE_REMOTE and re-run)\n` +
+            mine.map((b) => `       ${b.id}  ${b.status || "?"}  ${b.name || ""}`).join("\n"));
+      }
+      id = noted || mine[0].id;
+      why = " (the only browse box up)";
+    }
     await api("DELETE", `/v2/box/${id}`);
     if (boxId((await readState()).box) === id) await writeState({ box: null });
-    say(`${id} deleted`);
+    say(`${id} deleted${why}`);
     break;
   }
   case "image": {
@@ -442,8 +526,7 @@ switch (cmd) {
     break;
   }
   case "ls": {
-    const boxes = await api("GET", "/v2/box");
-    const list = Array.isArray(boxes) ? boxes : boxes.boxes || [];
+    const list = await listBoxes();
     for (const b of list) {
       process.stdout.write(`${(b.id || "").padEnd(24)} ${(b.status || "?").padEnd(8)} ${b.name || ""}\n`);
     }

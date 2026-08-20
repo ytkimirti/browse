@@ -66,6 +66,13 @@ button{display:block;margin:8px 0}</style>
 <div class=allhidden style="display:none"><button class=nope>Nope</button><button class=nope>Nope</button></div>
 <div id=clicks>0</div>
 <div id=dropped>no</div>
+<!-- A right-click target: the app's own context menu, which is the thing
+     browse rightclick exists to reach. -->
+<div id=ctx>right me</div>
+<div id=ctxmenu>closed</div>
+<!-- The wrapper a click lands on by mistake: no handler, no interactive
+     ancestor, no pointer cursor, and it changes nothing when clicked. -->
+<div id=inertwrap><span>just text</span></div>
 <div id=long></div>
 <script>
 let n = 0;
@@ -73,6 +80,10 @@ document.getElementById('btn').addEventListener('click', () => {
   document.getElementById('clicks').textContent = String(++n);
 });
 window.__go = 0;
+document.getElementById('ctx').addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  document.getElementById('ctxmenu').textContent = 'open';
+});
 for (const b of document.querySelectorAll('.go')) b.addEventListener('click', () => { window.__go++; });
 const drop = document.getElementById('drop');
 drop.addEventListener('dragover', (e) => e.preventDefault());
@@ -113,6 +124,16 @@ setTimeout(() => { document.getElementById('status').textContent = 'Complete'; }
 const LATE = `<!doctype html><meta charset=utf8><title>late</title>
 <div id=alwaysempty></div>
 <script>setTimeout(() => { document.body.insertAdjacentHTML('beforeend', '<p>late content arrived</p>'); }, 900);</script>`;
+
+// Rewrites its own session cookie on EVERY load, which is what a Clerk/NextAuth
+// console does — and what makes `state --load` without --clean quietly do
+// nothing: the cookies are restored, the reload runs this, and the page's newer
+// value is what survives. The value is a per-request counter so the test can
+// tell one load's cookie from another's without a clock.
+let cookieSeq = 0;
+const COOKIE = (n) => `<!doctype html><meta charset=utf8><title>cookie</title>
+<div id=seq>${n}</div>
+<script>document.cookie = 'sess=v${n};path=/';</script>`;
 
 const SIGNIN = `<!doctype html><meta charset=utf8><title>sign in</title><h1>Sign in to continue</h1>`;
 
@@ -171,6 +192,10 @@ http.createServer((req, res) => {
     return res.end(PNG);
   }
   if (url === "/api/lab") return json(res, { lab: true });
+  if (url === "/cookie") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    return res.end(COOKIE(++cookieSeq));
+  }
   if (url === "/pixel.png") {
     hits.pixel++;
     res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" });

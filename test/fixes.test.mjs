@@ -464,6 +464,109 @@ try {
     }
   }
 
+  /* ------------------------------------------- a load the page overwrites */
+  // The one that cost a whole session: `state --load` restores the cookies, the
+  // page reloads, the app mints its OWN session cookie over the top, and the
+  // command still reports "loaded N cookies" while the browser sits logged out.
+  console.log("\na merged state the page overwrites says so");
+  const STATEFILE = join(OUT, "cookies.json");
+  works("open a page that mints its own cookie", ["goto", `${BASE}/cookie`], /ok/);
+  const savedSeq = read("document.cookie.replace(/.*sess=/, '')");
+  works("save that state", ["state", "--save", STATEFILE], /saved cookies/);
+  works("reload, so the page mints a newer one", ["goto", `${BASE}/cookie`], /ok/);
+  check("...and it really is newer", read("document.cookie.replace(/.*sess=/, '')") !== savedSeq,
+    `${savedSeq} -> ${read("document.cookie.replace(/.*sess=/, '')")}`);
+  const merged = browse("state", "--load", STATEFILE);
+  check("a merge load exits 0", merged.code === 0, `exit ${merged.code} · ${merged.err}`);
+  check("...and reports what the page replaced", /the page replaced 1 of them/.test(merged.out), merged.out);
+  check("...and points at --clean", /--clean/.test(merged.out), merged.out);
+  const cleaned = browse("state", "--load", STATEFILE, "--clean");
+  check("--clean loads with no such note", cleaned.code === 0 && !/the page replaced/.test(cleaned.out),
+    `exit ${cleaned.code} · ${cleaned.out}`);
+
+  /* ----------------------------------------------------- right click */
+  // A context menu is the one interaction eval cannot fake: a synthetic
+  // `contextmenu` event reaches a React handler but not a menu the browser
+  // itself opens, and every other act command rejects a second argument, so
+  // there was nowhere to put "with the right button".
+  console.log("\nrightclick");
+  works("navigate back to the ui fixture", ["goto", `${BASE}/ui`], /ok/);
+  check("the menu starts closed", read("document.getElementById('ctxmenu').textContent") === "closed",
+    read("document.getElementById('ctxmenu').textContent"));
+  works("rightclick", ["rightclick", "#ctx"], /^ok/);
+  check("...and the page's contextmenu handler fired",
+    read("document.getElementById('ctxmenu').textContent") === "open",
+    read("document.getElementById('ctxmenu').textContent"));
+  fails("rightclick rejects a stray argument", ["rightclick", "#ctx", "--timeout", "3000"],
+    /unexpected argument '--timeout'/);
+  fails("rightclick on nothing fails", ["rightclick", "#no-such-thing"], /rightclick|Timeout/);
+
+  /* ------------------------------------------------- a click that does nothing */
+  // `ok` is what a click that worked says, so `ok` on a click that landed on a
+  // wrapper is the exit-0 lie this suite is about — and it cost a real session a
+  // wrong conclusion ("this facet cannot filter") before it was noticed.
+  console.log("\na click that changes nothing says so");
+  const inert = browse("click", "#inertwrap");
+  check("clicking an inert wrapper still exits 0", inert.code === 0, `exit ${inert.code} · ${inert.err}`);
+  check("...and says nothing changed", /nothing changed/.test(inert.out), inert.out);
+  const real = browse("click", "#btn");
+  check("a real button gets no such note", real.code === 0 && !/nothing changed/.test(real.out), real.out);
+
+  /* --------------------------------------------- a snapshot line as a selector */
+  // `snapshot` prints `- button "Go":` and pasting that back is the obvious next
+  // move; playwright parses it as CSS and dies on the quote, with no hint.
+  console.log("\na snapshot line pasted as a selector is named");
+  fails("the role= form is suggested", ["click", 'button "Go"'], /role=button\[name="Go"\]/);
+
+  /* ------------------------------------------------- a cut body says what cut it */
+  // The cap applies when the body is CAPTURED, so the rest is not kept anywhere
+  // and no later flag can print it. A session that needed a 66KB response found
+  // that out by watching json.loads fail on a string cut in half, so the marker
+  // names the knob and says the request has to be repeated.
+  {
+    const CAP = `${SESSION}-cap`, CAPOUT = mkdtempSync(join(tmpdir(), "browse-cap-"));
+    const cap = (...a) => browseIn(CAP, CAPOUT, { BROWSE_NET_BODY_MAX: "8" }, a);
+    console.log("\na network body cut at the cap says so");
+    try {
+      check("a session with a tiny body cap", cap("open", `${BASE}/`).code === 0);
+      cap("wait", "#done");
+      const log = cap("net", "api/user", "--full");
+      check("net --full exits 0", log.code === 0, `exit ${log.code} · ${log.err}`);
+      check("...and marks the body as cut, with its real size",
+        /truncated at 8 of \d+ bytes/.test(log.out), log.out);
+      check("...and names the knob and the repeat", /BROWSE_NET_BODY_MAX/.test(log.out)
+        && /repeat the request/.test(log.out), log.out);
+    } finally {
+      cap("close");
+      rmSync(CAPOUT, { recursive: true, force: true });
+    }
+  }
+
+  /* --------------------------------------------- a crash is not blamed on the disk */
+  // A renderer that dies because the machine ran out of disk reports a bare
+  // "Target crashed", which reads as a browse fault — so browse checks the disk
+  // and says so when that is the answer. The other half matters just as much:
+  // on a machine with room the message must stay bare, or every crash sends the
+  // next command hunting for space that was never the problem. (The full-disk
+  // half is verified on a box, where a disk can be filled on purpose.)
+  // Its own session: the page really is dead afterwards.
+  if (ENGINE === "chromium") {
+    const CRASH = `${SESSION}-crash`, CRASHOUT = mkdtempSync(join(tmpdir(), "browse-crash-"));
+    const cr = (...a) => browseIn(CRASH, CRASHOUT, {}, a);
+    console.log("\na crash on a machine with room does not blame the disk");
+    try {
+      check("a session to crash", cr("open", `${BASE}/ui`).code === 0);
+      cr("goto", "chrome://crash");                       // chromium's own crash url
+      const after = cr("text");
+      check("the next command fails", after.code === 1, `exit ${after.code} · ${after.out}`);
+      check("...saying the page crashed", /crash/i.test(after.err), after.err);
+      check("...and says nothing about the disk", !/disk is full/.test(after.err), after.err);
+    } finally {
+      cr("close");
+      rmSync(CRASHOUT, { recursive: true, force: true });
+    }
+  }
+
   /* ----------------------------------------------------------------- close */
   console.log("\nclose");
   const closed = browse("close", 300000);

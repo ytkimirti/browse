@@ -61,8 +61,20 @@ What a box changes on top of `--remote`:
   `ssh box 'npm run dev &'` dev server dies the moment ssh returns. This is also
   why `profiles`, `clear` and `setup` come back empty over `--remote` on a box:
   browse refuses and names the `exec` form instead.
+- **A saved login has to travel.** `state --save` and `--load` read and write on
+  the machine the browser is on, so a state file saved here is not there: save
+  it in a local session, `browse box push` it over, then `--load` the box's path.
+  Load it with `--clean` when the app mints its own session cookie on load (any
+  Clerk/NextAuth console does) — a merge leaves the page's newer cookie on top
+  and the load quietly does nothing. browse says how many it replaced.
 - **`down` is the ending.** The TTL that also deletes it is a backstop for a
-  crashed session, not a plan.
+  crashed session, not a plan. Export `BROWSE_REMOTE` and keep it exported and
+  `down` needs no argument; without it, `down` refuses to choose between several
+  boxes rather than deleting the one another agent is recording on.
+- **Give a real app room.** Everything it installs lands on the box's disk, and
+  a `node_modules` plus a framework build is several GB. A browser on a full
+  disk dies as `Target crashed` — browse checks the disk when that happens and
+  says so, but the cheaper move is not to run out (`browse box help`: `--size`).
 - **Never make a keep-alive box.** They bill a flat monthly rate whether used or
   not, the opposite of what this is for.
 - **A fresh box with no `browse` on it means the image is stale.** Rebuild it

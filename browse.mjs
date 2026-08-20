@@ -105,7 +105,7 @@ import net from "node:net";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync, createReadStream, createWriteStream } from "node:fs";
+import { mkdirSync, appendFileSync, statSync, statfsSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync, createReadStream, createWriteStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, basename } from "node:path";
@@ -204,6 +204,12 @@ let PROFILE = process.env.BROWSE_PROFILE ? sanitizeName(process.env.BROWSE_PROFI
 // machine's daemon, talks the same localhost protocol down it, and mirrors the
 // artifacts a reply names back into a local session dir. Unset = all local.
 let REMOTE = process.env.BROWSE_REMOTE ? String(process.env.BROWSE_REMOTE).trim() : null;
+/** Set by the client on the daemon it spawns over ssh: this process is the FAR
+ *  side of a --remote session. Used only to keep paths honest — every path a
+ *  command reads, writes or prints over here belongs to this machine, not to the
+ *  one the command was typed on, and a message that does not say so sends the
+ *  caller looking for a file on the wrong disk. */
+const REMOTE_SIDE = process.env.BROWSE_REMOTE_SIDE === "1";
 /** Run files are per (host, session): the same session name on two machines is
  *  two browsers, and a remote entry additionally holds the local end of the
  *  tunnel, so it must not collide with a local session of that name. */
@@ -540,7 +546,13 @@ function netRedact(headers) {
 }
 function netClip(s) {
   if (typeof s !== "string") return s;
-  return s.length > NET.bodyMax ? `${s.slice(0, NET.bodyMax)}…[truncated, ${s.length} bytes total]` : s;
+  // The cap applies when the body is CAPTURED, so the rest is not kept anywhere
+  // and no flag can print it later — the only way to the whole thing is a bigger
+  // cap and another run. Reverse-engineering an API is a top use of this log and
+  // a body cut mid-string just fails to parse, so the note names the knob.
+  return s.length > NET.bodyMax
+    ? `${s.slice(0, NET.bodyMax)}…[truncated at ${NET.bodyMax} of ${s.length} bytes; not kept — raise BROWSE_NET_BODY_MAX and repeat the request]`
+    : s;
 }
 
 /** Cap what a read command prints. Silently slicing is the failure mode this
@@ -561,7 +573,7 @@ function clipForRead(text, cmd, howToNarrow, max = READ_MAX) {
 
 /** Page methods that change state → we auto-screenshot after them. */
 const MUTATING = new Set([
-  "goto", "click", "dblclick", "fill", "type", "press", "drag",
+  "goto", "click", "dblclick", "rightclick", "fill", "type", "press", "drag",
   "check", "uncheck", "hover", "selectOption", "setInputFiles",
   "focus", "reload", "goBack", "goForward",
 ]);
@@ -660,11 +672,11 @@ const CURSOR = process.env.BROWSE_CURSOR !== "0";
 const CURSOR_SCALE = Math.min(4, Math.max(0.5, Number(process.env.BROWSE_CURSOR_SCALE) || 1));
 /** Commands whose first arg is a selector we glide the cursor to before acting. */
 const ELEMENT_TARGETED = new Set([
-  "click", "dblclick", "fill", "type", "press", "drag",
+  "click", "dblclick", "rightclick", "fill", "type", "press", "drag",
   "check", "uncheck", "hover", "selectOption", "setInputFiles", "focus",
 ]);
 /** Element-targeted commands that should also flash a click ripple. */
-const CLICK_LIKE = new Set(["click", "dblclick", "check", "uncheck"]);
+const CLICK_LIKE = new Set(["click", "dblclick", "rightclick", "check", "uncheck"]);
 /** The navigation verbs: they take `--timeout <ms>` (and a url, where it makes
  *  sense) and reject everything else - see the NAV_CMDS branch in dispatchCmd. */
 const NAV_CMDS = new Set(["open", "goto", "reload", "goBack", "goForward"]);
@@ -805,6 +817,9 @@ function cursorInitScript(scale) {
 
     const root = document.createElement("div");
     root.setAttribute("aria-hidden", "true");
+    // browse's own drawing, so a watcher looking for a change the CLICK caused
+    // can tell it apart from the pointer gliding across (see watchDom).
+    root.setAttribute("data-browse-overlay", "");
     root.style.cssText =
       "position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none;";
     const S = Number(scale) > 0 ? Number(scale) : 1;
@@ -971,6 +986,7 @@ function keylogInitScript() {
     if (window.__browseKeys) return;
     const bar = document.createElement("div");
     bar.setAttribute("aria-hidden", "true");
+    bar.setAttribute("data-browse-overlay", ""); // ours, not the page's — see watchDom
     bar.style.cssText =
       "position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:2147483646;" +
       "pointer-events:none;display:flex;gap:8px;align-items:center;" +
@@ -1100,6 +1116,7 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     wall is called out inline, here and after a click.
   browse click <selector>           click an element
   browse dblclick <selector>        double-click an element
+  browse rightclick <selector>      right-click it — opens the app's context menu
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
   browse type <selector> <text>     type into an element without clearing it (key by key)
   browse press [selector] <key>     e.g. browse press "input[name=todo]" Enter · browse press Escape
@@ -1836,6 +1853,9 @@ function stopTunnel() {
  */
 const REMOTE_ENV_DENY = new Set([
   "BROWSE_REMOTE", "BROWSE_REMOTE_BIN", "BROWSE_REMOTE_SPAWN",
+  // Set explicitly on the daemon below. Forwarding the caller's copy would let a
+  // stray export make a LOCAL session describe its own paths as someone else's.
+  "BROWSE_REMOTE_SIDE",
   "BROWSE_SSH_PASSWORD", "BROWSE_SSH_OPTS",
   "BROWSE_HOME", "BROWSE_OUT", "BROWSE_PORT", "BROWSE_BIND",
   "BROWSE_SESSION", "BROWSE_PROFILE",
@@ -1912,7 +1932,7 @@ function upstashBox() {
 async function spawnRemoteDaemon(remotePort) {
   const env = {
     ...forwardedEnv(),
-    BROWSE_SESSION: SESSION, BROWSE_PORT: String(remotePort),
+    BROWSE_SESSION: SESSION, BROWSE_PORT: String(remotePort), BROWSE_REMOTE_SIDE: "1",
     // A forward into a CONTAINER arrives on its external interface, not its
     // loopback, so a loopback-only daemon there is unreachable through the very
     // tunnel that started it. On an ordinary host the forward target resolves on
@@ -4409,10 +4429,23 @@ async function daemon() {
    *  Nms exceeded", so a text test also fires for "element intercepts pointer
    *  events", where the element WAS found and a list of look-alikes buries the
    *  real cause (a modal on top of it). */
+  /** `snapshot` prints `- button "Sign in":`, and the obvious next move is to
+   *  paste `button "Sign in"` back as a selector — which Playwright parses as CSS
+   *  and rejects on the quote. The observe step's output should lead straight to
+   *  a working selector, so translate that shape rather than only complaining. */
+  const ROLE_FORM_RE = /^\s*-?\s*([a-z]+)\s+"([^"]+)"\s*:?\s*$/;
+  function roleFormHint(selector) {
+    const m = ROLE_FORM_RE.exec(String(selector));
+    return m ? `that is the shape 'browse snapshot' prints, not a selector - write it as: role=${m[1]}[name="${m[2]}"]` : "";
+  }
+
   async function withSelectorHint(e, selector, hiddenOnly = false) {
     if (!selector) return e;
     let n = -1;
-    try { n = await L(selector).count(); } catch { return e; } // bad syntax: no idea
+    // Bad syntax: nothing can be counted, so there is no "did you mean" to give -
+    // except for the one malformed selector we can name exactly.
+    try { n = await L(selector).count(); }
+    catch { const hint = roleFormHint(selector); return hint ? new Error(`${e?.message || e}\n${hint}`) : e; }
     // Every match is in the DOM but none is on screen, which reads as "the page
     // never rendered it" unless we say otherwise. A closed dialog or menu that
     // stayed mounted is the usual source.
@@ -4424,6 +4457,50 @@ async function daemon() {
     let hint = "";
     try { hint = await selectorHint(selector); } catch { /* the hint is a bonus */ }
     return hint ? new Error(`${msg}\n${hint}`) : e;
+  }
+
+  /** Clicks whose "nothing happened" is worth reporting. check/uncheck target an
+   *  input by definition, and a rightclick on a plain node is a normal way to
+   *  reach a context menu — neither can be inert by mistake. */
+  const DEAD_CLICK_CMDS = new Set(["click", "dblclick"]);
+
+  /** Watch the page across ONE click. A click that lands on a wrapper — an item
+   *  in a client-rendered list, a div around the real button — returns `ok` and
+   *  does nothing, and `ok` is exactly what a click that worked returns, so the
+   *  session goes on believing the UI is broken. Nothing here is a guess on its
+   *  own: this only runs when the element already has no interactive ancestor
+   *  and no pointer cursor, and the note only prints when the DOM did not change
+   *  and the page did not navigate either. browse's own overlays are excluded —
+   *  the pointer is still gliding while this watches. */
+  async function watchDom() {
+    try {
+      return await page.evaluate(() => {
+        window.__browseDomDirty = false;
+        window.__browseDomWatch?.disconnect();
+        const mine = (n) => (n.nodeType === 1 ? n : n.parentElement)?.closest?.("[data-browse-overlay]");
+        const o = new MutationObserver((records) => {
+          if (!window.__browseDomDirty && records.some((r) => !mine(r.target))) window.__browseDomDirty = true;
+        });
+        o.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+        window.__browseDomWatch = o;
+        return true;
+      });
+    } catch { return false; } // no page to watch: nothing to promise
+  }
+  async function deadClickNote(before) {
+    let changed = true;
+    try {
+      changed = await page.evaluate(() => {
+        const dirty = window.__browseDomDirty;
+        window.__browseDomWatch?.disconnect();
+        delete window.__browseDomWatch; delete window.__browseDomDirty;
+        return dirty;
+      });
+    } catch { return ""; } // the page went away, which is a change by itself
+    if (changed || page.url() !== before) return "";
+    return "\nnote: nothing changed - no navigation, and the DOM is untouched. That element has no interactive " +
+      "ancestor and no pointer cursor, so the click probably landed on a wrapper rather than the control inside it " +
+      "('browse snapshot' names what is clickable).";
   }
 
   /** Pull a one-shot `--dialog accept|dismiss[:text]` out of ANY command's args:
@@ -4449,11 +4526,32 @@ async function daemon() {
   /** The policy is scoped to the ONE command that armed it. Without this it
    *  outlives a command that threw before raising any dialog, and dismisses some
    *  unrelated confirm() many steps later. */
+  /** Chromium's renderer dies when the machine runs out of disk, and playwright
+   *  reports that as a bare "Target crashed" — which reads as a browse fault. On
+   *  a box it is the app's own node_modules that filled the volume, and the only
+   *  place the real reason appears is the dev server's log. So when something
+   *  crashes, ask the disk the browser writes to, and say so when it is the
+   *  answer. Only on a crash: statfs on every command is a syscall for nothing. */
+  const CRASH_RE = /Target crashed|Page crashed|browser has disconnected/i;
+  function withCrashCause(e) {
+    const msg = e?.message || String(e);
+    if (!CRASH_RE.test(msg)) return e;
+    let free = -1;
+    try { const st = statfsSync(BROWSE_HOME); free = st.bavail * st.bsize; } catch { return e; }
+    if (!(free >= 0) || free > 1_000_000_000) return e; // room to spare: not this
+    const where = REMOTE_SIDE ? "the remote's disk" : "the disk";
+    return new Error(`${msg}\n${where} is full — ${Math.round(free / 1e6)}MB free under ${BROWSE_HOME}, which is what crashes the browser. ` +
+      `Free space there (a framework build dir and a package cache are the usual pair) and re-run` +
+      `${REMOTE_SIDE ? "; a box's disk is what 'browse box up --size' picks" : ""}.`);
+  }
+
   async function dispatch(cmd, args) {
     const stripped = takeDialogFlag(args);
     const armed = stripped !== args;
     try {
       return await dispatchCmd(cmd, stripped);
+    } catch (e) {
+      throw withCrashCause(e);
     } finally {
       if (armed) dialogPolicy = null;
     }
@@ -4600,13 +4698,27 @@ async function daemon() {
         // OLD tab and the "switched to popup" note only showed up on the NEXT
         // command. Asked BEFORE the click (the element is still there) and only
         // for an explicit target=_blank, so an ordinary click pays nothing.
-        let expectPopup = false;
+        // The same round trip also asks whether anything here reacts to a
+        // pointer at all: a click on a wrapper answers `ok` and does nothing,
+        // which is indistinguishable from a click that worked. See deadClickNote.
+        let expectPopup = false, inert = false;
         if (CLICK_LIKE.has(cmd)) {
           try {
-            expectPopup = await target.loc.evaluate(
-              (el) => { const a = el.closest?.("a"); return !!(a && a.target === "_blank"); });
+            const probe = await target.loc.evaluate((el) => {
+              const a = el.closest?.("a");
+              const INTERACTIVE = "a,button,input,select,textarea,label,summary,option,[role],[onclick],[tabindex],[contenteditable]";
+              return {
+                popup: !!(a && a.target === "_blank"),
+                inert: !el.closest?.(INTERACTIVE) && getComputedStyle(el).cursor !== "pointer",
+              };
+            });
+            expectPopup = probe.popup; inert = probe.inert;
           } catch { /* detached, cross-origin: fall back to the late note */ }
         }
+        // Only when the element already looks inert, so an ordinary click pays
+        // nothing for it: watch the DOM across the click, since "the page did not
+        // change either" is what turns a guess into something worth printing.
+        const watching = inert && DEAD_CLICK_CMDS.has(cmd) && await watchDom();
         // Everything past the selector goes through a Locator, which is what makes
         // an iframe scope (see L) work without any per-command handling.
         try {
@@ -4620,6 +4732,13 @@ async function daemon() {
             if (missing.length) throw new Error(`setInputFiles: no such file: ${missing.join(", ")} (paths are resolved from the directory browse runs in)`);
             await target.loc.setInputFiles(args.slice(1));
           }
+          // Not a Locator method: a right click is `click` with a button. It gets
+          // its own command rather than a flag because every other act command
+          // takes ONE selector and rejects anything after it, and because a
+          // context menu is otherwise unreachable — dispatching a synthetic
+          // `contextmenu` event through `eval` reaches a React handler but not a
+          // menu the browser itself opens.
+          else if (cmd === "rightclick") await target.loc.click({ button: "right" });
           else await target.loc[cmd](...args.slice(1));
         } catch (e) { throw await withSelectorHint(e, args[0], target.hiddenOnly); }
         // Let the popup land (context.on("page") switches to it) so this command
@@ -4633,7 +4752,8 @@ async function daemon() {
         if (CLICK_LIKE.has(cmd)) {
           await page.waitForLoadState("domcontentloaded", { timeout: 2000 }).catch(() => { /* no navigation, or slower than the grace */ });
         }
-        return `ok - ${await brief()}${target.note}${CLICK_LIKE.has(cmd) ? authWallNote(before) : ""}`;
+        const dead = watching ? await deadClickNote(before) : "";
+        return `ok - ${await brief()}${target.note}${CLICK_LIKE.has(cmd) ? authWallNote(before) : ""}${dead}`;
       }
       if (typeof page[cmd] !== "function") throw new Error(`page has no method '${cmd}'`);
       await page[cmd](...coerce(cmd, args));
@@ -5192,7 +5312,8 @@ async function daemon() {
         if (args[i] === "--save") {
           mkdirSync(join(BROWSE_HOME, "state"), { recursive: true });
           await context.storageState({ path });
-          return `saved cookies + localStorage → ${path}`;
+          return `saved cookies + localStorage → ${path}` + (REMOTE_SIDE
+            ? " (on the REMOTE - that is where the browser is. `browse box pull <box> <path>` brings it here)" : "");
         }
         // NOT browser.newContext({ storageState }): recordVideo lives on THIS
         // context, so building a fresh one to load state into would end the
@@ -5209,6 +5330,10 @@ async function daemon() {
           let saved = [];
           try { saved = readdirSync(join(BROWSE_HOME, "state")); } catch { /* none saved yet */ }
           throw new Error(`state --load: no saved state '${file}' at ${path}` +
+            // The path resolves where the BROWSER is. A state file saved on the
+            // laptop does not exist over here, and the bare message reads as
+            // "browse lost my file" while the file is sitting on the other disk.
+            (REMOTE_SIDE ? " (on the REMOTE - the path is read where the browser runs, so put the file there first: `browse box push <box> <file>`)" : "") +
             (saved.length ? `\nsaved states: ${saved.join(", ")}` : "\nnothing is saved yet - run `browse state --save <file>` while logged in"));
         }
         if (clean) await context.clearCookies();
@@ -5251,7 +5376,23 @@ async function daemon() {
           }, { clean, origins });
         } catch { /* about:blank, or a cross-origin storage block */ }
         try { await page.reload({ waitUntil: "domcontentloaded" }); } catch { /* nothing loaded yet */ }
-        return `loaded ${st.cookies?.length || 0} cookies + ${origins.length} origin(s) from ${path}${clean ? " (cleared first)" : " (merged onto what was there)"} - ${await brief()}`;
+        // Did the merge actually take? The cookies go in, then the page reloads,
+        // and an app that mints its own session cookie on load (clerk, next-auth)
+        // writes straight over the one just restored. The command still said
+        // "loaded 54 cookies" while the browser sat on the sign-in wall, and the
+        // only way to find that out was to go looking at document.cookie.
+        let overwritten = 0;
+        if (!clean && st.cookies?.length) {
+          try {
+            const now = new Map((await context.cookies()).map((c) => [`${c.name}|${c.domain}|${c.path}`, c.value]));
+            for (const c of st.cookies) {
+              const live = now.get(`${c.name}|${c.domain}|${c.path}`);
+              if (live !== undefined && live !== c.value) overwritten++;
+            }
+          } catch { /* context going away: the count is a bonus */ }
+        }
+        return `loaded ${st.cookies?.length || 0} cookies + ${origins.length} origin(s) from ${path}${clean ? " (cleared first)" : " (merged onto what was there)"} - ${await brief()}` +
+          (overwritten ? `\nnote: the page replaced ${overwritten} of them on reload - if the login did not carry, re-run with --clean (a merge leaves the old session's keys underneath)` : "");
       }
       case "middleware": {
         const mw = parseMiddleware(args);
