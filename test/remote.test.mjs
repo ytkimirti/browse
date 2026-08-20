@@ -348,6 +348,27 @@ if (!REMOTE_HOST) {
       r.err);
   }
 
+  // Every path a command takes or prints over there belongs to the REMOTE. A
+  // state file saved on the laptop is not on the box, and the bare "no saved
+  // state at /tmp/x.json" reads as browse losing a file that is sitting right
+  // where it was put — one session lost several minutes to exactly that.
+  {
+    const s = browseRemote("-s", `${SESSION}-state`, "open", "about:blank");
+    check("a session for the state paths", s.code === 0, `${s.code} ${s.err || s.out}`);
+    try {
+      const load = browseRemote("-s", `${SESSION}-state`, "state", "--load", "/tmp/browse-not-there.json");
+      check("a missing state file fails", load.code === 1, `${load.code} ${load.err}`);
+      check("…and says the path was read on the REMOTE", /on the REMOTE/.test(load.err), load.err);
+      check("…and names the way to get the file there", /browse box push/.test(load.err), load.err);
+      const save = browseRemote("-s", `${SESSION}-state`, "state", "--save", "/tmp/browse-remote-state.json");
+      check("a save says where the file really landed",
+        save.code === 0 && /on the REMOTE/.test(save.out) && /browse box pull/.test(save.out),
+        `${save.code} ${save.out}`);
+    } finally {
+      browseRemote("-s", `${SESSION}-state`, "close");
+    }
+  }
+
   /* ── what the caller's environment does, or fails to do, over there ────── */
 
   // A remote is where the camoufox fallback actually happens: no server has

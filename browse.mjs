@@ -105,7 +105,12 @@ import net from "node:net";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { mkdirSync, appendFileSync, statSync, statfsSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync, createReadStream, createWriteStream } from "node:fs";
+import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync, createReadStream, createWriteStream } from "node:fs";
+// A namespace import for ONE function: statfsSync landed in node 18.15, and a
+// named import of something a runtime does not export is a load-time
+// SyntaxError — it would take `browse help` down on a node this still supports,
+// for the sake of a diagnostic that only ever runs after a crash.
+import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, basename } from "node:path";
@@ -1853,8 +1858,9 @@ function stopTunnel() {
  */
 const REMOTE_ENV_DENY = new Set([
   "BROWSE_REMOTE", "BROWSE_REMOTE_BIN", "BROWSE_REMOTE_SPAWN",
-  // Set explicitly on the daemon below. Forwarding the caller's copy would let a
-  // stray export make a LOCAL session describe its own paths as someone else's.
+  // Set explicitly on the remote daemon below, so it is never inherited: this
+  // describes WHICH SIDE a daemon is, and a value carried over from the caller
+  // would be a claim about the wrong machine.
   "BROWSE_REMOTE_SIDE",
   "BROWSE_SSH_PASSWORD", "BROWSE_SSH_OPTS",
   "BROWSE_HOME", "BROWSE_OUT", "BROWSE_PORT", "BROWSE_BIND",
@@ -4479,7 +4485,9 @@ async function daemon() {
         window.__browseDomWatch?.disconnect();
         const mine = (n) => (n.nodeType === 1 ? n : n.parentElement)?.closest?.("[data-browse-overlay]");
         const o = new MutationObserver((records) => {
-          if (!window.__browseDomDirty && records.some((r) => !mine(r.target))) window.__browseDomDirty = true;
+          if (window.__browseDomDirty || !records.some((r) => !mine(r.target))) return;
+          window.__browseDomDirty = true;
+          window.__browseDomNotify?.(); // stop the grace period early
         });
         o.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
         window.__browseDomWatch = o;
@@ -4487,16 +4495,31 @@ async function daemon() {
       });
     } catch { return false; } // no page to watch: nothing to promise
   }
-  async function deadClickNote(before) {
-    let changed = true;
+  /** Take the watch down and say whether the page moved. Split out because the
+   *  action can throw, and an observer left connected outlives the command. */
+  async function stopWatchingDom(grace) {
     try {
-      changed = await page.evaluate(() => {
-        const dirty = window.__browseDomDirty;
-        window.__browseDomWatch?.disconnect();
-        delete window.__browseDomWatch; delete window.__browseDomDirty;
-        return dirty;
-      });
-    } catch { return ""; } // the page went away, which is a change by itself
+      return await page.evaluate((ms) => new Promise((resolve) => {
+        // The observer is gone because the DOCUMENT is: a same-url navigation
+        // (a reload, a form post to the same path) replaces it, and reading a
+        // fresh window's flag would call that "nothing happened".
+        if (!window.__browseDomWatch) return resolve(true);
+        const done = (v) => {
+          window.__browseDomWatch?.disconnect();
+          delete window.__browseDomWatch; delete window.__browseDomDirty; delete window.__browseDomNotify;
+          resolve(v);
+        };
+        if (window.__browseDomDirty) return done(true);
+        // A handler that awaits a fetch before it renders lands after the click
+        // resolves. Waiting the grace out only happens on a click that already
+        // looks inert, and it ends the moment anything mutates.
+        const t = setTimeout(() => done(window.__browseDomDirty === true), ms);
+        window.__browseDomNotify = () => { clearTimeout(t); done(true); };
+      }), grace);
+    } catch { return true; } // the page went away, which is a change by itself
+  }
+  async function deadClickNote(before) {
+    const changed = await stopWatchingDom(400);
     if (changed || page.url() !== before) return "";
     return "\nnote: nothing changed - no navigation, and the DOM is untouched. That element has no interactive " +
       "ancestor and no pointer cursor, so the click probably landed on a wrapper rather than the control inside it " +
@@ -4537,10 +4560,13 @@ async function daemon() {
     const msg = e?.message || String(e);
     if (!CRASH_RE.test(msg)) return e;
     let free = -1;
-    try { const st = statfsSync(BROWSE_HOME); free = st.bavail * st.bsize; } catch { return e; }
+    // OUT, not BROWSE_HOME: the video, the step shots and the network log are
+    // written here as the session runs, so this is the volume that fills first
+    // and the one the browser dies on. Same disk on a box; not always elsewhere.
+    try { const st = nodeFs.statfsSync?.(OUT); free = st ? st.bavail * st.bsize : -1; } catch { return e; }
     if (!(free >= 0) || free > 1_000_000_000) return e; // room to spare: not this
     const where = REMOTE_SIDE ? "the remote's disk" : "the disk";
-    return new Error(`${msg}\n${where} is full — ${Math.round(free / 1e6)}MB free under ${BROWSE_HOME}, which is what crashes the browser. ` +
+    return new Error(`${msg}\n${where} is full — ${Math.round(free / 1e6)}MB free under ${OUT}, which is what crashes the browser. ` +
       `Free space there (a framework build dir and a package cache are the usual pair) and re-run` +
       `${REMOTE_SIDE ? "; a box's disk is what 'browse box up --size' picks" : ""}.`);
   }
@@ -4743,7 +4769,13 @@ async function daemon() {
           // menu the browser itself opens.
           else if (cmd === "rightclick") await target.loc.click({ button: "right" });
           else await target.loc[cmd](...args.slice(1));
-        } catch (e) { throw await withSelectorHint(e, args[0], target.hiddenOnly); }
+        } catch (e) {
+          // An action that threw leaves the watch connected for the rest of the
+          // session otherwise — the note below is the only other thing that
+          // takes it down, and it is not reached from here.
+          if (watching) await stopWatchingDom(0);
+          throw await withSelectorHint(e, args[0], target.hiddenOnly);
+        }
         // Let the popup land (context.on("page") switches to it) so this command
         // reports where the session actually IS, with its note attached.
         if (expectPopup) await context.waitForEvent("page", { timeout: 3000 }).catch(() => { /* never opened */ });
@@ -5384,18 +5416,26 @@ async function daemon() {
         // writes straight over the one just restored. The command still said
         // "loaded 54 cookies" while the browser sat on the sign-in wall, and the
         // only way to find that out was to go looking at document.cookie.
-        let overwritten = 0;
+        let lost = 0;
         if (!clean && st.cookies?.length) {
           try {
+            // After `load`, not straight after domcontentloaded: an app that
+            // re-issues its session cookie does it from a request the document
+            // start does not wait for. This still cannot see one minted after
+            // hydration, so the count is a floor, not a guarantee — which is why
+            // the note is phrased as a lead rather than a diagnosis.
+            await page.waitForLoadState("load", { timeout: 3000 }).catch(() => { /* slower than that, or nothing loaded */ });
             const now = new Map((await context.cookies()).map((c) => [`${c.name}|${c.domain}|${c.path}`, c.value]));
             for (const c of st.cookies) {
+              // Gone counts too: an app that clears the session it did not issue
+              // leaves the load looking like it worked just as completely.
               const live = now.get(`${c.name}|${c.domain}|${c.path}`);
-              if (live !== undefined && live !== c.value) overwritten++;
+              if (live !== c.value) lost++;
             }
           } catch { /* context going away: the count is a bonus */ }
         }
         return `loaded ${st.cookies?.length || 0} cookies + ${origins.length} origin(s) from ${path}${clean ? " (cleared first)" : " (merged onto what was there)"} - ${await brief()}` +
-          (overwritten ? `\nnote: the page replaced ${overwritten} of them on reload - if the login did not carry, re-run with --clean (a merge leaves the old session's keys underneath)` : "");
+          (lost ? `\nnote: the page replaced or dropped ${lost} of them on reload - if the login did not carry, re-run with --clean (a merge leaves the old session's keys underneath for the app to prefer)` : "");
       }
       case "middleware": {
         const mw = parseMiddleware(args);

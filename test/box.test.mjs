@@ -156,6 +156,29 @@ try {
   check("...and says which half is wrong", /fakebox-9\) is gone/.test(d5.err) && /not made by this shell/.test(d5.err),
     d5.err);
 
+  // The note is cleared by the `down` that used it, so a second bare `down` has
+  // nothing local saying which box is this session's. Adopting whatever single
+  // box is up would be the original bug arriving one box later.
+  await reset();
+  box(["up"]);
+  box(["down"]);                                   // clears the note
+  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [{ id: "fakebox-7", status: "running", name: "browse-someone-else", labels: ["browse"] }] }) });
+  const d5b = box(["down"]);
+  check("a second bare down does not adopt whatever is up",
+    d5b.code === 1 && (await deletedIds()) === "", `exit ${d5b.code} · deleted ${await deletedIds()} · ${d5b.err}`);
+  check("...and says nothing here names a box", /nothing here says which box is yours/.test(d5b.err), d5b.err);
+
+  // A box the account still lists after it ended must not count as a rival:
+  // otherwise the first expired box jams the argument-less `down` for good.
+  await reset({ box: "fakebox-1" }, [
+    { id: "fakebox-1", status: "running", name: "browse-mine", labels: ["browse"] },
+    { id: "fakebox-0", status: "expired", name: "browse-old", labels: ["browse"] },
+  ]);
+  const d5c = box(["down"]);
+  check("a box in a terminal state is not a rival",
+    d5c.code === 0 && (await deletedIds()) === "fakebox-1",
+    `exit ${d5c.code} · deleted ${await deletedIds()} · ${d5c.err}`);
+
   /* ------------------------------------------------- nothing to delete */
   console.log("\ndown when there is nothing to delete");
   await reset({ box: "fakebox-9" });
@@ -169,6 +192,16 @@ try {
   const d7 = box(["down"]);
   check("no box at all is not an error either", d7.code === 0 && /no browse box is up/.test(d7.err),
     `exit ${d7.code} · ${d7.err}`);
+
+  // The TTL is a backstop, so a session that outlived it ends with a DELETE for a
+  // box that is already gone. That is teardown arriving at what it wanted.
+  await reset({ box: "fakebox-1" }, [{ id: "fakebox-1", status: "running", name: "browse-mine", labels: ["browse"] }]);
+  const d7b = box(["down", "fakebox-404"]);
+  check("deleting a box that expired is not a failure", d7b.code === 0, `exit ${d7b.code} · ${d7b.err}`);
+  check("...and says it was already gone", /was already gone/.test(d7b.err), d7b.err);
+  const d7c = box(["down"], { BROWSE_REMOTE: `fakebox-404@127.0.0.1:${new URL(BASE).port}` });
+  check("...same through $BROWSE_REMOTE, which is the documented ending",
+    d7c.code === 0 && /was already gone/.test(d7c.err), `exit ${d7c.code} · ${d7c.err}`);
 
   /* ---------------------------------------------------- other people's boxes */
   console.log("\nboxes that are not ours");

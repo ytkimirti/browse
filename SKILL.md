@@ -51,9 +51,7 @@ is not blank, connection-refused, or a framework error overlay.
 
 ## Decide these before the first command
 
-- **`-s <name>`, on every command** — and it goes BEFORE the verb, like
-  `browse -s checkout-bug open …`, since it picks which session the command runs
-  against. Pick a short name for the task
+- **`-s <name>`, on every command.** Pick a short name for the task
   (`-s checkout-bug`, `-s dx2744`) on the very first command and keep it through
   `close`. Named sessions are fully isolated, and this is the only way two
   browsers under one agent stay separate; give each subagent that needs a browser

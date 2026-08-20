@@ -256,10 +256,19 @@ async function listBoxes() {
   const boxes = await api("GET", "/v2/box");
   return Array.isArray(boxes) ? boxes : boxes.boxes || [];
 }
-/** A box THIS made: the label it is created with, or the name `up` gives it.
- *  Only ever consulted to decide what an argument-less `down` is allowed to
- *  delete — an explicit id is always obeyed. */
-const isBrowseBox = (b) => (b?.labels || []).includes("browse") || /^browse-/.test(b?.name || "");
+/** A box THIS made, and still worth counting: the label it is created with (or
+ *  the name `up` gives it), and a status that is not already an ending. Only ever
+ *  consulted to decide what an argument-less `down` is allowed to delete — an
+ *  explicit id is always obeyed.
+ *
+ *  The status list is a DENY list on purpose: an unknown status counts, so a new
+ *  one the API starts answering with makes `down` cautious rather than confident.
+ *  Without it a box the account keeps listing after it ended would jam the
+ *  argument-less `down` — which is the ending the docs point at — forever. */
+const DEAD_STATUS = /^(deleted|deleting|terminated|expired|failed|error)$/i;
+const isBrowseBox = (b) =>
+  !DEAD_STATUS.test(String(b?.status || "")) &&
+  ((Array.isArray(b?.labels) && b.labels.includes("browse")) || /^browse-/.test(b?.name || ""));
 /** Does this `--remote` target point at a box on THIS API, rather than at some
  *  other ssh host? `down` reads $BROWSE_REMOTE, and deleting by an id parsed out
  *  of `--remote nerd` would be a DELETE against an id that is not a box's.
@@ -443,7 +452,7 @@ switch (cmd) {
     if (!box.id) die(`from-snapshot returned no box: ${JSON.stringify(box).slice(0, 200)}`);
     // One exec for both: is browse really on this image, and how much disk is
     // left for the app that is about to be pushed here.
-    const ready = await exec(box.id, "command -v browse >/dev/null && browse version && df -Pm / | tail -1");
+    const ready = await exec(box.id, `command -v browse >/dev/null && browse version && df -Pm ${WORK} | tail -1`);
     if (ready.exit_code !== 0) {
       await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
       die(`image ${snapshot} has no browse on it — rebuild it with: browse box image`);
@@ -507,7 +516,16 @@ switch (cmd) {
         say(noted ? `${noted} is already gone (expired or deleted)` : "no browse box is up");
         break;
       }
-      if (mine.length > 1 || (noted && mine[0].id !== noted)) {
+      // Nothing here says which box is this session's — the note is cleared by
+      // the `down` that used it, so a SECOND bare `down` used to fall through to
+      // "the only browse box up" and delete whatever another agent had made in
+      // the meantime. That is the original bug, one box further along.
+      if (!noted) {
+        die(`nothing here says which box is yours (no note from 'up', no $BROWSE_REMOTE), and\n` +
+            `     these are up — name one: browse box down <box>\n` +
+            mine.map((b) => `       ${b.id}  ${b.status || "?"}  ${b.name || ""}`).join("\n"));
+      }
+      if (mine.length > 1 || mine[0].id !== noted) {
         die(`${mine.length > 1
               ? `${mine.length} browse boxes are up, so 'down' will not guess which one is yours.`
               // One box up, and it is not the one this shell noted: someone else
@@ -519,9 +537,17 @@ switch (cmd) {
       id = noted || mine[0].id;
       why = " (the only browse box up)";
     }
-    await api("DELETE", `/v2/box/${id}`);
+    // A box that expired between the last command and this one answers 404, and
+    // failing teardown for arriving at the state teardown wanted is noise at the
+    // end of every session that outlived its TTL — including the $BROWSE_REMOTE
+    // path the docs now point at.
+    let gone = false;
+    await api("DELETE", `/v2/box/${id}`).catch((e) => {
+      if (!(e instanceof BoxError) || !/→ 404\b/.test(e.message)) throw e;
+      gone = true;
+    });
     if (boxId((await readState()).box) === id) await writeState({ box: null });
-    say(`${id} deleted${why}`);
+    say(`${id} ${gone ? "was already gone (expired or deleted)" : "deleted"}${why}`);
     break;
   }
   case "image": {

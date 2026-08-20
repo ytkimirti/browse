@@ -12,7 +12,7 @@
 // silently became yellow — which is the one failure an agent cannot see.
 
 import { spawnSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statfsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -478,10 +478,10 @@ try {
     `${savedSeq} -> ${read("document.cookie.replace(/.*sess=/, '')")}`);
   const merged = browse("state", "--load", STATEFILE);
   check("a merge load exits 0", merged.code === 0, `exit ${merged.code} · ${merged.err}`);
-  check("...and reports what the page replaced", /the page replaced 1 of them/.test(merged.out), merged.out);
+  check("...and reports what the page replaced", /replaced or dropped 1 of them/.test(merged.out), merged.out);
   check("...and points at --clean", /--clean/.test(merged.out), merged.out);
   const cleaned = browse("state", "--load", STATEFILE, "--clean");
-  check("--clean loads with no such note", cleaned.code === 0 && !/the page replaced/.test(cleaned.out),
+  check("--clean loads with no such note", cleaned.code === 0 && !/replaced or dropped/.test(cleaned.out),
     `exit ${cleaned.code} · ${cleaned.out}`);
 
   /* ----------------------------------------------------- right click */
@@ -560,7 +560,12 @@ try {
       const after = cr("text");
       check("the next command fails", after.code === 1, `exit ${after.code} · ${after.out}`);
       check("...saying the page crashed", /crash/i.test(after.err), after.err);
-      check("...and says nothing about the disk", !/disk is full/.test(after.err), after.err);
+      // Only meaningful on a machine that HAS room — on a full one the note is
+      // the correct answer, and asserting its absence would fail for being right.
+      let free = Infinity;
+      try { const st = statfsSync(CRASHOUT); free = st.bavail * st.bsize; } catch { /* older node */ }
+      if (free > 2e9) check("...and says nothing about the disk", !/disk is full/.test(after.err), after.err);
+      else console.log(`  skip disk-note absence (only ${Math.round(free / 1e6)}MB free here — the note is correct)`);
     } finally {
       cr("close");
       rmSync(CRASHOUT, { recursive: true, force: true });
