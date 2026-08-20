@@ -587,6 +587,12 @@ const MUTATING = new Set([
  *  spelling (Playwright muscle memory), so rejecting it would only buy a failed
  *  call and a retry. It is gone from the help. */
 const PAGE_METHODS = new Set([...MUTATING, "waitForTimeout"]);
+/** …and because it is gone from the help, it must never be SUGGESTED either:
+ *  pointing a typo at a command `browse help` will not explain breaks the rule
+ *  that help is the single source of truth. It is also the one whose argument is
+ *  a NUMBER, so `waitForTimeout <selector>` runs `waitForTimeout(NaN)` - which
+ *  resolves at once and answers ok. See nearestCommand. */
+const UNDOCUMENTED = new Set(["waitForTimeout"]);
 /** Commands that do NOT deserve a chapter marker in the final mp4 - reading the
  *  page changes nothing on screen, so a chapter there points at nothing. */
 const CHAPTERLESS = new Set([
@@ -639,10 +645,22 @@ function parseMiddleware(args) {
   // other form is an absolute url, whose scheme may itself be globbed or
   // alternated - `*://`, `http*://` and `{http,https}://` are all real patterns.
   const pattern = words[0];
-  const SCHEMED = /^(\{[^}]+\}|[A-Za-z0-9+.*-]+):\/\//;
+  // One alternative, not two: Playwright maps ANY index-0 token ending in `:`
+  // that holds a `{` or a `*`, so the brace group need not be the whole scheme -
+  // `http{s,}://…` is as real a pattern as `{http,https}://…`.
+  const SCHEMED = /^[A-Za-z0-9+.*{},-]+:\/\//;
+  // An unbalanced brace is knowably wrong here, and Playwright answers it with a
+  // raw `Invalid glob pattern "**{a": unmatched '{'` thrown from context.route()
+  // - i.e. AFTER the daemon and the recording have spun up. This parser lives in
+  // the client so that never has to happen.
+  const braces = (pattern.match(/\{/g) || []).length - (pattern.match(/\}/g) || []).length;
+  if (braces !== 0) {
+    return { error: `middleware: '${pattern}' has an unbalanced ${braces > 0 ? "{" : "}"} - `
+      + `brace alternation is written '{http,https}://…'.` };
+  }
   if (!pattern.startsWith("**") && !SCHEMED.test(pattern)) {
     return { error: `middleware: '${pattern}' can never match - the glob is tested against the WHOLE url, `
-      + `so it has to start with ** (try '**/${pattern.replace(/^[*?/]+/, "")}') or carry a scheme `
+      + `so it has to start with ** (try '**/${pattern.replace(/^(\*\/|\/)+/, "")}') or carry a scheme `
       + `(https://…, or {http,https}://… for both). A single * stops at the next '/', so it cannot cover 'scheme://host'.` };
   }
   // Joined the same way `eval` joins its expression, so an unquoted handler still
@@ -2363,7 +2381,8 @@ function nearestCommand(cmd) {
     return d[a.length][b.length];
   };
   const q = String(cmd).toLowerCase();
-  const all = [...DAEMON_COMMANDS, ...LOCAL_CMDS, "box", "install", "sessions"];
+  const all = [...DAEMON_COMMANDS, ...LOCAL_CMDS, "box", "install", "sessions"]
+    .filter((c) => !UNDOCUMENTED.has(c));
   let best = [], bestScore = Infinity;
   for (const c of all) {
     const lc = c.toLowerCase();
@@ -2379,15 +2398,25 @@ function nearestCommand(cmd) {
   // Never hand back the word that was just typed. `box`/`install` dispatch in
   // bin/browse, but browse.mjs is also run directly (the test suites do), and
   // "unknown command 'box' — did you mean 'box'?" helps nobody.
-  best = best.filter((c) => c.toLowerCase() !== q);
+  //
+  // Compared against the RAW input, not the lowercased one: `q` is already
+  // lowercase, so matching on it dropped `goBack` for the input `goback` - and a
+  // case-only slip is the likeliest typo there is for the five camelCase
+  // commands, i.e. exactly the one a suggester exists for.
+  best = best.filter((c) => c !== String(cmd));
   if (!best.length || bestScore > Math.max(1, Math.floor(q.length / 3))) return "";
-  // Shortest first, and at most two: `waitFor` is equally `wait` and
-  // `waitForTimeout`, and `waitForTimeout` takes a NUMBER - sent there with a
-  // selector it runs `waitForTimeout(NaN)`, which resolves at once and answers
-  // ok. Naming both costs the caller one glance and never points at a lie.
+  // A PREFIX beats a mere substring when it narrows the field: `clic` is inside
+  // `click`, `dblclick` and `rightclick` equally, but it STARTS only `click`.
+  const prefixed = best.filter((c) => c.toLowerCase().startsWith(q));
+  if (prefixed.length && prefixed.length < best.length) best = prefixed;
+  // Shortest first, and at most two - `shot` is genuinely both `snapshot` and
+  // `screenshot`, and picking one sends the agent to a command that succeeds at
+  // the wrong thing. Anything past two is said as a count rather than dropped
+  // in silence.
   best.sort((a2, b2) => a2.length - b2.length || a2.localeCompare(b2));
   const named = best.slice(0, 2).map((c) => `'${c}'`).join(" or ");
-  return ` — did you mean ${named}?`;
+  const rest = best.length > 2 ? ` (+${best.length - 2} more, see 'browse help')` : "";
+  return ` — did you mean ${named}?${rest}`;
 }
 
 /** Commands that USED to exist, mapped to what to run instead. Only worth an
@@ -5468,15 +5497,18 @@ async function daemon() {
         // reached. Left to emuCdp, `emulate viewport=390x844 net=3g` on camoufox
         // exited 1 with the viewport ALREADY 390 wide: the same partial
         // application as a bad value, arriving by a different door.
-        const NEEDS_CDP = new Set(["off", "tz", "locale", "cpu", "net"]);
+        // `off` is NOT here: its four CDP sends are each already tolerant of
+        // "never overridden in the first place", and the three keys camoufox CAN
+        // set (viewport, dark, geo) are all reset without CDP. Refusing `off`
+        // there left a spoofed geolocation with no command able to undo it.
+        const NEEDS_CDP = new Set(["tz", "locale", "cpu", "net"]);
         const plan = args.map((kv) => {
           const eq = kv.indexOf("=");
           const k = (eq < 0 ? kv : kv.slice(0, eq)).toLowerCase();
           const v = eq < 0 ? "" : kv.slice(eq + 1);
           if (NEEDS_CDP.has(k) && context.__engine !== "chromium") {
             throw new Error(`emulate ${k}: needs CDP, which only Chromium has (engine: ${context.__engine}). `
-              + `Re-run this session with --chromium.`
-              + (k === "off" ? " (viewport= and dark= reset without it: `browse emulate viewport=1280x800 dark=0`)" : ""));
+              + `Re-run this session with --chromium.`);
           }
           if (k === "off") return { k, v };
           if (k === "dark") {
@@ -5531,13 +5563,18 @@ async function daemon() {
           if (k === "off") {
             await page.emulateMedia({ colorScheme: null });
             await page.setViewportSize(VIEWPORT);
-            const s = await emuCdp();
-            for (const [m, p] of [
-              ["Emulation.setCPUThrottlingRate", { rate: 1 }],
-              ["Emulation.setTimezoneOverride", { timezoneId: "" }],
-              ["Emulation.setLocaleOverride", {}],
-              ["Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }],
-            ]) { try { await s.send(m, p); } catch { /* not overridden in the first place */ } }
+            // Only the CDP half is Chromium-only. On camoufox the four overrides
+            // below could never have been set, so skipping them resets everything
+            // that engine can actually emulate rather than refusing outright.
+            if (context.__engine === "chromium") {
+              const s = await emuCdp();
+              for (const [m, p] of [
+                ["Emulation.setCPUThrottlingRate", { rate: 1 }],
+                ["Emulation.setTimezoneOverride", { timezoneId: "" }],
+                ["Emulation.setLocaleOverride", {}],
+                ["Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }],
+              ]) { try { await s.send(m, p); } catch { /* not overridden in the first place */ } }
+            }
             // geo= lives on the CONTEXT, not CDP, so the four resets above left a
             // spoofed position in place while claiming everything was default.
             try { await context.setGeolocation(null); } catch { /* never set */ }

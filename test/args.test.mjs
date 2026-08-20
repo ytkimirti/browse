@@ -119,7 +119,24 @@ try {
   // Same reason, and the sharper case: `waitForTimeout` takes a NUMBER, so a
   // caller sent there with a selector runs `waitForTimeout(NaN)` — which resolves
   // at once and answers ok. Shortest is named first, but both are named.
-  fails("a tie names both, shortest first", ["waitFor", "#x"], /did you mean 'wait' or 'waitForTimeout'\?/);
+  // `waitForTimeout` is deliberately kept but gone from the help, so it must not
+  // be SUGGESTED either — pointing a typo at a command `browse help` will not
+  // explain breaks the single-source-of-truth rule, and it is also the one whose
+  // argument is a NUMBER (`waitForTimeout <selector>` runs waitForTimeout(NaN),
+  // which resolves at once and answers ok).
+  const wf = browse("waitFor", "#x");
+  check("an undocumented spelling is never suggested",
+    wf.code === 1 && /did you mean 'wait'\?/.test(wf.err) && !/waitForTimeout/.test(wf.err), wf.err);
+  // A case-only slip is the likeliest typo for the camelCase commands, and the
+  // self-echo filter used to compare LOWERCASED — which dropped `goBack` for the
+  // input `goback`, silencing exactly the case a suggester exists for.
+  for (const [typed, real] of [["goback", "goBack"], ["goforward", "goForward"],
+                               ["selectoption", "selectOption"], ["setinputfiles", "setInputFiles"]]) {
+    fails(`'${typed}' finds '${real}'`, [typed, "#x"], new RegExp(`did you mean '${real}'\\?`));
+  }
+  // A PREFIX beats a mere substring when it narrows: `clic` sits inside `click`,
+  // `dblclick` and `rightclick` equally, but STARTS only `click`.
+  fails("a prefix narrows a three-way substring tie", ["clic", "#x"], /did you mean 'click'\?/);
   // `box`/`setup`/`install` are matched on $1 in bin/browse, so a leading -s used
   // to land them here — and the suggester answered "did you mean 'box'?" with the
   // word just typed. They now dispatch off the flag walk instead (below), but the
@@ -350,12 +367,15 @@ try {
     fails("a CDP key is refused on this engine", ["emulate", "viewport=390x844", "net=3g"],
       /emulate net: needs CDP, which only Chromium has/);
     check("...and the viewport never moved", width() === 1280, String(width()));
-    fails("...including 'off'", ["emulate", "off"], /emulate off: needs CDP/);
-    // …but the two keys that need no CDP still work here.
-    works("viewport and dark still apply", ["emulate", "viewport=390x844", "dark=1"], /viewport=390x844/);
+    // …but the keys that need no CDP still work, and so does `off`. `off` was
+    // briefly refused here too, which left a geolocation set on camoufox with no
+    // command able to undo it — its CDP half is skipped instead.
+    works("viewport and dark still apply", ["emulate", "viewport=390x844", "dark=1", "geo=41.0,29.0"], /viewport=390x844/);
     check("...the viewport moved", width() === 390, String(width()));
     check("...the colour scheme moved", dark() === "true", dark());
-    works("and reset by hand", ["emulate", "viewport=1280x800", "dark=0"], /viewport=1280x800/);
+    works("off still resets what this engine CAN emulate", ["emulate", "off"], /back to default/);
+    check("...width back", width() === 1280, String(width()));
+    check("...scheme back", dark() === "false", dark());
   }
 
   /* -------------------------------------------------------------- wait */

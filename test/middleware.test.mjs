@@ -136,6 +136,15 @@ try {
   }
   check("...and the fix is spelled out", /try '\*\*\/api\/user'/.test(
     browse("middleware", "/api/user", "route => route.fulfill({json: {}})").err), "");
+  check("...keeping a filename glob intact", /try '\*\*\/\*\.js'/.test(
+    browse("middleware", "*.js", "route => route.abort()").err), "");
+  // An unbalanced brace is knowably wrong, and Playwright answers it with a raw
+  // `Invalid glob pattern … unmatched '{'` thrown from context.route() — i.e.
+  // after the daemon and the recording have spun up for nothing.
+  for (const b2 of ["**{a", "**a}"]) {
+    r = browse("middleware", b2, "route => route.abort()");
+    check(`'${b2}' is refused for its brace`, r.code === 1 && /unbalanced/.test(r.err), `${r.code} ${r.err}`);
+  }
 
   check("no browser was spawned by any of that", browse("whoami").out.includes("not running"), browse("whoami").out);
 
@@ -148,7 +157,9 @@ try {
   // globbed or alternated scheme is the ordinary way to cover http and https in
   // one rule, and neither starts with `**`.
   for (const good of ["https://api.example.com/**", "*://api.example.com/**",
-                      "http*://api.example.com/**", "{http,https}://api.example.com/**"]) {
+                      "http*://api.example.com/**", "{http,https}://api.example.com/**",
+                      // the brace group need not be the WHOLE scheme
+                      "http{s,}://api.example.com/**"]) {
     const g = browse("middleware", good, "route => route.fulfill({json: {}})");
     check(`'${good}' is accepted`, g.code === 0 && /^middleware \+/.test(g.out), `${g.code} ${g.out}${g.err}`);
     browse("middleware", good, "--remove");
