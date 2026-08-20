@@ -308,35 +308,55 @@ try {
   const dark = () => read("matchMedia('(prefers-color-scheme: dark)').matches");
   browse("emulate", "off");
   check("the page starts at the recording width", width() === 1280, String(width()));
-  fails("a bad value after a good key", ["emulate", "viewport=390x844", "cpu=abc"],
-    /emulate cpu: expected a slowdown factor >= 1/);
-  check("...and the viewport never moved", width() === 1280, String(width()));
   fails("an unknown key after a good one", ["emulate", "dark=1", "bogus=2"], /unknown key 'bogus'/);
   check("...and the colour scheme never moved", dark() === "false", dark());
-  // A bad IANA id used to surface as a raw CDP "Protocol error
-  // (Emulation.setTimezoneOverride): Invalid timezone id".
-  fails("a timezone that does not exist", ["emulate", "tz=Not/AZone"], /is not an IANA timezone/);
-  // locale and dark were exempt from the validation pass, so a bad one still
-  // threw at APPLY time — with the earlier keys already live, which is the whole
-  // failure this split exists to remove.
-  fails("a malformed locale after a good key", ["emulate", "viewport=390x844", "locale=en US"],
-    /is not a BCP-47 language tag/);
-  check("...and the viewport still never moved", width() === 1280, String(width()));
+  // cpu/tz/locale are CDP keys, so on camoufox they are refused for the ENGINE
+  // before their value is ever looked at (asserted in the else-branch below).
+  // Their value validation is only observable on chromium.
+  if (ENGINE === "chromium") {
+    fails("a bad value after a good key", ["emulate", "viewport=390x844", "cpu=abc"],
+      /emulate cpu: expected a slowdown factor >= 1/);
+    check("...and the viewport never moved", width() === 1280, String(width()));
+    // A bad IANA id used to surface as a raw CDP "Protocol error
+    // (Emulation.setTimezoneOverride): Invalid timezone id".
+    fails("a timezone that does not exist", ["emulate", "tz=Not/AZone"], /is not an IANA timezone/);
+    // locale was exempt from the validation pass, so a bad one still threw at
+    // APPLY time — with the earlier keys already live, which is the whole failure
+    // this split exists to remove.
+    fails("a malformed locale after a good key", ["emulate", "viewport=390x844", "locale=en US"],
+      /is not a BCP-47 language tag/);
+    check("...and the viewport still never moved", width() === 1280, String(width()));
+  }
   fails("a dark value that is neither", ["emulate", "dark=maybe"], /emulate dark: expected 1\|0/);
   // The BARE key is the obvious shorthand, and it fell through the same hole:
   // `browse emulate dark` answered "emulate: dark=0" and turned dark mode OFF.
   works("a bare dark key turns it ON", ["emulate", "dark"], /dark=1/);
   check("...and the page really is dark", dark() === "true", dark());
   browse("emulate", "off");
-  // …and the whole documented line still applies, in one go.
-  works("a fully valid line applies", ["emulate", "viewport=390x844", "dark=1", "net=3g", "tz=Europe/Istanbul", "cpu=2"], /viewport=390x844/);
-  check("...the viewport moved", width() === 390, String(width()));
-  check("...the colour scheme moved", dark() === "true", dark());
-  check("...the timezone moved", read("Intl.DateTimeFormat().resolvedOptions().timeZone") === "Europe/Istanbul",
-    read("Intl.DateTimeFormat().resolvedOptions().timeZone"));
-  works("off puts it all back", ["emulate", "off"], /back to default/);
-  check("...width back", width() === 1280, String(width()));
-  check("...scheme back", dark() === "false", dark());
+  // tz/locale/cpu/net/off go through CDP, which is Chromium-only. That check
+  // used to live in emuCdp, i.e. at APPLY time — so on camoufox `emulate
+  // viewport=390x844 net=3g` exited 1 with the viewport already 390 wide. Same
+  // partial application as a bad value, through a different door.
+  if (ENGINE === "chromium") {
+    works("a fully valid line applies", ["emulate", "viewport=390x844", "dark=1", "net=3g", "tz=Europe/Istanbul", "cpu=2"], /viewport=390x844/);
+    check("...the viewport moved", width() === 390, String(width()));
+    check("...the colour scheme moved", dark() === "true", dark());
+    check("...the timezone moved", read("Intl.DateTimeFormat().resolvedOptions().timeZone") === "Europe/Istanbul",
+      read("Intl.DateTimeFormat().resolvedOptions().timeZone"));
+    works("off puts it all back", ["emulate", "off"], /back to default/);
+    check("...width back", width() === 1280, String(width()));
+    check("...scheme back", dark() === "false", dark());
+  } else {
+    fails("a CDP key is refused on this engine", ["emulate", "viewport=390x844", "net=3g"],
+      /emulate net: needs CDP, which only Chromium has/);
+    check("...and the viewport never moved", width() === 1280, String(width()));
+    fails("...including 'off'", ["emulate", "off"], /emulate off: needs CDP/);
+    // …but the two keys that need no CDP still work here.
+    works("viewport and dark still apply", ["emulate", "viewport=390x844", "dark=1"], /viewport=390x844/);
+    check("...the viewport moved", width() === 390, String(width()));
+    check("...the colour scheme moved", dark() === "true", dark());
+    works("and reset by hand", ["emulate", "viewport=1280x800", "dark=0"], /viewport=1280x800/);
+  }
 
   /* -------------------------------------------------------------- wait */
   // Node's timers are 32-bit. Past the max, setTimeout fires IMMEDIATELY (after

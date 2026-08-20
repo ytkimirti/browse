@@ -5464,10 +5464,20 @@ async function daemon() {
         // and believes nothing happened, while the page (and everything recorded
         // from here) is a phone. Validate every key first; touch the browser only
         // once the whole line is known-good.
+        // Which keys need CDP — checked in the PLAN pass, not when the send is
+        // reached. Left to emuCdp, `emulate viewport=390x844 net=3g` on camoufox
+        // exited 1 with the viewport ALREADY 390 wide: the same partial
+        // application as a bad value, arriving by a different door.
+        const NEEDS_CDP = new Set(["off", "tz", "locale", "cpu", "net"]);
         const plan = args.map((kv) => {
           const eq = kv.indexOf("=");
           const k = (eq < 0 ? kv : kv.slice(0, eq)).toLowerCase();
           const v = eq < 0 ? "" : kv.slice(eq + 1);
+          if (NEEDS_CDP.has(k) && context.__engine !== "chromium") {
+            throw new Error(`emulate ${k}: needs CDP, which only Chromium has (engine: ${context.__engine}). `
+              + `Re-run this session with --chromium.`
+              + (k === "off" ? " (viewport= and dark= reset without it: `browse emulate viewport=1280x800 dark=0`)" : ""));
+          }
           if (k === "off") return { k, v };
           if (k === "dark") {
             // Unvalidated, `dark=maybe` quietly meant light. The BARE key is the
