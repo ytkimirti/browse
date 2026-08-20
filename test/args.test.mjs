@@ -191,6 +191,11 @@ try {
     /is not a key.*browse type/s);
   fails("press given prose with a selector keeps the selector", ["press", "#in", "some words"],
     /browse type '#in'/);
+  // …and the guard reads the LAST segment of a combo, so control-plus-the-space
+  // CHARACTER is still a key, not prose.
+  works("a combo ending in the space character", ["press", "Control+ "], /ok/);
+  works("the bare space key", ["press", " "], /ok/);
+  works("an ordinary combo", ["press", "Control+Shift+P"], /ok/);
 
   /* ----------------------------------------------------------------- state */
   // findIndex took the FIRST of the two, so --save won and the --load was
@@ -205,6 +210,20 @@ try {
     /--save needs a filename - got the flag '--clean'/);
   works("--save with a real path", ["state", "--save", STATE_FILE], /saved cookies/);
   check("...and the state file is on disk", existsSync(STATE_FILE));
+
+  /* --------------------------------------------------- multi-match reads */
+  // `click` has always said "selector matched 5". The READ commands did not:
+  // `browse text '.error'` on a page with three errors printed one and looked
+  // like the whole answer.
+  console.log("\na read that matched more than one says so");
+  const multi = browse("text", "button");
+  check("text names the match count", multi.code === 0 && /selector matched 5 - this is the first/.test(multi.out), multi.out);
+  const one = browse("text", "#btn");
+  check("...and says nothing when the selector is unique", one.code === 0 && !/selector matched/.test(one.out), one.out);
+  const shotMulti = browse("screenshot", "multi", "--sel", "button");
+  check("screenshot --sel names it too", shotMulti.code === 0 && /selector matched 5/.test(shotMulti.out), shotMulti.out);
+  const shotOne = browse("screenshot", "one", "--sel", "#btn");
+  check("...and stays quiet for a unique one", shotOne.code === 0 && !/selector matched/.test(shotOne.out), shotOne.out);
 
   /* ----------------------------------------------------------- emulate */
   // The worst kind of partial success: `emulate` applied each key as it walked

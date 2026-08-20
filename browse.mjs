@@ -4362,6 +4362,20 @@ async function daemon() {
     };
   }
 
+  /** The READ half of actionTarget's note. `click` has always said "selector
+   *  matched 5, acted on the first" - `text` and `screenshot --sel` silently
+   *  took the first of N and read as the whole answer, which is how
+   *  `browse text '.error'` on a page with three errors reports one.
+   *  Best-effort and short-fused: this is a footnote, and must never fail or
+   *  slow down the read it annotates. */
+  async function readMatchNote(sel) {
+    if (!sel) return "";
+    try {
+      const n = await L(sel).count();
+      return n > 1 ? `\n(selector matched ${n} - this is the first. 'browse eval' reads them all)` : "";
+    } catch { return ""; }
+  }
+
   /** Glide the on-page cursor to an element's center before we act on it, so the
    *  recording shows the pointer travelling there. Best-effort: the real action
    *  must never be blocked or failed by a cursor hiccup. */
@@ -4808,8 +4822,12 @@ async function daemon() {
       // `browse press "hello from keyboard"` and got a bare "Unknown key".
       // (A lone " " IS the space key, hence the length test.)
       if (cmd === "press") {
-        const key = args[args.length - 1];
-        if (String(key).length > 1 && /\s/.test(key))
+        const key = String(args[args.length - 1]);
+        // The last segment of a combo is the key itself, so `Control+ ` (control
+        // plus the space CHARACTER) stays legal - only a MULTI-character segment
+        // with whitespace in it is prose.
+        const leaf = key.slice(key.lastIndexOf("+") + 1);
+        if (leaf.length > 1 && /\s/.test(leaf))
           throw new Error(`press: '${key}' is not a key - press sends ONE key (Enter, Escape, "Meta+k"). To enter text use \`browse ${args.length > 1 ? `type '${args[0]}'` : "type <selector>"} "${key}"\`.`);
       }
       if (ELEMENT_TARGETED.has(cmd)) {
@@ -4925,7 +4943,8 @@ async function daemon() {
       case "text": {
         const sel = args[0] || "body";
         const { out, note: settle } = await readSettled(() => L(sel).first().innerText());
-        return clipForRead(out, "text", `pass a narrower selector than '${sel}'`, 6000) + settle;
+        return clipForRead(out, "text", `pass a narrower selector than '${sel}'`, 6000) + settle
+          + await readMatchNote(args[0]);
       }
       case "title": return await page.title();
       case "url": return page.url();
@@ -5063,7 +5082,7 @@ async function daemon() {
         if (sel) {
           try { await L(sel).first().screenshot({ path }); }
           catch (e) { throw await withSelectorHint(e, sel); }
-          return `saved ${path} (${sel})`;
+          return `saved ${path} (${sel})${await readMatchNote(sel)}`;
         }
         await page.screenshot({ path, fullPage: full });
         // --full captures past the viewport via CDP, so the page never moves and
