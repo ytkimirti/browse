@@ -4718,7 +4718,10 @@ async function daemon() {
         // Only when the element already looks inert, so an ordinary click pays
         // nothing for it: watch the DOM across the click, since "the page did not
         // change either" is what turns a guess into something worth printing.
-        const watching = inert && DEAD_CLICK_CMDS.has(cmd) && await watchDom();
+        // Not inside an iframe scope: the watch runs on the TOP document, and a
+        // MutationObserver does not cross into a frame's — so a click in there
+        // would look like it changed nothing whatever it did.
+        const watching = inert && !activeFrame && DEAD_CLICK_CMDS.has(cmd) && await watchDom();
         // Everything past the selector goes through a Locator, which is what makes
         // an iframe scope (see L) work without any per-command handling.
         try {

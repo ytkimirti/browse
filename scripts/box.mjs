@@ -508,7 +508,11 @@ switch (cmd) {
         break;
       }
       if (mine.length > 1 || (noted && mine[0].id !== noted)) {
-        die(`${mine.length} browse boxes are up, so 'down' will not guess which one is yours.\n` +
+        die(`${mine.length > 1
+              ? `${mine.length} browse boxes are up, so 'down' will not guess which one is yours.`
+              // One box up, and it is not the one this shell noted: someone else
+              // made it. Guessing here is the same delete, one box further along.
+              : `the box noted here (${noted}) is gone, and the one that IS up was not made by this shell.`}\n` +
             `     Name it: browse box down <box>   (or set BROWSE_REMOTE and re-run)\n` +
             mine.map((b) => `       ${b.id}  ${b.status || "?"}  ${b.name || ""}`).join("\n"));
       }

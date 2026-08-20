@@ -153,6 +153,8 @@ try {
   check("a stale note never falls through to someone else's box",
     d5.code === 1 && (await deletedIds()) === "",
     `exit ${d5.code} · deleted ${await deletedIds()} · ${d5.err}`);
+  check("...and says which half is wrong", /fakebox-9\) is gone/.test(d5.err) && /not made by this shell/.test(d5.err),
+    d5.err);
 
   /* ------------------------------------------------- nothing to delete */
   console.log("\ndown when there is nothing to delete");
