@@ -1444,6 +1444,20 @@ function netLatestDir() {
   return dirs.length ? dirs[dirs.length - 1] : null;
 }
 
+/** The four shapes `--status` accepts, in one place so the parser can REJECT a
+ *  spec instead of quietly matching nothing: `404`, `5xx`, `>=400`, `200-299`. */
+const NET_STATUS_TERM = /^(?:[1-5]xx|(?:>=|<=|>|<)\s*\d+|\d+\s*-\s*\d+|\d+)$/;
+/** `--status abc` used to fall through to `code === Number("abc")` — false for
+ *  every entry — and print "(no matching requests)" at exit 0. Indistinguishable
+ *  from an app that made no failing calls, which is the wrong thing to believe. */
+function netStatusSpec(spec) {
+  const bad = String(spec).split(",").map((s) => s.trim().toLowerCase()).filter((s) => !NET_STATUS_TERM.test(s));
+  if (bad.length) {
+    throw new Error(`net: --status '${bad[0]}' is not a status filter — try 404, 5xx, ">=400" or 200-299`);
+  }
+  return spec;
+}
+
 function netStatusMatch(spec, code) {
   if (code == null) return false;
   return String(spec).split(",").some((raw) => {
@@ -1588,7 +1602,6 @@ function netCommand(argv) {
   let last = 30, since = null, failed = false, full = false, bodies = false, json = false, stats = false, showFile = false, allTypes = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const next = () => argv[++i];
     const netVal = (flag) => {
       const v = argv[++i];
       if (v == null || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value — run \`browse help\``); }
@@ -1601,11 +1614,15 @@ function netCommand(argv) {
       if (!Number.isFinite(n) || n < 0) throw new Error(`net: ${flag} wants a number — run \`browse help\``);
       return n;
     };
-    if (a === "-m" || a === "--method") method = String(next() || "").toLowerCase();
-    else if (a === "-t" || a === "--type") type = String(next() || "").toLowerCase();
-    else if (a === "--status") status = next(); // not `-s`: that's the global session flag
-    else if (a === "-d" || a === "--host") host = next();
-    else if (a === "--grep") grep = next();
+    // Every value-taking flag goes through netVal. A bare `next()` let
+    // `net --grep` (value forgotten, or eaten by an empty shell variable) become
+    // `grep === undefined` and answer "(no matching requests)" at exit 0 — the
+    // same output as a real empty result, which is the answer an agent believes.
+    if (a === "-m" || a === "--method") method = String(netVal(a)).toLowerCase();
+    else if (a === "-t" || a === "--type") type = String(netVal(a)).toLowerCase();
+    else if (a === "--status") status = netStatusSpec(netVal(a)); // not `-s`: that's the global session flag
+    else if (a === "-d" || a === "--host") host = netVal(a);
+    else if (a === "--grep") grep = netVal(a);
     else if (a === "--since") since = netNum(a);
     else if (a === "-n" || a === "--last") last = netNum(a);
     else if (a === "--all") last = 0;
@@ -1616,7 +1633,7 @@ function netCommand(argv) {
     else if (a === "--stats") stats = true;
     else if (a === "--all-types") allTypes = true;
     else if (a === "--file" || a === "--path") showFile = true;
-    else if (a === "--dir") dir = next();
+    else if (a === "--dir") dir = netVal(a);
     else if (a.startsWith("-")) { process.stderr.write(`browse net: unknown flag '${a}' — run \`browse help\`\n`); return 1; }
     else if (pattern == null) pattern = a;
     else pattern += " " + a; // unquoted multi-word pattern
@@ -2286,6 +2303,46 @@ function post(port, body, timeoutMs = 120000) {
 
 const CLOSERS = new Set(["close"]);
 
+/** "unknown command 'shot'" sent real sessions to `browse help` and back for a
+ *  name that was one edit away. Levenshtein, capped at a third of the word so a
+ *  wrong GUESS is never offered as a correction — no suggestion beats a bad one.
+ *  Prefix matches count too: `shot` → `screenshot`, which no edit distance
+ *  short enough to be safe would ever reach. */
+function nearestCommand(cmd) {
+  // Damerau, not plain Levenshtein: swapping two neighbours is the commonest
+  // typo there is, and at plain Levenshtein it costs 2 — so `clcik` scored the
+  // same as a word with two unrelated letters wrong and got no suggestion.
+  const dist = (a, b) => {
+    const d = [];
+    for (let i = 0; i <= a.length; i++) d[i] = [i];
+    for (let j = 0; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        const sub = a[i - 1] === b[j - 1] ? 0 : 1;
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + sub);
+        if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+          d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+        }
+      }
+    }
+    return d[a.length][b.length];
+  };
+  const q = String(cmd).toLowerCase();
+  const all = [...DAEMON_COMMANDS, ...LOCAL_CMDS, "box", "install", "sessions"];
+  let best = null, bestScore = Infinity;
+  for (const c of all) {
+    const lc = c.toLowerCase();
+    // Containment either way, since the real misses were `shot` (inside
+    // `screenshot`) and `scrollIntoView` (starting with `scroll`) — both far
+    // outside any edit distance short enough to stay honest. Four characters
+    // minimum on each side so `net`/`url` don't match an unrelated word.
+    const near = (q.length >= 4 && lc.includes(q)) || (lc.length >= 4 && q.includes(lc));
+    const s = near ? 0 : dist(q, lc);
+    if (s < bestScore) { bestScore = s; best = c; }
+  }
+  return best && bestScore <= Math.max(1, Math.floor(q.length / 3)) ? ` — did you mean '${best}'?` : "";
+}
+
 /** Commands that USED to exist, mapped to what to run instead. Only worth an
  *  entry when the old spelling is something an agent plausibly still reaches
  *  for; everything else gets the generic "unknown command".
@@ -2360,6 +2417,18 @@ const REMOTE_ONLY = new Set(["profiles", "clear", "setup"]);
 /** Session/profile selectors. Like the launch flags, they only mean anything
  *  before the command; after it they are just another argument. */
 const SELECT_FLAGS = new Set(["-s", "--session", "-p", "--profile", "--remote"]);
+/** Flags that belong AFTER a command, listed only so that writing one FIRST
+ *  ("browse --dialog dismiss click X" — every other browse flag leads, so this
+ *  is the reflex) is answered with the placement instead of "unknown flag".
+ *  A typo that is on no list stays an unknown flag, which is what it is. */
+const POST_FLAGS = new Set([
+  "--dialog", "--full", "--sel", "--timeout", "--gone", "--text", "--not-text", "--url",
+  "--save", "--load", "--clean", "--gif", "--keep-raw", "--for", "--sticky", "--color",
+  "--pos", "--clear", "--remove", "--label", "--file", "--x",
+  "--host", "-d", "--method", "-m", "--type", "-t", "--status", "--grep", "--since",
+  "--last", "-n", "--all", "--all-types", "--failed", "--errors", "--json", "--stats",
+  "--body", "--bodies", "--level", "--dir", "--path",
+]);
 
 async function client(argv) {
   // Leading flags (any order): `-s <name>` selects a named parallel session,
@@ -2448,6 +2517,16 @@ async function client(argv) {
   // everything past this point sends the word to the daemon as a command, and a
   // typo'd flag would LAUNCH A BROWSER just to be told it isn't a command.
   if (cmd.startsWith("-")) {
+    // The mirror of the "late launch flag" case above: a PER-COMMAND flag written
+    // first. Only the launch flags may lead, so `browse --dialog dismiss click X`
+    // died as "unknown flag" with nothing pointing at the real problem, which is
+    // placement. If a real command is sitting further along the line, say so.
+    const real = POST_FLAGS.has(cmd)
+      && argv.slice(1).find((a) => !a.startsWith("-") && (DAEMON_COMMANDS.has(a) || LOCAL_CMDS.has(a)));
+    if (real) {
+      process.stderr.write(`browse: ${cmd} is a flag of \`${real}\`, not a launch flag, so it goes AFTER it — e.g. \`browse ${real} … ${cmd} …\`\n`);
+      return 1;
+    }
     process.stderr.write(`browse: unknown flag ${cmd} — run \`browse help\` (or \`browse help --env\` for the env-only knobs)\n`);
     return 1;
   }
@@ -2638,7 +2717,7 @@ async function client(argv) {
   // the daemon's list is a typo. Refusing it here is the difference between an
   // error and a browser + recording spun up for nothing.
   if (!DAEMON_COMMANDS.has(cmd)) {
-    process.stderr.write(`browse: unknown command '${cmd}' — run: browse help\n`);
+    process.stderr.write(`browse: unknown command '${cmd}'${nearestCommand(cmd)} — run: browse help\n`);
     return 1;
   }
   // Never spawn a browser just to close one: if there's no live session, closing
@@ -4691,6 +4770,24 @@ async function daemon() {
       // (`<option value="--">-- pick one --</option>` is a real pattern) and a
       // setInputFiles path may all legitimately start with a dash.
       const DATA_ARGS = typing || cmd === "press" || cmd === "selectOption" || cmd === "setInputFiles";
+      // Exempting them from the EXTRA-arg check also exempted them from having
+      // the data arg at all, and every one of them then succeeded at doing
+      // nothing: `fill <sel>` cleared the field and said ok, `setInputFiles <sel>`
+      // detached the file and said ok, `selectOption <sel>` leaked Playwright's
+      // own "options[0]: expected object, got undefined". An empty value is still
+      // allowed when it is WRITTEN (`browse fill '#q' ""` is how you clear one) -
+      // this is only about the argument being absent.
+      // `press` is the exception: one arg means the key goes to the page (so its
+      // floor is 1, not 2) — but ZERO args left Playwright to say
+      // "key: expected string, got undefined".
+      if (DATA_ARGS && args.length < (cmd === "press" ? 1 : 2)) {
+        if (cmd === "press")
+          throw new Error(`press: needs a key - e.g. \`browse press Escape\` (page) or \`browse press '#todo' Enter\` (an element)`);
+        const what = typing ? "the text to type" : cmd === "selectOption" ? "the option value" : "a file path";
+        const eg = typing ? '"hello"' : cmd === "selectOption" ? "eu-west-1" : "./photo.png";
+        throw new Error(`${cmd}: needs a selector AND ${what} - e.g. \`browse ${cmd} '${args[0] ?? "<selector>"}' ${eg}\`` +
+          (cmd === "fill" ? ` (pass "" to clear the field on purpose)` : ""));
+      }
       if (!DATA_ARGS && ELEMENT_TARGETED.has(cmd) && args.length > 1) {
         // These take exactly ONE selector, so ANYTHING after it is a mistake -
         // a single-dash flag (`-timeout 3000`) and a stray word are both dropped
@@ -4702,6 +4799,15 @@ async function daemon() {
         }
         throw new Error(`${cmd}: unexpected argument '${extra}' - ${cmd} takes only a selector` +
           `${String(extra).startsWith("-") ? ". Per-command timeouts live on 'browse wait <selector> --timeout <ms>'" : ""}`);
+      }
+      // No Playwright key name contains a space, so a multi-character key with one
+      // in it is prose that meant `type`/`fill` — a real session spent a turn on
+      // `browse press "hello from keyboard"` and got a bare "Unknown key".
+      // (A lone " " IS the space key, hence the length test.)
+      if (cmd === "press") {
+        const key = args[args.length - 1];
+        if (String(key).length > 1 && /\s/.test(key))
+          throw new Error(`press: '${key}' is not a key - press sends ONE key (Enter, Escape, "Meta+k"). To enter text use \`browse ${args.length > 1 ? `type '${args[0]}'` : "type <selector>"} "${key}"\`.`);
       }
       if (ELEMENT_TARGETED.has(cmd)) {
         const before = page.url();
@@ -4796,9 +4902,19 @@ async function daemon() {
     }
     switch (cmd) {
       case "snapshot": {
+        // No fallback: `page.accessibility` is gone from the pinned Playwright
+        // (1.61 — `typeof page.accessibility === "undefined"`), so the old
+        // `catch` turned every real ariaSnapshot failure (mid-navigation, a
+        // detached frame, a destroyed execution context) into
+        // "Cannot read properties of undefined (reading 'snapshot')" — a browse
+        // crash, as far as the caller could tell. Let the real reason through.
         const read = async () => {
           try { return await L("body").ariaSnapshot(); }
-          catch { return JSON.stringify(await page.accessibility.snapshot(), null, 1) || ""; }
+          catch (e) {
+            if (/execution context|destroyed|detached|has been closed/i.test(e.message))
+              throw new Error(`${e.message}\nnote: the page navigated while it was being read - run 'browse snapshot' again`);
+            throw e;
+          }
         };
         const { out, note: settle } = await readSettled(read);
         return `${await brief()}\n\n${clipForRead(out, "snapshot", "run 'browse snapshot' again scoped by 'browse target <iframe>', or read a region with 'browse text <selector>'", 6000)}${settle}`;
@@ -4905,7 +5021,15 @@ async function daemon() {
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
           if (a === "--full") full = true;
-          else if (a === "--sel") sel = args[++i];
+          // Checked, not just consumed. `--sel` with the selector forgotten shot
+          // the WHOLE viewport and exited 0 - the agent asked for one element and
+          // got a page, with nothing saying so. `--sel --full` was worse: "--full"
+          // became the selector and burned the full locator timeout first.
+          else if (a === "--sel") {
+            sel = args[++i];
+            if (sel == null || String(sel).startsWith("-"))
+              throw new Error(`screenshot: --sel needs a selector - e.g. \`browse screenshot header --sel "nav"\``);
+          }
           // Without this a retired spelling (--fullpage, --selector) would be
           // taken as the FILENAME and silently save an unwanted screenshot. One
           // dash counts too: `-full` would otherwise land as a file named _full.
@@ -5334,9 +5458,18 @@ async function daemon() {
       case "state": {
         // Carry a login between sessions: save once by hand, load at the start of
         // every later run instead of re-driving the whole sign-in flow on camera.
+        // findIndex takes the FIRST of the two, so `--save a --load b` used to
+        // save and silently drop the load - a session that then ran on the wrong
+        // identity with nothing in the output saying the load never happened.
+        if (args.includes("--save") && args.includes("--load"))
+          throw new Error("state: --save and --load are separate runs - do one, then the other");
         const i = args.findIndex((a) => a === "--save" || a === "--load");
         const file = i < 0 ? null : args[i + 1];
-        if (!file) throw new Error("state: use `--save <file>` or `--load <file>`");
+        if (!file) throw new Error("state: use `browse state --save <file>` or `browse state --load <file>`");
+        // `state --save --clean` would otherwise write a file literally named
+        // "--clean" and report it as saved state.
+        if (String(file).startsWith("-"))
+          throw new Error(`state: ${args[i]} needs a filename - got the flag '${file}'`);
         // --load MERGES onto whatever is already there, which is what you want
         // when restoring one login. Switching IDENTITIES needs the opposite, or
         // the previous user's keys and cookies survive underneath.
