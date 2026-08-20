@@ -128,7 +128,9 @@ try {
   // Playwright compiles `*` to `[^/]*`, which cannot cross a `/`, so a SINGLE
   // leading star is as dead as a bare path — `*.js` looks like a working asset
   // blocker and matches nothing. Only `**` (compiled to `.*`) spans `scheme://host`.
-  for (const bad of ["/api/user", "api/user", "*/api/user", "*.js", "?api/user"]) {
+  // Every pattern in both lists here was checked against a real ctx.route() on
+  // the pinned Playwright: these six never fire, the five accepted ones do.
+  for (const bad of ["/api/user", "api/user", "*/api/user", "*.js", "?api/user", "*"]) {
     r = browse("middleware", bad, "route => route.fulfill({json: {}})");
     check(`'${bad}' is refused as unmatchable`, r.code === 1 && /can never match/.test(r.err), `${r.code} ${r.err}`);
   }
