@@ -201,6 +201,16 @@ camoufox_pw_ready() {
 # link this clone in as an agent skill, then install the deps. One clone is both
 # the CLI and the skill, so `git pull` updates them together and a symlink keeps
 # that true. Idempotent; re-run it after adding another agent.
+# `install` links THIS clone into THIS machine's PATH and skill dirs, so a
+# --remote alongside it is meaningless — and, since install ends by running
+# `setup`, honouring it would download a browser here for a session meant to run
+# over there. That is the exact trap `browse --remote <host> setup` was fixed for.
+if [[ "$CMD" == "install" && ( -n "$REMOTE_SEEN" || -n "${BROWSE_REMOTE:-}" ) ]]; then
+  echo "browse: 'install' sets up THIS machine, so it takes no --remote. Run 'browse install' here," >&2
+  echo "browse: then 'browse --remote <host> setup' to install the deps over there." >&2
+  exit 1
+fi
+
 if [[ "$CMD" == "install" ]]; then
   shift "$((CMD_AT + 1))"
   BIN_DIR="${BROWSE_BIN_DIR:-$HOME/.local/bin}"

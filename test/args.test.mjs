@@ -133,6 +133,17 @@ try {
   check("box help works", boxDirect.status === 0 && /disposable Upstash Boxes/.test(boxDirect.stdout || ""), boxDirect.stdout);
   check("...and still works behind -s", boxAfterFlag.status === 0 && /disposable Upstash Boxes/.test(boxAfterFlag.stdout || ""),
     `exit ${boxAfterFlag.status} · ${boxAfterFlag.stdout}${boxAfterFlag.stderr}`);
+  // `install` links THIS clone into THIS machine's PATH, and ends by running
+  // `setup` — so honouring a --remote next to it would download a browser here
+  // for a session meant to run over there. Dispatching install off the walk is
+  // what made that reachable, so it is refused rather than half-done.
+  const remoteInstall = spawnSync(BIN, ["--remote", "nosuchhost", "install"], { encoding: "utf8" });
+  check("install refuses a --remote", remoteInstall.status === 1 && /takes no --remote/.test(remoteInstall.stderr || ""),
+    `exit ${remoteInstall.status} · ${remoteInstall.stderr}`);
+  const envRemoteInstall = spawnSync(BIN, ["install"], { encoding: "utf8", env: { ...process.env, BROWSE_REMOTE: "nosuchhost" } });
+  check("...via BROWSE_REMOTE too", envRemoteInstall.status === 1 && /takes no --remote/.test(envRemoteInstall.stderr || ""),
+    `exit ${envRemoteInstall.status} · ${envRemoteInstall.stderr}`);
+
   // …and a session that is literally CALLED box is still a session, not the
   // box CLI: the walk skips `-s box`, so the command is `whoami`.
   const sessionNamedBox = spawnSync(BIN, ["-s", "box", "whoami"], { encoding: "utf8" });
