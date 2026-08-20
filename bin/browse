@@ -49,19 +49,12 @@ if (( NODE_MAJOR < 18 )); then
   echo "browse: node v18+ required (found v$(node -p process.versions.node))" >&2; exit 1
 fi
 
-# `box` takes over the whole command line, so it is matched on $1 only — which
-# is also what keeps `browse -s box open …` working, since `box` is a perfectly
-# legal session name, profile name and selector.
-if [[ "${1:-}" == "box" ]]; then
-  shift; exec node "$REPO_ROOT/scripts/box.mjs" "$@"
-fi
-
 # Which command is this? The flags that may precede it take a value or not, so
 # finding it means walking them. Worth the walk: matching $1 alone missed
 # `browse --remote <host> setup`, which runs over THERE, and so downloaded a
 # browser here first. An unrecognised flag ends the walk with no command, which
 # only falls through to the install below — never wrong, just unhelpful.
-CMD=""; REMOTE_SEEN=""
+CMD=""; REMOTE_SEEN=""; CMD_AT=""
 if (( $# )); then
   _argv=("$@"); _i=0
   while (( _i < ${#_argv[@]} )); do
@@ -71,9 +64,20 @@ if (( $# )); then
       --headful|--headless|--camoufox|--chromium|--cursor|--no-cursor|\
       --keylog|--no-keylog|--popups|--no-popups|--net|--no-net) _i=$((_i + 1)) ;;
       -*) break ;;
-      *) CMD="${_argv[$_i]}"; break ;;
+      *) CMD="${_argv[$_i]}"; CMD_AT="$_i"; break ;;
     esac
   done
+fi
+
+# `box` takes over the whole command line: hand scripts/box.mjs everything AFTER
+# the word, dropping the browse-level flags that preceded it. Dispatched off the
+# WALK, not off $1 — matching $1 meant `browse -s zz box ls` fell through to
+# browse.mjs as "unknown command 'box'". The walk is also what keeps
+# `browse -s box open …` working: there `box` is the SESSION name, so it is
+# skipped and CMD is `open`.
+if [[ "$CMD" == "box" ]]; then
+  shift "$((CMD_AT + 1))"
+  exec node "$REPO_ROOT/scripts/box.mjs" "$@"
 fi
 
 # `help` must never trigger a 400MB download — it is the first thing anyone runs
@@ -197,8 +201,8 @@ camoufox_pw_ready() {
 # link this clone in as an agent skill, then install the deps. One clone is both
 # the CLI and the skill, so `git pull` updates them together and a symlink keeps
 # that true. Idempotent; re-run it after adding another agent.
-if [[ "${1:-}" == "install" ]]; then
-  shift
+if [[ "$CMD" == "install" ]]; then
+  shift "$((CMD_AT + 1))"
   BIN_DIR="${BROWSE_BIN_DIR:-$HOME/.local/bin}"
   mkdir -p "$BIN_DIR"
   ln -sfn "$SCRIPT_DIR/browse" "$BIN_DIR/browse"
@@ -228,7 +232,10 @@ if [[ "${1:-}" == "install" ]]; then
   set -- setup
 fi
 
-if [[ "${1:-}" == "setup" ]]; then
+# `set -- setup` from the install block lands here too, so CMD is re-derived
+# rather than trusted.
+[[ "${1:-}" == "setup" ]] && CMD="setup"
+if [[ "$CMD" == "setup" ]]; then
   echo "browse: data home is $HOME_DIR"
   if main_installed; then
     echo "browse: ✓ playwright $PW_VERSION + chromium already installed"

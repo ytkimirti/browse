@@ -120,6 +120,17 @@ try {
     `${noSessionForgotHandler.code} ${noSessionForgotHandler.err}`);
   r = browse("middleware", "--bogus");
   check("an unknown flag exits 1", r.code === 1 && /unknown flag '--bogus'/.test(r.err), `${r.code} ${r.err}`);
+  // A glob is tested against the WHOLE url, so one that neither starts with a
+  // wildcard nor carries a scheme can never match. It used to register happily,
+  // print "middleware + /api/user" and then let every request through to the real
+  // API — the mock silently not existing, with a recording that presents live
+  // data as mocked. Refused in the shared parser, so it costs no browser.
+  for (const bad of ["/api/user", "api/user"]) {
+    r = browse("middleware", bad, "route => route.fulfill({json: {}})");
+    check(`'${bad}' is refused as unmatchable`, r.code === 1 && /can never match/.test(r.err), `${r.code} ${r.err}`);
+    check(`...and is told the ** spelling`, /\*\*\/api\/user/.test(r.err), r.err);
+  }
+
   check("no browser was spawned by any of that", browse("whoami").out.includes("not running"), browse("whoami").out);
 
   // --- registering before `open` is the intended flow: it spawns the browser.
@@ -279,11 +290,14 @@ try {
   const afterFailures = browse("middleware").out;
   check("no failed registration leaked into the list", !afterFailures.includes("**/api/x"), afterFailures);
 
-  // A pattern that can never match is caught at registration, not after the hunt.
+  // A pattern that can never match is REFUSED at registration. It used to
+  // register and carry a note at exit 0, which an agent chaining on `&&` sailed
+  // straight past — leaving the page on the real API while the run believed it
+  // was mocked, and a recording that presents live data as mocked.
   r = browse("middleware", "/api/other", "route => route.abort()");
-  check("a bare-path pattern warns it will never match",
-    r.code === 0 && /never match. Use '\*\*\/api\/other'/.test(r.out), `${r.code} ${r.out}`);
-  browse("middleware", "/api/other", "--remove");
+  check("a bare-path pattern is refused, exit 1",
+    r.code === 1 && /can never match/.test(r.err), `${r.code} ${r.out}${r.err}`);
+  check("...and no such rule was created", !browse("middleware").out.includes("/api/other"), browse("middleware").out);
 
   // A throwing handler must abort its request and REPORT, not hang the page.
   console.log("\nhandler faults");

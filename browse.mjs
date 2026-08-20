@@ -626,9 +626,20 @@ function parseMiddleware(args) {
   // was forgotten or a handler whose pattern was. Refusing it is what lets
   // logLabel below promise never to echo source.
   if (words.length < 2) return { error: MW_USAGE };
+  // A glob is matched against the FULL url, so one that does not start with a
+  // wildcard and is not an absolute url can never match anything - and it
+  // registered happily, printed "middleware + /api/user", and then let every
+  // request through to the real API. The mock silently not existing is the worst
+  // shape this command has: the page shows live data, and a recording of it
+  // presents live data as mocked.
+  const pattern = words[0];
+  if (!/^[*?]/.test(pattern) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(pattern)) {
+    return { error: `middleware: '${pattern}' can never match - the glob is tested against the WHOLE url, `
+      + `so it has to start with ** (try '**/${pattern.replace(/^\/+/, "")}') or be an absolute url.` };
+  }
   // Joined the same way `eval` joins its expression, so an unquoted handler still
   // works; a properly quoted one arrives as a single arg anyway.
-  return { action: "register", pattern: words[0], src: words.slice(1).join(" ").trim() };
+  return { action: "register", pattern, src: words.slice(1).join(" ").trim() };
 }
 
 /** How a command is written down — transcript lines and mp4 chapter titles.
@@ -1604,7 +1615,10 @@ function netCommand(argv) {
     const a = argv[i];
     const netVal = (flag) => {
       const v = argv[++i];
-      if (v == null || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value — run \`browse help\``); }
+      // Empty counts as missing. `--grep "$PAT"` with PAT unset arrives as "", and
+      // an empty filter is DROPPED (`grep ? … : null`) — so `net --grep ""` printed
+      // every request in the log at exit 0, which reads as "these all matched".
+      if (v == null || v === "" || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value — run \`browse help\``); }
       return v;
     };
     const netNum = (flag) => {
@@ -2252,6 +2266,13 @@ async function ensureDaemon() {
   throw new Error(`browser daemon for session '${SESSION}' did not come up — see ${DAEMON_LOG}`);
 }
 
+/** Node's timers are 32-bit. Handed anything larger, setTimeout prints a
+ *  TimeoutOverflowWarning and then FIRES IMMEDIATELY — so `browse wait
+ *  99999999999` returned in under a second and reported "waited 99999999999ms",
+ *  and `goto --timeout 99999999999` failed at once claiming the full duration.
+ *  Every command that takes a duration is checked against this. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /** POST a command to the daemon, return the parsed { ok, result?/error? }. */
 /** How long the CLIENT waits on the daemon. A command carrying its own
  *  `--timeout <ms>` (goto, wait, …) must be allowed to run it out: a fixed 120s
@@ -2268,7 +2289,7 @@ function postTimeout(cmd, args) {
   // Capped at Node’s 32-bit timer max: a bogus duration (`wait 99999999999`) would
   // otherwise make the CLIENT print a TimeoutOverflowWarning into the middle of
   // the output before the daemon ever got to reject it.
-  if (Number.isFinite(n) && n > 90_000) return Math.min(n + 30_000, 2_147_483_647);
+  if (Number.isFinite(n) && n > 90_000) return Math.min(n + 30_000, MAX_TIMER_MS);
   // A remote `close` is the one command that cannot afford to time out. It
   // flushes the video, analyses dead air and encodes the mp4 on the far machine,
   // and only after the reply lands does the client copy anything down. Give up at
@@ -2341,9 +2362,17 @@ function nearestCommand(cmd) {
     // minimum on each side so `net`/`url` don't match an unrelated word.
     const near = (q.length >= 4 && lc.includes(q)) || (lc.length >= 4 && q.includes(lc));
     const s = near ? 0 : dist(q, lc);
-    if (s < bestScore) { bestScore = s; best = c; }
+    // Ties go to the SHORTER name. `waitFor` matched `waitForTimeout` and `wait`
+    // equally, and first-seen handed back waitForTimeout — whose own arg is a
+    // NUMBER, so following the suggestion ran `waitForTimeout(NaN)`, which
+    // resolves at once and answers ok. A suggestion that lies is worse than none.
+    if (s < bestScore || (s === bestScore && best && c.length < best.length)) { bestScore = s; best = c; }
   }
-  return best && bestScore <= Math.max(1, Math.floor(q.length / 3)) ? ` — did you mean '${best}'?` : "";
+  // Never hand back the word that was just typed: `box`/`setup`/`install` are
+  // matched on $1 only in bin/browse, so `browse -s x box ls` reaches here and
+  // would otherwise answer "unknown command 'box' — did you mean 'box'?".
+  if (!best || best.toLowerCase() === q) return "";
+  return bestScore <= Math.max(1, Math.floor(q.length / 3)) ? ` — did you mean '${best}'?` : "";
 }
 
 /** Commands that USED to exist, mapped to what to run instead. Only worth an
@@ -2524,10 +2553,16 @@ async function client(argv) {
     // first. Only the launch flags may lead, so `browse --dialog dismiss click X`
     // died as "unknown flag" with nothing pointing at the real problem, which is
     // placement. If a real command is sitting further along the line, say so.
+    // Deliberately does NOT claim which command owns the flag: the word found
+    // here is just the first command-shaped one on the line, and `--timeout` in
+    // front of `click` would then be "a flag of click" — advice that fails on the
+    // very next turn, since click takes no --timeout. Where it goes is the part
+    // that is always true, and help is what says which command takes it.
     const real = POST_FLAGS.has(cmd)
       && argv.slice(1).find((a) => !a.startsWith("-") && (DAEMON_COMMANDS.has(a) || LOCAL_CMDS.has(a)));
     if (real) {
-      process.stderr.write(`browse: ${cmd} is a flag of \`${real}\`, not a launch flag, so it goes AFTER it — e.g. \`browse ${real} … ${cmd} …\`\n`);
+      process.stderr.write(`browse: ${cmd} is a command's own flag, not a launch flag — it goes AFTER the command, `
+        + `and you wrote it before '${real}'. Run \`browse help\` for which command takes it.\n`);
       return 1;
     }
     process.stderr.write(`browse: unknown flag ${cmd} — run \`browse help\` (or \`browse help --env\` for the env-only knobs)\n`);
@@ -4698,6 +4733,10 @@ async function daemon() {
         if (a === "--timeout") {
           const v = Number(args[++i]);
           if (!Number.isFinite(v) || v <= 0) throw new Error(`${cmd}: --timeout wants milliseconds, e.g. --timeout 60000`);
+          // Same 32-bit timer ceiling `wait` enforces: past it Node clamps the
+          // timer (after printing a TimeoutOverflowWarning into browsed.log) and
+          // the navigation fails instantly claiming the full duration elapsed.
+          if (v > MAX_TIMER_MS) throw new Error(`${cmd}: --timeout ${v}ms is longer than a timer can run (max ${MAX_TIMER_MS}, ~24 days) - check the digits`);
           timeout = v;
         } else if (a.startsWith("-")) throw new Error(`${cmd}: unknown flag '${a}' - ${cmd} takes ${takes}`);
         else if (url === null && (cmd === "open" || cmd === "goto")) url = a;
@@ -5049,7 +5088,10 @@ async function daemon() {
           // became the selector and burned the full locator timeout first.
           else if (a === "--sel") {
             sel = args[++i];
-            if (sel == null || String(sel).startsWith("-"))
+            // Empty counts as missing too: `--sel "$SEL"` with SEL unset arrives as
+            // "", falls past the `if (sel)` branch below and shoots the whole
+            // viewport at exit 0 — the very case this guard exists for.
+            if (sel == null || sel === "" || String(sel).startsWith("-"))
               throw new Error(`screenshot: --sel needs a selector - e.g. \`browse screenshot header --sel "nav"\``);
           }
           // Without this a retired spelling (--fullpage, --selector) would be
@@ -5102,13 +5144,8 @@ async function daemon() {
         // a navigation, or a plain pause. It is ALSO the assertion - a wait that
         // never resolves throws, which the client turns into a non-zero exit.
         let sel = null, gone = false, url = null, timeout = 10000, text = null, notText = null;
-        // Node's timers are 32-bit: past this, setTimeout FIRES IMMEDIATELY after
-        // printing a TimeoutOverflowWarning to stdout. `browse wait 99999999999`
-        // therefore returned in 0.4s and reported "waited 99999999999ms" - an
-        // exit-0 lie, and a stray node warning in the middle of agent output.
-        const MAX_MS = 2_147_483_647;
         const durable = (flag, ms) => {
-          if (ms > MAX_MS) throw new Error(`wait: ${flag ? `${flag} ` : ""}${ms}ms is longer than a timer can run (max ${MAX_MS}, ~24 days) - check the digits`);
+          if (ms > MAX_TIMER_MS) throw new Error(`wait: ${flag ? `${flag} ` : ""}${ms}ms is longer than a timer can run (max ${MAX_TIMER_MS}, ~24 days) - check the digits`);
           return ms;
         };
         // Every flag's VALUE is required. `wait "#x" --text` used to drop the flag
@@ -5416,7 +5453,20 @@ async function daemon() {
           const eq = kv.indexOf("=");
           const k = (eq < 0 ? kv : kv.slice(0, eq)).toLowerCase();
           const v = eq < 0 ? "" : kv.slice(eq + 1);
-          if (k === "off" || k === "dark" || k === "locale") return { k, v };
+          if (k === "off") return { k, v };
+          if (k === "dark") {
+            // Unvalidated, `dark=maybe` quietly meant light.
+            if (!/^(1|0|true|false|on|off|yes|no|dark|light|)$/i.test(v))
+              throw new Error(`emulate dark: expected 1|0 (or dark|light) - got '${v}'`);
+            return { k, v };
+          }
+          if (k === "locale") {
+            // Left to CDP, a malformed tag threw at APPLY time - which is exactly
+            // the partial application this two-pass split exists to prevent.
+            try { if (!Intl.getCanonicalLocales(v).length) throw new Error("empty"); }
+            catch { throw new Error(`emulate locale: '${v}' is not a BCP-47 language tag - e.g. tr-TR, en-GB, de`); }
+            return { k, v };
+          }
           if (k === "geo") {
             const [lat, lon] = v.split(",").map(Number);
             if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error(`emulate geo: expected lat,lon - got '${v}'`);
@@ -5677,13 +5727,10 @@ async function daemon() {
         entry.handler = mwWrap(entry, fn);
         await context.route(pattern, entry.handler);
         middleware.unshift(entry);
-        // The pattern is matched against the whole url, so a bare path matches
-        // nothing at all — and a rule that never fires looks exactly like a rule
-        // whose handler is wrong. Say it at registration, not after the debugging.
-        const hint = pattern.startsWith("/") && !pattern.startsWith("//")
-          ? `\nnote: '${pattern}' is matched against the FULL url (there is no base url), so it will never match. Use '**${pattern}'.`
-          : "";
-        return `middleware ${prev >= 0 ? "replaced" : "+"} ${pattern}${middleware.length > 1 ? ` (${middleware.length} rules, this one runs first)` : ""}${hint}`;
+        // An unmatchable pattern never gets here: parseMiddleware refuses it in
+        // the CLIENT, before a browser is spawned. It used to register and carry a
+        // note instead, which an agent chaining on `&&` sailed straight past.
+        return `middleware ${prev >= 0 ? "replaced" : "+"} ${pattern}${middleware.length > 1 ? ` (${middleware.length} rules, this one runs first)` : ""}`;
       }
       case "init": {
         // Playwright's addInitScript: run this BEFORE the page's own scripts, on

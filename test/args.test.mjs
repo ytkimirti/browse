@@ -109,14 +109,50 @@ try {
   const far = browse("xyzzy");
   check("a word like nothing gets no guess", far.code === 1 && !/did you mean/.test(far.err), far.err);
 
+  // A suggestion has to be one that WORKS. `waitFor` matched both `wait` and
+  // `waitForTimeout` by containment; first-seen handed back waitForTimeout,
+  // whose argument is a NUMBER — so following the advice ran
+  // `waitForTimeout(NaN)`, which resolves instantly and answers ok.
+  fails("a tie goes to the shorter command", ["waitFor", "#x"], /did you mean 'wait'\?/);
+  // `box`/`setup`/`install` are matched on $1 in bin/browse, so a leading -s used
+  // to land them here — and the suggester answered "did you mean 'box'?" with the
+  // word just typed. They now dispatch off the flag walk instead (below), but the
+  // suggester must never echo its own input either way.
+  for (const self of ["errors", "console"]) {
+    const r = browse(self.slice(0, 2) + "zzz");
+    check(`'${self.slice(0, 2)}zzz' is never told to run itself`, !new RegExp(`did you mean '${self.slice(0, 2)}zzz'`).test(r.err), r.err);
+  }
+
+  /* ---------------------------------------------- dispatch past the flags */
+  // bin/browse walks past the leading flags to find the command, then dispatched
+  // box/install/setup off $1 anyway — so `browse -s zz box ls` fell through to
+  // browse.mjs as "unknown command 'box'".
+  console.log("\nbox/setup are found past a leading flag");
+  const boxDirect = spawnSync(BIN, ["box", "help"], { encoding: "utf8" });
+  const boxAfterFlag = spawnSync(BIN, ["-s", "zz", "box", "help"], { encoding: "utf8" });
+  check("box help works", boxDirect.status === 0 && /disposable Upstash Boxes/.test(boxDirect.stdout || ""), boxDirect.stdout);
+  check("...and still works behind -s", boxAfterFlag.status === 0 && /disposable Upstash Boxes/.test(boxAfterFlag.stdout || ""),
+    `exit ${boxAfterFlag.status} · ${boxAfterFlag.stdout}${boxAfterFlag.stderr}`);
+  // …and a session that is literally CALLED box is still a session, not the
+  // box CLI: the walk skips `-s box`, so the command is `whoami`.
+  const sessionNamedBox = spawnSync(BIN, ["-s", "box", "whoami"], { encoding: "utf8" });
+  check("a session named 'box' is still a session",
+    sessionNamedBox.status === 0 && /^box\b/.test((sessionNamedBox.stdout || "").trim()), sessionNamedBox.stdout);
+
   /* ------------------------------------------------ flag placement (client) */
   // The mirror of the existing "launch flag written last" message. Every other
   // browse flag LEADS, so writing a per-command flag first is the reflex — and
   // it died as a bare "unknown flag", which points at the name, not the place.
   console.log("\na per-command flag written first names its command");
   fails("--dialog before the command", ["--dialog", "dismiss", "click", "#btn"],
-    /--dialog is a flag of `click`.*goes AFTER it/);
-  fails("--full before the command", ["--full", "screenshot"], /--full is a flag of `screenshot`/);
+    /--dialog is a command's own flag.*goes AFTER the command/s);
+  fails("--full before the command", ["--full", "screenshot"], /goes AFTER the command/);
+  // The message must NOT claim which command owns the flag. The word found on
+  // the line is just the first command-shaped one, and `click` takes no
+  // --timeout — so "a flag of click" was advice that failed on the next turn.
+  const wrongOwner = browse("--timeout", "30000", "click", "#x");
+  check("...and it does not claim the wrong owner",
+    wrongOwner.code === 1 && !/flag of `click`/.test(wrongOwner.err), wrongOwner.err);
   // A flag that is on no list is a typo, and must still read as one.
   fails("a genuinely unknown flag stays unknown", ["--nosuchflag", "open", BASE], /unknown flag --nosuchflag/);
 
@@ -131,6 +167,12 @@ try {
   // A malformed --status fell through to `code === Number("abc")` — false for
   // every entry — and printed "(no matching requests)" at exit 0.
   fails("net --status abc", ["net", "--status", "abc"], /--status 'abc' is not a status filter/);
+  // Empty is missing, not "match everything". `--grep "$PAT"` with PAT unset
+  // arrives as "", the filter is dropped, and every request in the log prints at
+  // exit 0 — which reads as "these all matched the pattern".
+  for (const f of ["--grep", "--host", "--method", "--type", "--dir"]) {
+    fails(`net ${f} given an empty string`, ["net", f, ""], new RegExp(`net: \\${f} needs a value`));
+  }
   fails("net --status names the bad term of a list", ["net", "--status", "404,zzz"], /--status 'zzz' is not a status/);
 
   console.log("\nlive session");
@@ -150,6 +192,9 @@ try {
   // Worse: "--full" landed in the selector slot and burned the locator timeout
   // before failing on a selector nobody wrote.
   fails("--sel swallowing the next flag", ["screenshot", "--sel", "--full"], /--sel needs a selector/);
+  // …and an EMPTY selector is missing too: `--sel "$SEL"` with SEL unset fell
+  // past the element branch and shot the whole viewport at exit 0.
+  fails("--sel given an empty string", ["screenshot", "empty-sel", "--sel", ""], /--sel needs a selector/);
   works("--sel with a real selector", ["screenshot", "sel-ok", "--sel", "body"], /sel-ok\.png \(body\)/);
   check("the element shot exists", existsSync(join(OUT, "sel-ok.png")));
   works("--full still works", ["screenshot", "full-ok", "--full"], /full-ok\.png/);
@@ -243,6 +288,13 @@ try {
   // A bad IANA id used to surface as a raw CDP "Protocol error
   // (Emulation.setTimezoneOverride): Invalid timezone id".
   fails("a timezone that does not exist", ["emulate", "tz=Not/AZone"], /is not an IANA timezone/);
+  // locale and dark were exempt from the validation pass, so a bad one still
+  // threw at APPLY time — with the earlier keys already live, which is the whole
+  // failure this split exists to remove.
+  fails("a malformed locale after a good key", ["emulate", "viewport=390x844", "locale=en US"],
+    /is not a BCP-47 language tag/);
+  check("...and the viewport still never moved", width() === 1280, String(width()));
+  fails("a dark value that is neither", ["emulate", "dark=maybe"], /emulate dark: expected 1\|0/);
   // …and the whole documented line still applies, in one go.
   works("a fully valid line applies", ["emulate", "viewport=390x844", "dark=1", "net=3g", "tz=Europe/Istanbul", "cpu=2"], /viewport=390x844/);
   check("...the viewport moved", width() === 390, String(width()));
@@ -271,6 +323,13 @@ try {
   check("...with no node warning either", !/TimeoutOverflowWarning/.test(hugeFlag.err + hugeFlag.out), hugeFlag.err);
   works("an ordinary pause still works", ["wait", "300"], /waited 300ms/);
   works("an ordinary --timeout still works", ["wait", "#btn", "--timeout", "2000"], /visible: #btn/);
+  // The same 32-bit hole was open in every navigation verb, where Node clamps the
+  // timer and the navigation fails at once claiming the full duration elapsed.
+  for (const nav of ["goto", "reload", "goBack"]) {
+    const args = nav === "goto" ? [nav, `${BASE}/ui`, "--timeout", "99999999999"] : [nav, "--timeout", "99999999999"];
+    fails(`${nav} --timeout past the timer max`, args, /longer than a timer can run/);
+  }
+  works("an ordinary goto --timeout still works", ["goto", `${BASE}/ui`, "--timeout", "20000"], /http/);
 
   /* -------------------------------------------------------------- snapshot */
   // The old fallback called page.accessibility.snapshot(), which no longer
