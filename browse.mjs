@@ -2265,7 +2265,10 @@ function postTimeout(cmd, args) {
   // daemon happily kept waiting.
   const bare = cmd === "wait" && /^\d+$/.test(String(args[0] ?? "")) ? Number(args[0]) : NaN;
   const n = Math.max(i >= 0 ? Number(args[i + 1]) : NaN, bare) || (i >= 0 ? Number(args[i + 1]) : bare);
-  if (Number.isFinite(n) && n > 90_000) return n + 30_000;
+  // Capped at Node’s 32-bit timer max: a bogus duration (`wait 99999999999`) would
+  // otherwise make the CLIENT print a TimeoutOverflowWarning into the middle of
+  // the output before the daemon ever got to reject it.
+  if (Number.isFinite(n) && n > 90_000) return Math.min(n + 30_000, 2_147_483_647);
   // A remote `close` is the one command that cannot afford to time out. It
   // flushes the video, analyses dead air and encodes the mp4 on the far machine,
   // and only after the reply lands does the client copy anything down. Give up at
@@ -5080,6 +5083,15 @@ async function daemon() {
         // a navigation, or a plain pause. It is ALSO the assertion - a wait that
         // never resolves throws, which the client turns into a non-zero exit.
         let sel = null, gone = false, url = null, timeout = 10000, text = null, notText = null;
+        // Node's timers are 32-bit: past this, setTimeout FIRES IMMEDIATELY after
+        // printing a TimeoutOverflowWarning to stdout. `browse wait 99999999999`
+        // therefore returned in 0.4s and reported "waited 99999999999ms" - an
+        // exit-0 lie, and a stray node warning in the middle of agent output.
+        const MAX_MS = 2_147_483_647;
+        const durable = (flag, ms) => {
+          if (ms > MAX_MS) throw new Error(`wait: ${flag ? `${flag} ` : ""}${ms}ms is longer than a timer can run (max ${MAX_MS}, ~24 days) - check the digits`);
+          return ms;
+        };
         // Every flag's VALUE is required. `wait "#x" --text` used to drop the flag
         // and fall back to a plain visibility wait that PASSED - the assertion
         // command silently asserting nothing is the worst failure in the tool.
@@ -5097,7 +5109,7 @@ async function daemon() {
           else if (a === "--timeout") {
             const ms = Number(need(a, ++i));
             if (!Number.isFinite(ms) || ms <= 0) throw new Error(`wait: --timeout wants milliseconds, e.g. --timeout 30000`);
-            timeout = ms;
+            timeout = durable("--timeout", ms);
           }
           // Without this a retired spelling (--hidden, -t) would be taken as the
           // SELECTOR and fail ten seconds later as a mystery timeout.
@@ -5139,7 +5151,10 @@ async function daemon() {
           await page.waitForURL(pat, { timeout });
           return `ok - ${await brief()}`;
         }
-        if (sel != null && /^\d+$/.test(sel)) { await page.waitForTimeout(Number(sel)); return `waited ${sel}ms`; }
+        if (sel != null && /^\d+$/.test(sel)) {
+          await page.waitForTimeout(durable("", Number(sel)));
+          return `waited ${sel}ms`;
+        }
         if (!sel) throw new Error("wait: needs a selector, a number of ms, or --url <pattern>");
         try { await L(sel).first().waitFor({ state: gone ? "hidden" : "visible", timeout }); }
         catch (e) { throw await withSelectorHint(e, gone ? "" : sel); }
@@ -5373,11 +5388,49 @@ async function daemon() {
         // are immutable after creation, so tz/locale/cpu/net go through CDP -
         // re-creating the context would end the recording.
         if (!args.length) throw new Error("emulate: e.g. `browse emulate viewport=390x844 dark=1 net=3g`, or `browse emulate off`");
-        const applied = [];
-        for (const kv of args) {
+        // TWO passes. Applying as it walked meant `emulate viewport=390x844 cpu=abc`
+        // exited 1 with the viewport ALREADY 390 wide - the caller reads a failure
+        // and believes nothing happened, while the page (and everything recorded
+        // from here) is a phone. Validate every key first; touch the browser only
+        // once the whole line is known-good.
+        const plan = args.map((kv) => {
           const eq = kv.indexOf("=");
           const k = (eq < 0 ? kv : kv.slice(0, eq)).toLowerCase();
           const v = eq < 0 ? "" : kv.slice(eq + 1);
+          if (k === "off" || k === "dark" || k === "locale") return { k, v };
+          if (k === "geo") {
+            const [lat, lon] = v.split(",").map(Number);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error(`emulate geo: expected lat,lon - got '${v}'`);
+            return { k, v, lat, lon };
+          }
+          if (k === "viewport") {
+            const m = /^(\d+)\s*[x×]\s*(\d+)$/.exec(v);
+            if (!m) throw new Error(`emulate viewport: expected WxH - got '${v}'`);
+            return { k, v, w: +m[1], h: +m[2] };
+          }
+          if (k === "cpu") {
+            const rate = Number(v);
+            if (!Number.isFinite(rate) || rate < 1) throw new Error(`emulate cpu: expected a slowdown factor >= 1 - got '${v}'`);
+            return { k, v, rate };
+          }
+          if (k === "tz") {
+            // Checked HERE rather than left to CDP, which answers a bad id with a
+            // raw "Protocol error (Emulation.setTimezoneOverride): Invalid timezone id".
+            try { new Intl.DateTimeFormat("en", { timeZone: v }); }
+            catch { throw new Error(`emulate tz: '${v}' is not an IANA timezone - e.g. Europe/Istanbul, America/New_York, UTC`); }
+            return { k, v };
+          }
+          if (k === "net") {
+            const key = v.toLowerCase().replace(/[^a-z0-9]/g, "");
+            if (key !== "off" && key !== "none" && !NET_CONDITIONS[key])
+              throw new Error(`emulate net: expected ${Object.keys(NET_CONDITIONS).join("|")}|off - got '${v}'`);
+            return { k, v, key };
+          }
+          throw new Error(`emulate: unknown key '${k}' - try viewport= dark= geo= tz= locale= cpu= net= or off`);
+        });
+        const applied = [];
+        for (const step of plan) {
+          const { k, v } = step;
           const on = /^(1|true|on|yes|dark)$/i.test(v);
           if (k === "off") {
             await page.emulateMedia({ colorScheme: null });
@@ -5399,23 +5452,21 @@ async function daemon() {
             await page.emulateMedia({ colorScheme: scheme });
             applied.push(`dark=${scheme === "dark" ? 1 : 0}`);
           } else if (k === "geo") {
-            const [lat, lon] = v.split(",").map(Number);
-            if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error(`emulate geo: expected lat,lon - got '${v}'`);
+            const { lat, lon } = step;
             await context.grantPermissions(["geolocation"]);
             await context.setGeolocation({ latitude: lat, longitude: lon });
             applied.push(`geo=${lat},${lon}`);
           } else if (k === "viewport") {
-            const m = /^(\d+)\s*[x×]\s*(\d+)$/.exec(v);
-            if (!m) throw new Error(`emulate viewport: expected WxH - got '${v}'`);
-            await page.setViewportSize({ width: +m[1], height: +m[2] });
-            applied.push(`viewport=${m[1]}x${m[2]}`);
+            const { w, h } = step;
+            await page.setViewportSize({ width: w, height: h });
+            applied.push(`viewport=${w}x${h}`);
             // recordVideo.size is FROZEN at context creation, and Playwright pads
             // each frame from the top-left, so a smaller page records with grey
             // dead space to the right/bottom rather than centre-frame. Nothing
             // inside the page can move it; say so, and point at the one thing
             // that records phone-shaped for real.
-            if (+m[1] < VIEWPORT.width || +m[2] < VIEWPORT.height) {
-              applied.push(`(the video frame stays ${VIEWPORT.width}x${VIEWPORT.height} - for a phone-shaped RECORDING, close and respawn with --viewport ${m[1]}x${m[2]})`);
+            if (w < VIEWPORT.width || h < VIEWPORT.height) {
+              applied.push(`(the video frame stays ${VIEWPORT.width}x${VIEWPORT.height} - for a phone-shaped RECORDING, close and respawn with --viewport ${w}x${h})`);
             }
           } else if (k === "tz") {
             await (await emuCdp()).send("Emulation.setTimezoneOverride", { timezoneId: v });
@@ -5429,12 +5480,11 @@ async function daemon() {
             // "locale=tr-TR" would read as a lie.
             applied.push("(Intl only - navigator.language(s) and Accept-Language keep the browser default, so an app that branches on navigator.language will NOT switch)");
           } else if (k === "cpu") {
-            const rate = Number(v);
-            if (!Number.isFinite(rate) || rate < 1) throw new Error(`emulate cpu: expected a slowdown factor >= 1 - got '${v}'`);
+            const { rate } = step;
             await (await emuCdp()).send("Emulation.setCPUThrottlingRate", { rate });
             applied.push(`cpu=${rate}x slower`);
           } else if (k === "net") {
-            const key = v.toLowerCase().replace(/[^a-z0-9]/g, "");
+            const { key } = step;
             const s = await emuCdp();
             try { await s.send("Network.enable"); } catch { /* already on */ }
             if (key === "off" || key === "none") {
@@ -5442,15 +5492,12 @@ async function daemon() {
               applied.push("net=off");
             } else {
               const c = NET_CONDITIONS[key];
-              if (!c) throw new Error(`emulate net: expected ${Object.keys(NET_CONDITIONS).join("|")}|off - got '${v}'`);
               await s.send("Network.emulateNetworkConditions", {
                 offline: !!c.offline, latency: c.latency,
                 downloadThroughput: c.download, uploadThroughput: c.upload,
               });
               applied.push(`net=${key}`);
             }
-          } else {
-            throw new Error(`emulate: unknown key '${k}' - try viewport= dark= geo= tz= locale= cpu= net= or off`);
           }
         }
         return `emulate: ${applied.join(" · ")}`;

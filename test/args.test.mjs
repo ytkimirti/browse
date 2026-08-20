@@ -206,6 +206,53 @@ try {
   works("--save with a real path", ["state", "--save", STATE_FILE], /saved cookies/);
   check("...and the state file is on disk", existsSync(STATE_FILE));
 
+  /* ----------------------------------------------------------- emulate */
+  // The worst kind of partial success: `emulate` applied each key as it walked
+  // the line, so a bad key LATER on exited 1 with the earlier ones already live.
+  // The caller reads a failure and believes nothing happened — while the page,
+  // and everything recorded from here, is a phone in dark mode.
+  console.log("\nemulate changes nothing unless the whole line is valid");
+  const width = () => Number(read("innerWidth"));
+  const dark = () => read("matchMedia('(prefers-color-scheme: dark)').matches");
+  browse("emulate", "off");
+  check("the page starts at the recording width", width() === 1280, String(width()));
+  fails("a bad value after a good key", ["emulate", "viewport=390x844", "cpu=abc"],
+    /emulate cpu: expected a slowdown factor >= 1/);
+  check("...and the viewport never moved", width() === 1280, String(width()));
+  fails("an unknown key after a good one", ["emulate", "dark=1", "bogus=2"], /unknown key 'bogus'/);
+  check("...and the colour scheme never moved", dark() === "false", dark());
+  // A bad IANA id used to surface as a raw CDP "Protocol error
+  // (Emulation.setTimezoneOverride): Invalid timezone id".
+  fails("a timezone that does not exist", ["emulate", "tz=Not/AZone"], /is not an IANA timezone/);
+  // …and the whole documented line still applies, in one go.
+  works("a fully valid line applies", ["emulate", "viewport=390x844", "dark=1", "net=3g", "tz=Europe/Istanbul", "cpu=2"], /viewport=390x844/);
+  check("...the viewport moved", width() === 390, String(width()));
+  check("...the colour scheme moved", dark() === "true", dark());
+  check("...the timezone moved", read("Intl.DateTimeFormat().resolvedOptions().timeZone") === "Europe/Istanbul",
+    read("Intl.DateTimeFormat().resolvedOptions().timeZone"));
+  works("off puts it all back", ["emulate", "off"], /back to default/);
+  check("...width back", width() === 1280, String(width()));
+  check("...scheme back", dark() === "false", dark());
+
+  /* -------------------------------------------------------------- wait */
+  // Node's timers are 32-bit. Past the max, setTimeout fires IMMEDIATELY (after
+  // printing a TimeoutOverflowWarning), so `wait 99999999999` returned in under a
+  // second and reported "waited 99999999999ms" at exit 0 — a wait that asserted
+  // nothing, in the one command whose whole job is to assert.
+  console.log("\nwait refuses a duration no timer can run");
+  const huge = browse("wait", "99999999999");
+  check("a bare duration past the timer max fails", huge.code === 1 && /longer than a timer can run/.test(huge.err),
+    `exit ${huge.code} · ${huge.err || huge.out}`);
+  // The warning is printed by the CLIENT's own request timer, before the daemon
+  // is ever asked — so capping the daemon alone would still leak it into output.
+  check("...with no node warning in the output", !/TimeoutOverflowWarning/.test(huge.err + huge.out), huge.err);
+  const hugeFlag = browse("wait", "#btn", "--timeout", "99999999999");
+  check("--timeout past the timer max fails", hugeFlag.code === 1 && /longer than a timer can run/.test(hugeFlag.err),
+    `exit ${hugeFlag.code} · ${hugeFlag.err || hugeFlag.out}`);
+  check("...with no node warning either", !/TimeoutOverflowWarning/.test(hugeFlag.err + hugeFlag.out), hugeFlag.err);
+  works("an ordinary pause still works", ["wait", "300"], /waited 300ms/);
+  works("an ordinary --timeout still works", ["wait", "#btn", "--timeout", "2000"], /visible: #btn/);
+
   /* -------------------------------------------------------------- snapshot */
   // The old fallback called page.accessibility.snapshot(), which no longer
   // exists on the pinned Playwright — so every REAL snapshot failure surfaced as
