@@ -83,8 +83,9 @@ if [[ "$CMD" == "box" ]]; then
   # those are simply not its business.)
   if [[ -n "$REMOTE_SEEN" || -n "${BROWSE_REMOTE:-}" ]]; then
     _box_args=("${@:CMD_AT+2}")   # what was written AFTER the word `box`
+    _box_hint="browse box${_box_args[*]:+ ${_box_args[*]}}"
     echo "browse: 'box' makes the machines --remote points AT, so it takes no --remote of its own." >&2
-    echo "browse: Run 'browse box ${_box_args[*]}' plain; use --remote <box-id>@… for the browse commands that drive it." >&2
+    echo "browse: Run '$_box_hint' plain; use --remote <box-id>@… for the browse commands that drive it." >&2
     exit 1
   fi
   shift "$((CMD_AT + 1))"
