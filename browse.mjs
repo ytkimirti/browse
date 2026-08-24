@@ -412,6 +412,18 @@ const VIEWPORT = (() => {
     height: Number.isFinite(h) && h > 0 ? h : base.height,
   };
 })();
+// Locale the browser reports. Unset, chromium takes the HOST's, which makes two
+// problems: the same page records different date and number formatting depending
+// on which machine drove it, and a host with only a POSIX locale (a bare Linux
+// server or an Upstash Box: LANG=C.UTF-8) yields the non-BCP-47
+// `navigator.language = "en-US@posix"` - which every library that feeds it to
+// Intl throws on (`new Intl.Locale("en-US@posix")` is a RangeError, enough to
+// make a react-query devtools panel log one on every page load of a recorded
+// app). Passed as launch ARGS rather than playwright's `locale` context option
+// on purpose: that option is implemented as Emulation.setLocaleOverride on
+// playwright's own CDP session, and chromium then refuses `browse emulate
+// locale=` from ours with "Another locale override is already in effect".
+const LOCALE = process.env.BROWSE_LOCALE || "en-US";
 const HEADFUL = process.env.BROWSE_HEADFUL === "1";
 // Which browser the daemon drives. `camoufox` is a Firefox build with
 // fingerprint patches applied in C++ — it clears Cloudflare's JS managed
@@ -1421,6 +1433,9 @@ Env-only (set once in a shell profile — no flag):
                            derived from the session name, and this overrides that)
   BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
   BROWSE_WIDTH / _HEIGHT   viewport one dimension at a time (BROWSE_VIEWPORT sets both)
+  BROWSE_LOCALE            locale chromium reports in navigator.language and Accept-Language
+                           (default en-US, so a recording formats dates and numbers the same on
+                           every machine). camoufox keeps its own fingerprint locale
   BROWSE_CURSOR_SCALE      draw the pointer N× macOS size for a video (1, max 4)
   BROWSE_IDLE_MODE         auto-detected dead air: cut (default) | speed | keep
   BROWSE_IDLE_SPEED        fast-forward factor for =speed, and default N for 'browse speed' (10)
@@ -3592,7 +3607,8 @@ async function daemon() {
     const camou = eng === "camoufox";
     const launcher = camou ? firefoxFor() : chromium;
     const args = camou ? (camouOpts.args || [])
-      : (process.platform === "linux" ? ["--no-sandbox", "--disable-dev-shm-usage"] : []);
+      : [`--lang=${LOCALE}`, `--accept-lang=${LOCALE}`,
+         ...(process.platform === "linux" ? ["--no-sandbox", "--disable-dev-shm-usage"] : [])];
     const extra = camou
       ? { executablePath: camouOpts.executable_path,
           env: camouOpts.env,
