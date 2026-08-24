@@ -176,6 +176,33 @@ const STALLED = `<!doctype html><meta charset=utf8><title>stalled</title>
 <img src="/never-answers.png">
 <script>setTimeout(() => { document.getElementById('box').textContent = 'arrived while loading'; }, 600);</script>`;
 
+// The Next-dev shape that renders server-side and never comes alive: a document
+// that references /_next/ assets, ~1KB of markup with no TEXT in it (a spinner),
+// and nothing that mounts a framework. Every observe command on it comes back
+// empty, and the only honest diagnosis is "it never hydrated", which is what a
+// real session spent ten minutes not being told.
+const UNHYDRATED = `<!doctype html><meta charset=utf8><title>unhydrated</title>
+<script src="/_next/static/chunks/main.js" defer></script>
+<style>.spin{width:32px;height:32px;border:3px solid #ddd;border-top-color:#333;border-radius:50%}
+.shell{padding:40px}.bar{height:12px;background:#eee;margin:6px 0;border-radius:4px}</style>
+<div class=shell><div class=spin></div>
+<div class=bar></div><div class=bar></div><div class=bar></div><div class=bar></div>
+<div class=bar></div><div class=bar></div><div class=bar></div><div class=bar></div>
+<div class=bar></div><div class=bar></div><div class=bar></div><div class=bar></div></div>`;
+
+// A copy button that only reaches its "copied" state if navigator.clipboard
+// resolves, which headless denies. Without a clipboard stub the badge stays
+// "idle" and the state cannot be photographed at all.
+const COPY = `<!doctype html><meta charset=utf8><title>copy</title>
+<button id=copy>Copy prompt</button><div id=badge>idle</div>
+<script>
+document.getElementById('copy').addEventListener('click', async () => {
+  const b = document.getElementById('badge');
+  try { await navigator.clipboard.writeText('the migration prompt'); b.textContent = 'copied'; }
+  catch (e) { b.textContent = 'denied: ' + e.name; }
+});
+</script>`;
+
 // Fills the viewport with one colour and pins a different one to the far
 // corner, so a single pixel of a recorded frame says whether the video really
 // covers the viewport or only its magnified top-left corner.
@@ -202,11 +229,14 @@ http.createServer((req, res) => {
   if (url === "/api/user") { hits.user++; return json(res, { id: 99, name: "real-user" }); }
   if (url === "/api/config") { hits.config++; return json(res, { env: "prod", debug: false }); }
   if (url === "/api/other") { hits.other++; return json(res, { from: "server" }); }
-  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/stalled" || url === "/auth/sign-in" || url === "/ambig") {
+  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/stalled" || url === "/auth/sign-in" || url === "/ambig" || url === "/unhydrated" || url === "/copy") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/stalled": STALLED, "/auth/sign-in": SIGNIN, "/ambig": AMBIG }[url];
+    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/stalled": STALLED, "/auth/sign-in": SIGNIN, "/ambig": AMBIG, "/unhydrated": UNHYDRATED, "/copy": COPY }[url];
     return res.end(body);
   }
+  // The dev chunk the unhydrated page asks for. 404, like a Next dev server
+  // refusing a cross-origin host: the page is left exactly as it was served.
+  if (url.startsWith("/_next/")) { res.writeHead(404).end("blocked"); return; }
   // Answers nothing, ever: holds the page's 'load' event open.
   if (url === "/never-answers.png") { res.writeHead(200, { "content-type": "image/png" }); return; }
   if (url === "/lab-styles.css") {

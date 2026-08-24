@@ -132,6 +132,14 @@ try {
   const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
   check("/health carries the session dir and its home",
     health.out === OUT && typeof health.home === "string" && health.home.length > 0, JSON.stringify(health));
+  // The build id is what makes a stale remote visible: a box restored from an
+  // image runs the image's browse, accepts flags this client invented since, and
+  // ignores them. The client can only see that if the daemon says which code it
+  // is, and it has to be the SAME id `browse version` prints here, or the
+  // comparison is between two different things.
+  const mine = (/\(build (\w+)\)/.exec(browse("version").out) || [])[1];
+  check("/health names the daemon's build, and it matches this client's",
+    !!health.build && health.build === mine, `${health.build} vs ${mine}`);
 
   // The auto-shot from `open` is the file a remote client would mirror first.
   const shot = readFileSync(join(OUT, shotRel));
@@ -281,6 +289,11 @@ if (!REMOTE_HOST) {
   try {
     let r = browseRemote("open", "https://example.com");
     check("open on the remote succeeds", r.code === 0 && /example/i.test(r.out), `${r.code} ${r.out}${r.err}`);
+    // The build note is for a remote running OTHER code. A remote installed from
+    // this commit must stay silent: a warning that cries wolf on every session
+    // is one nobody reads on the session where it is true.
+    check("…with no build-skew note when the remote runs this same build",
+      !/different browse build/.test(r.err), r.err);
     const remoteShot = (/\[(shots\/[^\]]+\.png)\]/.exec(r.out) || [])[1];
     check("…and names the step screenshot", !!remoteShot, r.out);
 

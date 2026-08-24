@@ -17,7 +17,7 @@
 // the API was actually asked to delete.
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, openSync, ftruncateSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -214,6 +214,52 @@ try {
   check("a BROWSE_REMOTE that is not a box host is ignored",
     d9.code === 0 && (await deletedIds()) === "",
     `exit ${d9.code} · deleted ${await deletedIds()} · ${d9.err}`);
+
+  /* ------------------------------------------------------------------ push */
+  // An image is as old as the day it was taken, and a box restored from one runs
+  // that code while the CLIENT here parses today's flags, which is how a session
+  // spent an afternoon re-reporting bugs that were already fixed. `up` refreshes
+  // the checkout and says so when the two builds still differ.
+  console.log("\nup keeps the box's browse current");
+  await reset();
+  const fresh = box(["up"]);
+  const execLog = (await log()).execs.join("\n");
+  check("up pulls the box's browse up to date before reporting a version",
+    /git -C \/workspace\/home\/browse fetch/.test(execLog) && /reset -q --hard FETCH_HEAD/.test(execLog), execLog);
+  check("...and says so when the build still differs from this checkout",
+    /build deadbeef, this checkout is \w{8}/.test(fresh.err), fresh.err);
+
+  console.log("\npush");
+  await reset();
+  box(["up"]);
+  const SRC = mkdtempSync(join(tmpdir(), "browse-push-"));
+  mkdirSync(join(SRC, "src"), { recursive: true });
+  mkdirSync(join(SRC, ".next", "cache"), { recursive: true });
+  writeFileSync(join(SRC, "src", "app.ts"), "export const a = 1\n");
+  writeFileSync(join(SRC, ".next", "cache", "junk.bin"), "x".repeat(1024));
+  const dir = box(["push", "fakebox-1", SRC]);
+  check("a directory push works", dir.code === 0 && /pushed 1 file/.test(dir.err), `exit ${dir.code} · ${dir.err}`);
+  const sent = (await log()).uploads[0];
+  check("...carrying the source", sent.paths.some((p) => p.endsWith("/src/app.ts")), JSON.stringify(sent.paths));
+  check("...and NOT the build output that made one push a 400", !sent.paths.some((p) => p.includes(".next")),
+    JSON.stringify(sent.paths));
+
+  // 101MB, sparse: nothing is written and nothing is read, because the refusal
+  // has to happen off the file SIZE, before the tree is pulled into memory.
+  const BIG = join(SRC, "huge.bin");
+  const fd = openSync(BIG, "w");
+  ftruncateSync(fd, 101 * 1024 * 1024);
+  closeSync(fd);
+  await reset();
+  box(["up"]);
+  const tooBig = box(["push", "fakebox-1", BIG]);
+  check("a file over the API's cap is refused here, exit 1", tooBig.code === 1 && /caps one file at 100.0MB/.test(tooBig.err),
+    `exit ${tooBig.code} · ${tooBig.err}`);
+  check("...with the tar-and-unpack recipe, not just the limit",
+    /tar --exclude=node_modules.*\n.*browse box push fakebox-1 \/tmp\/push.tgz/.test(tooBig.err), tooBig.err);
+  check("...and nothing was uploaded at all", (await log()).uploads.length === 0,
+    JSON.stringify((await log()).uploads));
+  rmSync(SRC, { recursive: true, force: true });
 
   /* ---------------------------------------------------------------- errors */
   console.log("\nerrors");

@@ -802,6 +802,89 @@ try {
     }
   }
 
+  /* ---------------------------------------------- the page that never woke */
+  // A dev server reached over 127.0.0.1: the document arrives, nothing hydrates
+  // it, and every observe command comes back empty with no reason given. One
+  // recorded session spent ten minutes on this. The hint has to be reachable
+  // from BOTH dead ends: an empty read, and a selector that never appears.
+  console.log("\nthe unhydrated page");
+  {
+    browse("goto", `${BASE}/unhydrated`);
+    const t = browse("text");
+    check("text on an unhydrated page still exits 0", t.code === 0, `exit ${t.code} · ${t.err}`);
+    check("...and names the cause instead of guessing mid-load",
+      /never hydrated|nothing hydrated it/.test(t.out + t.err), `${t.out}${t.err}`);
+    check("...and points at localhost, with the url to re-open",
+      /browse goto http:\/\/localhost:/.test(t.out + t.err), `${t.out}${t.err}`);
+    const w = browse("wait", "#never-arrives", "--timeout", "2000");
+    check("a wait that times out there fails, exit 1", w.code === 1, `exit ${w.code} · ${w.out}`);
+    check("...and carries the same diagnosis", /nothing hydrated it/.test(w.err), w.err);
+    // The opposite case is the one that matters most: a page that DID hydrate
+    // must never be accused of this.
+    browse("goto", `${BASE}/ui`);
+    const ok = browse("text", "#clicks");
+    check("a live page is never diagnosed as unhydrated", !/hydrated it/.test(ok.out + ok.err), `${ok.out}${ok.err}`);
+  }
+
+  /* ------------------------------------------------------- screenshot --pad */
+  // An element shot clips to the border box, so an overflowing caption came back
+  // sliced with nothing saying so, and the way out was to guess an ancestor.
+  console.log("\nscreenshot --pad");
+  {
+    browse("goto", `${BASE}/ui`);
+    const dims = (f) => {
+      const b = readFileSync(join(OUT, f));
+      return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+    };
+    const bare = browse("screenshot", "pad-none.png", "--sel", "#btn");
+    check("an element shot works", bare.code === 0 && existsSync(join(OUT, "pad-none.png")),
+      `exit ${bare.code} · ${bare.err || bare.out}`);
+    const padded = browse("screenshot", "pad-24.png", "--sel", "#btn", "--pad", "24");
+    check("...and --pad works too", padded.code === 0 && /\+ 24px/.test(padded.out),
+      `exit ${padded.code} · ${padded.err || padded.out}`);
+    const a = dims("pad-none.png"), b = dims("pad-24.png");
+    check("...and the padded png really is bigger on both axes",
+      b.w > a.w && b.h > a.h, `${a.w}x${a.h} vs ${b.w}x${b.h}`);
+    const noSel = browse("screenshot", "pad-nosel.png", "--pad", "24");
+    check("--pad without --sel fails rather than shooting the page",
+      noSel.code === 1 && /--sel/.test(noSel.err) && !existsSync(join(OUT, "pad-nosel.png")),
+      `exit ${noSel.code} · ${noSel.err}`);
+    const bad = browse("screenshot", "pad-bad.png", "--sel", "#btn", "--pad", "lots");
+    check("--pad with a non-number fails", bad.code === 1 && /whole pixels/.test(bad.err),
+      `exit ${bad.code} · ${bad.err}`);
+    const withFull = browse("screenshot", "pad-full.png", "--sel", "#btn", "--pad", "8", "--full");
+    check("--pad with --full is refused, not silently resolved",
+      withFull.code === 1 && /pick one/.test(withFull.err), `exit ${withFull.code} · ${withFull.err}`);
+  }
+
+  /* ------------------------------------------------- init --stub clipboard */
+  // Headless denies navigator.clipboard, so a "Copy" button never reaches its
+  // "Copied!" state and that state cannot be photographed at all.
+  console.log("\ninit --stub clipboard");
+  {
+    browse("goto", `${BASE}/copy`);
+    browse("click", "#copy");
+    check("without the stub the page reports the denial",
+      /denied/.test(read("document.getElementById('badge').textContent")),
+      read("document.getElementById('badge').textContent"));
+    const bad = browse("init", "--stub", "notathing");
+    check("an unknown stub fails and lists the real ones",
+      bad.code === 1 && /available: clipboard/.test(bad.err), `exit ${bad.code} · ${bad.err}`);
+    const reg = browse("init", "--stub", "clipboard");
+    check("the clipboard stub registers", reg.code === 0, `exit ${reg.code} · ${reg.err}`);
+    const list = browse("init");
+    check("...labelled, so a faked 'Copied!' is legible as one",
+      /stub:clipboard/.test(list.out), list.out);
+    browse("reload");
+    browse("click", "#copy");
+    check("...and the copied state is now reachable",
+      /copied/.test(read("document.getElementById('badge').textContent")),
+      read("document.getElementById('badge').textContent"));
+    check("...with the copied text kept for the next assertion",
+      /the migration prompt/.test(read("window.__clipboard")), read("window.__clipboard"));
+    browse("init", "--clear");
+  }
+
   /* ----------------------------------------------------------------- close */
   console.log("\nclose");
   const closed = browse("close", 300000);

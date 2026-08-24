@@ -14,7 +14,7 @@
 import http from "node:http";
 
 const KEY = "box_faketestkey";
-let boxes = [], created = [], deleted = [], seq = 0;
+let boxes = [], created = [], deleted = [], execs = [], uploads = [], seq = 0;
 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
@@ -29,10 +29,10 @@ const server = http.createServer(async (req, res) => {
 
   if (url === "/__reset") {
     const b = await body();
-    boxes = b.boxes || []; created = []; deleted = []; seq = 0;
+    boxes = b.boxes || []; created = []; deleted = []; execs = []; uploads = []; seq = 0;
     return send(200, { ok: true });
   }
-  if (url === "/__log") return send(200, { boxes, created, deleted });
+  if (url === "/__log") return send(200, { boxes, created, deleted, execs, uploads });
 
   if (req.headers["x-box-api-key"] !== KEY) return send(401, { error: "bad key" });
 
@@ -53,9 +53,25 @@ const server = http.createServer(async (req, res) => {
   const exec = /^\/v2\/box\/([^/]+)\/exec$/.exec(url);
   if (req.method === "POST" && exec) {
     if (!boxes.some((b) => b.id === exec[1])) return send(404, { error: "Box has been deleted" });
+    execs.push(String(((await body()).command || []).join(" ")));
     // What `up`'s readiness probe asks for: a version line, then a `df -Pm` line
     // — MEGABYTES, which is what the -m asks for and what the CLI divides down.
-    return send(200, { exit_code: 0, output: "browse 0.1.0\noverlay 10240 979 9261 10% /\n" });
+    // The build in the version line is deliberately NOT this checkout's: an image
+    // carrying older code is the case `up` has to notice out loud.
+    return send(200, { exit_code: 0, output: "browse 0.1.0 (build deadbeef)\noverlay 10240 979 9261 10% /\n" });
+  }
+  // Uploads: record the destination paths, which is what the push cases assert
+  // on (which files were sent, and that an oversized one never got here at all).
+  const upload = /^\/v2\/box\/([^/]+)\/files\/upload$/.exec(url);
+  if (req.method === "POST" && upload) {
+    if (!boxes.some((b) => b.id === upload[1])) return send(404, { error: "Box has been deleted" });
+    let raw = "", n = 0;
+    for await (const c of req) { n += c.length; raw += c.toString("latin1"); }
+    // The destination of each part, out of the multipart body: one `paths` field
+    // per file, in order, each its own part with an empty header block.
+    const paths = [...raw.matchAll(/name="paths"\r\n\r\n([^\r]*)\r\n/g)].map((m) => m[1]);
+    uploads.push({ box: upload[1], bytes: n, paths });
+    return send(200, { ok: true });
   }
   const one = /^\/v2\/box\/([^/]+)$/.exec(url);
   if (req.method === "DELETE" && one) {

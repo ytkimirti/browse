@@ -37,7 +37,9 @@ import { readFile, writeFile, mkdir, readdir, stat, chmod, rename } from "node:f
 import { createWriteStream, createReadStream } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { join, basename, resolve as resolvePath } from "node:path";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { join, basename, dirname, resolve as resolvePath } from "node:path";
 
 const BASE = process.env.UPSTASH_BOX_URL || "https://us-east-1.box.upstash.com";
 const REPO = process.env.BROWSE_REPO || "https://github.com/ytkimirti/browse";
@@ -57,6 +59,16 @@ const TTL_DEFAULT = 28800;
  *  file, which prints and sets the exit status. */
 class BoxError extends Error {}
 const die = (msg) => { throw new BoxError(msg); };
+/** The build id of the browse next to this script: the same 8 hex of the sha of
+ *  browse.mjs that `browse version` prints, computed here so `up` can compare a
+ *  box against the checkout it was launched from. "" when it cannot be read;
+ *  a comparison that cannot be made is silent rather than wrong. */
+async function localBuild() {
+  try {
+    const self = join(dirname(fileURLToPath(import.meta.url)), "..", "browse.mjs");
+    return createHash("sha256").update(await readFile(self)).digest("hex").slice(0, 8);
+  } catch { return ""; }
+}
 const say = (msg) => process.stderr.write(`${msg}\n`); // stdout stays machine-readable
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Cut long API/error bodies, and SAY that they were cut — a silently clipped
@@ -192,45 +204,96 @@ async function runScript(id, script, label) {
 
 /* ── file transfer ────────────────────────────────────────────────────────── */
 
+// Directories that are never the thing you meant to copy to a box: a VCS
+// history, and build output that the box regenerates from the source next to it.
+// `.next` is here because it is what turned one `push <worktree>` into a
+// multi-hundred-MB form that the API rejected as malformed - the size was the
+// real reason, and nothing said so.
+const NEVER_PUSH = new Set([".git", "node_modules", ".next"]);
+// What the Box upload API accepts in one request. Enforced HERE because the
+// server's answer to a request over it is `400 {"error":"Invalid multipart
+// form"}` - which reads as a bug in browse, arrives only after the whole tree
+// has been read into memory and uploaded, and says nothing about what to do.
+const PUSH_LIMIT = 100 * 1024 * 1024;
+const mb = (n) => `${(n / 1024 / 1024).toFixed(1)}MB`;
+
 async function filesUnder(path) {
   const st = await stat(path); // stat, not lstat: a symlinked target is what we want
-  if (!st.isDirectory()) return [{ abs: resolvePath(path), rel: basename(path) }];
+  if (!st.isDirectory()) return [{ abs: resolvePath(path), rel: basename(path), size: st.size }];
   const out = [];
   const walk = async (dir, prefix) => {
     for (const e of await readdir(dir, { withFileTypes: true })) {
-      if (e.name === ".git" || e.name === "node_modules") continue; // never worth uploading
+      if (NEVER_PUSH.has(e.name)) continue; // never worth uploading
       const abs = join(dir, e.name), rel = `${prefix}/${e.name}`;
-      // isDirectory() is false for a SYMLINK to a directory, which then got
-      // queued as a file and blew up on readFile with a raw EISDIR. Resolve the
-      // link to decide; a dangling one is skipped rather than fatal.
-      let dir_;
-      try { dir_ = (e.isSymbolicLink() ? await stat(abs) : e).isDirectory(); }
+      // stat, not the dirent: isDirectory() is false for a SYMLINK to a
+      // directory (which then got queued as a file and blew up on readFile with
+      // a raw EISDIR), and the size is needed to measure the request before it
+      // is built. A dangling link is skipped rather than fatal.
+      let st_;
+      try { st_ = await stat(abs); }
       catch { say(`  skipping ${rel} (broken symlink)`); continue; }
-      if (dir_) await walk(abs, rel);
-      else out.push({ abs, rel });
+      if (st_.isDirectory()) await walk(abs, rel);
+      else out.push({ abs, rel, size: st_.size });
     }
   };
   await walk(resolvePath(path), basename(path));
   return out;
 }
 
+/** The way to move something bigger than one request: tar it, push the archive,
+ *  unpack it there. Printed with the caller's real arguments so it can be run as
+ *  written. */
+const tarRecipe = (id, paths, dest) => {
+  // `-C <parent> <name>` per path, so the archive holds `<name>/…` and unpacks to
+  // <dest>/<name>, the same layout `push` would have produced. Works for a file
+  // and a directory alike, which a `-C <path> .` form does not.
+  const entries = paths.map((p) => {
+    const abs = resolvePath(p);
+    return `-C ${JSON.stringify(join(abs, ".."))} ${JSON.stringify(basename(abs))}`;
+  }).join(" ");
+  return `  tar --exclude=node_modules --exclude=.next --exclude=.git -czf /tmp/push.tgz ${entries}\n` +
+    `  browse box push ${id} /tmp/push.tgz --to ${dest}\n` +
+    `  browse box exec ${id} 'tar -xzf ${dest}/push.tgz -C ${dest}'`;
+};
+
 async function push(id, paths, dest) {
+  // Walk and MEASURE first: everything below reads each file into memory, and a
+  // tree that cannot land is better refused in a second than uploaded for eight
+  // and rejected as a malformed form.
+  const files = [];
+  for (const p of paths) files.push(...await filesUnder(p).catch(() => die(`no such file: ${p}`)));
+  if (!files.length) die("nothing to push");
+  const total = files.reduce((n, f) => n + (f.size || 0), 0);
+  const big = files.find((f) => (f.size || 0) > PUSH_LIMIT);
+  if (big) {
+    die(`${big.rel} is ${mb(big.size)} - the box upload API caps one file at ${mb(PUSH_LIMIT)}.\n` +
+        `     Split it, or send it compressed:\n${tarRecipe(id, paths, dest)}`);
+  }
+  if (total > PUSH_LIMIT) {
+    die(`${files.length} files, ${mb(total)} - the box upload API caps one request at ${mb(PUSH_LIMIT)}.\n` +
+        `     ${NEVER_PUSH.size} directory names are skipped already (${[...NEVER_PUSH].join(", ")}); the rest is real payload.\n` +
+        `     Tar the tree and push the archive instead:\n${tarRecipe(id, paths, dest)}`);
+  }
   const form = new FormData();
   let n = 0;
-  for (const p of paths) {
-    for (const f of await filesUnder(p).catch(() => die(`no such file: ${p}`))) {
-      const body = await readFile(f.abs).catch((e) => die(`cannot read ${f.abs}: ${e.code || e.message}`));
-      form.append("paths", `${dest}/${f.rel}`);
-      form.append("files", new Blob([body]), f.rel);
-      n++;
-    }
+  for (const f of files) {
+    const body = await readFile(f.abs).catch((e) => die(`cannot read ${f.abs}: ${e.code || e.message}`));
+    form.append("paths", `${dest}/${f.rel}`);
+    form.append("files", new Blob([body]), f.rel);
+    n++;
   }
-  if (!n) die("nothing to push");
   const res = await fetch(`${BASE}/v2/box/${id}/files/upload`, {
     method: "POST", headers: { "X-Box-Api-Key": await apiKey() }, body: form,
     signal: AbortSignal.timeout(600000),
   }).catch((e) => die(`upload: ${e.message}`));
-  if (!res.ok) die(`upload → ${res.status} ${(await res.text()).slice(0, 200)}`);
+  // The API rejects an oversized or otherwise unacceptable form with a message
+  // about the FORM, not about the files in it. Keep its words, and add what this
+  // side knows: how much was sent, and the way to send more than that.
+  if (!res.ok) {
+    die(`upload → ${res.status} ${(await res.text()).slice(0, 200)}\n` +
+        `     (${n} file${n > 1 ? "s" : ""}, ${mb(total)} in one request)` +
+        `${res.status === 400 || res.status === 413 ? `\n     If it is the size, tar the tree and push the archive:\n${tarRecipe(id, paths, dest)}` : ""}`);
+  }
   say(`pushed ${n} file${n > 1 ? "s" : ""} to ${dest}/ on ${id}`);
   // Uploads arrive without their exec bit, which is silent until something tries
   // to run one and gets "Permission denied" with no other clue.
@@ -343,8 +406,9 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
 
   up [--ttl <sec>] [--size medium|small] [--name <n>] [--snapshot <id>]
                               make a box from the warm image and print its --remote host.
-                              ~13s, nothing to install. Builds the image first if there
-                              isn't one yet (~6 min, once). The box also deletes itself
+                              ~13s, nothing to install, and the browse on it is pulled up to date
+                              first (an image is as old as the day it was taken). Builds the image
+                              first if there isn't one yet (~6 min, once). The box also deletes itself
                               after --ttl (default ${TTL_DEFAULT}s) if you never call down.
                               --size picks the DISK and nothing else (same CPU and RAM
                               either way): medium is 10GB, small is 5GB — of which the warm
@@ -368,7 +432,9 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
                               >/tmp/x.log 2>&1 &'. Note a 'pkill -f <pattern>' in here matches
                               exec's OWN shell (the pattern is in its command line) and kills
                               the command that is doing the killing — go by port or pid file
-  push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}, skips .git/node_modules)
+  push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}; skips .git, node_modules
+                              and .next). ONE request is capped at 100 MB: over that it refuses here,
+                              before the upload, and prints the tar-and-unpack recipe instead
   pull <box> <remote> [local]       copy one file out
   url <box> <port>            public https URL for a port, to hand someone who wants to click
                               around the app themselves. The server must be listening on
@@ -452,13 +518,34 @@ switch (cmd) {
     if (!box.id) die(`from-snapshot returned no box: ${JSON.stringify(box).slice(0, 200)}`);
     // One exec for both: is browse really on this image, and how much disk is
     // left for the app that is about to be pushed here.
-    const ready = await exec(box.id, `command -v browse >/dev/null && browse version && df -Pm ${WORK} | tail -1`);
+    // Refresh the checkout the image baked in BEFORE reporting the version. An
+    // image is a photograph of a machine: the browse on it is as old as the day
+    // it was taken, and nothing downstream can tell. Three sessions in one day
+    // were spent re-finding bugs that were already fixed on main, because a box
+    // restored from a week-old image accepts today's flags (the CLIENT parses
+    // them) and then ignores them. A fetch is a second; being a week stale is not
+    // worth saving it. Failure is not fatal - a box with no network out still has
+    // the image's browse on it, and the version line below is then the honest
+    // record of what is running.
+    const ready = await exec(box.id, `command -v browse >/dev/null || exit 1; ` +
+      `git -C ${WORK}/browse fetch -q --depth 1 origin HEAD >/dev/null 2>&1 && ` +
+      `git -C ${WORK}/browse reset -q --hard FETCH_HEAD >/dev/null 2>&1; ` +
+      `browse version && df -Pm ${WORK} | tail -1`);
     if (ready.exit_code !== 0) {
       await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
       die(`image ${snapshot} has no browse on it — rebuild it with: browse box image`);
     }
     const [version = "", dfLine = ""] = String(ready.output).trim().split("\n");
     const freeMb = Number(dfLine.trim().split(/\s+/)[3]);
+    // The build hash is what makes the version line mean anything (the package
+    // version is a constant). Compared against THIS checkout, so a box tracking
+    // origin/main while you sit on unpushed work says so before the session
+    // starts rather than through a flag that silently does nothing.
+    const boxBuild = (/\(build (\w+)\)/.exec(version) || [])[1];
+    const mine = await localBuild();
+    if (boxBuild && mine && boxBuild !== mine) {
+      say(`note: the box runs build ${boxBuild}, this checkout is ${mine} - it tracks ${REPO} HEAD, so anything uncommitted or unpushed here is not on it`);
+    }
     // Remember the image too, so a one-off `--snapshot` becomes the default and
     // the next `up` needs no arguments.
     await writeState({ box: box.id, snapshot });

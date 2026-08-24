@@ -58,6 +58,9 @@ key` prompts for it.
 
 What a box changes on top of `--remote`:
 
+- **Reach the app as `localhost`, not `127.0.0.1`,** when it is a dev server: a
+  Next dev server blocks its own assets to a host it reads as cross-origin, and
+  the page then renders and never hydrates. See `skill/troubleshooting.md`.
 - **The app runs on the box**, and `127.0.0.1` is the box's. Confirm the server
   is listening *there* with `browse box exec <box> 'curl -sf http://127.0.0.1:<port>'`
   before the first `browse` command, because recording starts the moment the
@@ -85,6 +88,13 @@ What a box changes on top of `--remote`:
   not, the opposite of what this is for.
 - **A fresh box with no `browse` on it means the image is stale.** Rebuild it
   with `browse box image` rather than installing onto the session's own box.
+- **Believe the build note over the symptom.** An image carries the browse of
+  the day it was built, so a box can run code older than the CLI you are typing
+  at: it accepts a flag the client parses here and ignores it there. `up` pulls
+  the box's checkout up to date and both `up` and the first `--remote` command
+  say so when the builds still differ. When that note is on screen, a flag that
+  "does nothing" or a bug you thought was fixed is that skew, not a new bug:
+  refresh (`browse box install <box>`) before reporting anything.
 - **`browse box url`** is worth offering alongside the video when the user will
   want to click around the app themselves. Say plainly that the link dies with
   the box.

@@ -135,6 +135,26 @@ function pkgVersion() {
   try { return JSON.parse(readFileSync(join(SELF, "..", "package.json"), "utf8")).version || "unknown"; }
   catch { return "unknown"; }
 }
+/** Which BUILD this is: 8 hex of the sha of browse.mjs itself.
+ *
+ *  The package version is a constant that nobody bumps, so it cannot tell two
+ *  builds apart, and the machine that matters is usually not this one. A
+ *  `--remote` box runs whatever browse was baked into its image, and a stale one
+ *  fails in the shape of a browse bug: a flag the client accepts and the daemon
+ *  has never heard of, an error message that was fixed here days ago. Three
+ *  sessions in one day were spent re-reporting bugs that were already fixed,
+ *  because nothing on either side could say the two were different code.
+ *
+ *  Content-hashed rather than read from git: an image installs from a tarball or
+ *  a shallow clone with no branch, and a hand-edited file is a different build
+ *  whatever git says. Cheap enough to compute per process (~250KB, once). */
+let BUILD = null;
+function buildId() {
+  if (BUILD) return BUILD;
+  try { BUILD = createHash("sha256").update(readFileSync(SELF)).digest("hex").slice(0, 8); }
+  catch { BUILD = "unknown"; }
+  return BUILD;
+}
 const RUN_DIR = join(BROWSE_HOME, "run"); // one <session>.json per live daemon
 const sanitizeName = (s) => String(s).replace(/[^\w.-]+/g, "-");
 // Default session name. Two agents that both omit `-s` would otherwise share one
@@ -466,6 +486,31 @@ const IDLE = {
   padSecs: 0.4, // real-time cushion kept around detected activity
   diffMax: 12,
   diffCells: 2,
+};
+
+/** Ready-made `init --stub <name>` scripts: the page APIs a headless browser
+ *  denies, where the workaround is the same three lines every time and getting
+ *  it wrong reads as an app bug.
+ *
+ *  clipboard: headless Chromium answers navigator.clipboard.writeText with
+ *  NotAllowedError, and a "Copy" button that catches it never reaches its
+ *  "Copied!" state, so the state cannot be photographed at all, and the run
+ *  before the stub is one wasted click plus one wasted screenshot. Defined as a
+ *  property on navigator (the real one is a read-only getter, so assignment is
+ *  a silent no-op in strict mode), and it keeps what was written: the copied
+ *  text is what the session usually wants to assert on next, via
+ *  `browse eval "window.__clipboard"`. */
+const INIT_STUBS = {
+  clipboard: `(() => {
+  let buf = "";
+  const api = {
+    writeText: async (t) => { buf = String(t); window.__clipboard = buf; },
+    readText: async () => buf,
+    write: async () => { }, read: async () => [],
+  };
+  try { Object.defineProperty(navigator, "clipboard", { configurable: true, get: () => api }); } catch (e) { }
+  window.__clipboard = "";
+})()`,
 };
 
 // Constant output frame rate for the finalized mp4. Playwright captures at ~25;
@@ -1234,10 +1279,13 @@ Observe (do these often — this is your "check" step):
                                     long line is cut with a note, and object arguments are resolved to
                                     real JSON on both engines. A %c-styled log keeps its CSS arguments
                                     on chromium; firefox/camoufox applies the styling and drops them.
-  browse screenshot [name] [--full] [--sel <selector>]
+  browse screenshot [name] [--full] [--sel <selector>] [--pad <px>]
                                     save a screenshot into the session dir. --full captures the whole
                                     scrollable page (without moving it, so the recording is untouched),
                                     --sel shoots one element, and a name ending in .pdf prints a PDF.
+                                    --sel crops to the element's BORDER box, so a caption, ring or
+                                    badge that overflows it comes back sliced: --pad <px> keeps that
+                                    many pixels around it (clamped to the viewport, and it says so).
 
 Tabs, frames, emulation, saved logins:
   browse target                     list tabs (index, title, url, * = active)
@@ -1314,13 +1362,18 @@ Intercept requests (mock an API, block an asset, rewrite a response):
   transcript. 'browse net' marks what a rule answered: ⟨mock|block|continue <pattern>⟩.
 
 Run code BEFORE every page load (stub a global, pre-seed consent/localStorage, freeze a clock):
-  browse init '<js>' [--label <name>] · browse init --file <path>
+  browse init '<js>' [--label <name>] · browse init --file <path> · browse init --stub <name>
                                     Playwright addInitScript: runs on every document and frame,
                                     before the page's own scripts, for the life of the session — it
                                     survives reloads and hard navigations, which an 'eval' cannot.
                                     Applies from the NEXT navigation: 'browse reload' to apply it here.
   browse init                       list the registered scripts (#, label, size — never the source)
   browse init --remove <#> · browse init --clear
+  --stub clipboard          a working navigator.clipboard (headless denies the real one with
+                            NotAllowedError, so a "Copy" button never reaches its "Copied!" state and
+                            it cannot be photographed). Keeps what was written: 'browse eval
+                            "window.__clipboard"'. Registers itself labelled, because a "Copied!"
+                            shot taken with a faked clipboard has to be legible as one in the transcript
   Use it for what must exist before app JS runs (window.gtag stub, consent flag, feature toggle).
   Use 'middleware' when the thing to change is a REQUEST, not page state.
 
@@ -2108,6 +2161,23 @@ function saveRemoteRun(rec) {
   return rec;
 }
 
+/** Say so when the browser runs DIFFERENT CODE than this client.
+ *
+ *  A box is restored from an image, and the image carries whatever browse was
+ *  installed the day it was built. Every flag the client parses locally then
+ *  reaches a daemon that may predate it: `--no-video` was forwarded to a daemon
+ *  that had never heard of BROWSE_VIDEO and recorded anyway, and the session
+ *  reported it as a browse bug. The client cannot fix that skew, only name it,
+ *  once, on the command that starts the session (every later command reattaches
+ *  and never gets here, so this cannot turn into a per-command banner). */
+function warnBuildSkew(h) {
+  if (!h || !h.build || h.build === buildId()) return;
+  process.stderr.write(
+    `note: ${REMOTE} runs a different browse build (${h.build}) than this one (${buildId()}), so fixes here are not there.\n` +
+    `  Refresh it: ${upstashBox() ? `browse box install ${upstashBox().id}` : `git pull in the browse checkout on ${REMOTE}`}` +
+    `${upstashBox() ? ", and 'browse box image' to bake it into the warm image" : ""}\n`);
+}
+
 async function ensureRemoteDaemon() {
   const found = await findRemoteDaemon();
   if (found) return found;
@@ -2118,6 +2188,7 @@ async function ensureRemoteDaemon() {
   // session name, so ASK before spawning a second browser onto the same one.
   const probe = await probePort(local);
   if (probe.kind === "browse" && probe.health.session === SESSION) {
+    warnBuildSkew(probe.health);
     return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...probe.health });
   }
   // Anything ELSE on that port means a daemon spawned now would fail to bind, so
@@ -2148,6 +2219,7 @@ async function ensureRemoteDaemon() {
       `  launching a browser, ~/.browse/sessions/*/browsed.log. Check '${REMOTE_BIN}' is\n` +
       `  on PATH and executable there.`);
   }
+  warnBuildSkew(h);
   return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...h });
 }
 
@@ -2543,7 +2615,7 @@ const SELECT_FLAGS = new Set(["-s", "--session", "-p", "--profile", "--remote"])
 const POST_FLAGS = new Set([
   "--dialog", "--full", "--sel", "--timeout", "--gone", "--text", "--not-text", "--url",
   "--save", "--load", "--clean", "--gif", "--keep-raw", "--for", "--sticky", "--color",
-  "--pos", "--clear", "--remove", "--label", "--file", "--x",
+  "--pos", "--clear", "--remove", "--label", "--file", "--x", "--pad", "--stub",
   "--host", "-d", "--method", "-m", "--type", "-t", "--status", "--grep", "--since",
   "--last", "-n", "--all", "--all-types", "--failed", "--errors", "--json", "--stats",
   "--body", "--bodies", "--level", "--dir", "--path",
@@ -2629,7 +2701,9 @@ async function client(argv) {
     return 1;
   }
   if (cmd === "version" || cmd === "--version" || cmd === "-v") {
-    process.stdout.write(`browse ${pkgVersion()}\n`);
+    // The build is the half that carries information: it is how `box up` and a
+    // --remote session tell "the same browse" from "six days older".
+    process.stdout.write(`browse ${pkgVersion()} (build ${buildId()})\n`);
     return 0;
   }
   // No command starts with a dash, so this is a misspelled flag. Answer it here:
@@ -4392,6 +4466,44 @@ async function daemon() {
         : "If you did not mean to land here, note this context has no saved login: drive the login once with -p <name> --headful, or hand it a 'browse state --load <file>'.");
   }
 
+  /** The page that rendered but never came alive.
+   *
+   *  A dev server reached over 127.0.0.1 is the reproducible way into this: Next
+   *  (16+) treats a host that is not in `allowedDevOrigins` as cross-origin and
+   *  refuses to serve its own dev assets to it. The document arrives (HTTP 200,
+   *  chunks 200), React never mounts, and the page sits on its server-rendered
+   *  shell forever. Nothing else says so (no page error, no failed request), so
+   *  a session reads "empty" or "the element never appeared" and starts hunting
+   *  the app. It cost ten minutes of one recorded session, and the fix is one
+   *  word in the url.
+   *
+   *  Only claimed when all three hold: the url really is 127.0.0.1, the document
+   *  really is a framework dev document, and NOTHING has hydrated it. Returns ""
+   *  otherwise: a wrong diagnosis costs more than none. */
+  async function hydrationHint() {
+    let host = "";
+    try { host = new URL(page.url()).hostname; } catch { return ""; }
+    if (host !== "127.0.0.1" && host !== "[::1]" && host !== "::1") return "";
+    let r = null;
+    try {
+      r = await page.evaluate(() => {
+        const dev = !!document.querySelector('script[src*="/_next/"], script[src*="/@vite/"], script#__NEXT_DATA__');
+        const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+        const mounted = !!(hook && hook.renderers && hook.renderers.size)
+          // Roots a devtools hook misses: any element carrying a React fiber, or
+          // a framework that is not React at all but does mark its root.
+          || [...document.body.children].some((el) =>
+            Object.keys(el).some((k) => k.startsWith("__react") || k.startsWith("__vue")))
+          || !!document.querySelector("[data-v-app], [data-svelte-h]");
+        return { dev, mounted, html: document.body ? document.body.innerHTML.length : 0 };
+      });
+    } catch { return ""; } // mid-navigation, or a page that refuses evaluate
+    if (!r || !r.dev || r.mounted || r.html < 200) return "";
+    const url = page.url().replace("127.0.0.1", "localhost");
+    return `the page rendered server-side (${r.html} chars of HTML) but nothing hydrated it, and it is served over 127.0.0.1 - a dev server ` +
+      `treats that as a cross-origin host and blocks its own dev assets. Re-open it as localhost: browse goto ${url}`;
+  }
+
   /** An observe command that comes back EMPTY is far more often a page still
    *  hydrating than a genuinely blank one - a framework app served its shell and
    *  has not painted yet. Read once, and only if that is empty give it a short
@@ -4414,7 +4526,9 @@ async function daemon() {
       if (String(out ?? "").trim()) return { out, note: "" };
       await page.waitForTimeout(250);
     } while (Date.now() < deadline);
-    return { out, note: `\nnote: still empty after waiting ${Math.round((Date.now() - startedAt) / 100) / 10}s for load + content - the page may be mid-load/hydration (check 'browse url' + 'browse errors'), or this element really is empty` };
+    const stalled = await hydrationHint();
+    return { out, note: `\nnote: still empty after waiting ${Math.round((Date.now() - startedAt) / 100) / 10}s for load + content - ` +
+      (stalled || "the page may be mid-load/hydration (check 'browse url' + 'browse errors'), or this element really is empty") };
   }
 
   async function brief() {
@@ -4913,7 +5027,12 @@ async function daemon() {
     // attribute hint has nothing to do with either, so it must not sit behind
     // them - "Name" as a placeholder is precisely the case it exists for.
     const hints = [];
-    try { hints.push(await selectorHint(selector)); } catch { /* the hint is a bonus */ }
+    // First, because it explains why NOTHING is on the page rather than why this
+    // one selector missed: a `wait 'text=Create Bucket' --timeout 60000` against
+    // an unhydrated shell burns the full minute and then reads as a naming
+    // problem.
+    try { hints.push(await hydrationHint()); } catch { /* the hint is a bonus */ }
+    try { hints.push(await selectorHint(selector)); } catch { /* likewise */ }
     try { hints.push(await attrHint(selector)); } catch { /* likewise */ }
     const hint = hints.filter(Boolean).join("\n");
     return hint ? new Error(`${msg}\n${hint}`) : e;
@@ -5456,10 +5575,21 @@ async function daemon() {
         return `${clipped}${body}\n— ${list.length} shown${more}${capped}`;
       }
       case "screenshot": {
-        let name = null, full = false, sel = null;
+        let name = null, full = false, sel = null, pad = 0;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
           if (a === "--full") full = true;
+          // --pad exists because an element screenshot clips to the element's
+          // BORDER BOX: a caption that overflows its parent, a focus ring, a
+          // shadow, a badge hanging off a corner all come back sliced with
+          // nothing saying so, and the only way out was to re-shoot one ancestor
+          // higher and hope.
+          else if (a === "--pad") {
+            const v = args[++i];
+            if (v == null || !/^\d+$/.test(String(v)))
+              throw new Error(`screenshot: --pad wants whole pixels, e.g. --pad 24${v == null ? "" : ` (got '${v}')`}`);
+            pad = Number(v);
+          }
           // Checked, not just consumed. `--sel` with the selector forgotten shot
           // the WHOLE viewport and exited 0 - the agent asked for one element and
           // got a page, with nothing saying so. `--sel --full` was worse: "--full"
@@ -5475,9 +5605,14 @@ async function daemon() {
           // Without this a retired spelling (--fullpage, --selector) would be
           // taken as the FILENAME and silently save an unwanted screenshot. One
           // dash counts too: `-full` would otherwise land as a file named _full.
-          else if (a.startsWith("-")) throw new Error(`screenshot: unknown flag '${a}' - try [name] [--full] [--sel <selector>]`);
+          else if (a.startsWith("-")) throw new Error(`screenshot: unknown flag '${a}' - try [name] [--full] [--sel <selector>] [--pad <px>]`);
           else if (name == null) name = a;
         }
+        // Padding is a margin around ONE element, so it means nothing without one
+        // and silently ignoring it is how you get an unpadded crop back and
+        // believe the flag did something.
+        if (pad && !sel) throw new Error("screenshot: --pad grows an ELEMENT shot, so it needs --sel <selector> (a page shot has nothing to pad around)");
+        if (pad && full) throw new Error("screenshot: --full shoots the whole page and --pad crops around one element - pick one");
         name = (name || `shot-${Date.now()}.png`).replace(/[^\w.-]/g, "_");
         // Playwright picks its encoder from the extension, so a bare name like
         // `checkout` failed with a raw 'unsupported mime type "null"'. The name
@@ -5500,9 +5635,34 @@ async function daemon() {
           return `saved ${path}`;
         }
         if (sel) {
-          try { await L(sel).first().screenshot({ path }); }
-          catch (e) { throw await withSelectorHint(e, sel); }
-          return `saved ${path} (${sel})${await readMatchNote(sel)}`;
+          if (!pad) {
+            try { await L(sel).first().screenshot({ path }); }
+            catch (e) { throw await withSelectorHint(e, sel); }
+            return `saved ${path} (${sel})${await readMatchNote(sel)}`;
+          }
+          // Padded: a viewport shot clipped to the element's box grown by `pad`.
+          // locator.screenshot() has no way to do this - it always crops to the
+          // element - so the element is scrolled into view and page.screenshot
+          // takes the clip. Both boundingBox() and a non-fullPage clip are in
+          // viewport coordinates, so they agree; the clip is clamped to the
+          // viewport because a clip that runs off it is an error, not a smaller
+          // picture.
+          let box = null;
+          try {
+            const one = L(sel).first();
+            await one.scrollIntoViewIfNeeded({ timeout: 5000 });
+            box = await one.boundingBox();
+          } catch (e) { throw await withSelectorHint(e, sel); }
+          if (!box) throw new Error(`screenshot: '${sel}' has no box on screen to pad (it is in the DOM but not rendered) - drop --pad, or shoot an ancestor that is`);
+          const vp = page.viewportSize() || VIEWPORT;
+          const left = Math.max(0, box.x - pad), top = Math.max(0, box.y - pad);
+          const right = Math.min(vp.width, box.x + box.width + pad);
+          const bottom = Math.min(vp.height, box.y + box.height + pad);
+          const clip = { x: left, y: top, width: right - left, height: bottom - top };
+          if (clip.width <= 0 || clip.height <= 0) throw new Error(`screenshot: '${sel}' is off screen, so there is nothing to pad around - scroll it into view first`);
+          await page.screenshot({ path, clip });
+          const clamped = clip.width < box.width + pad * 2 || clip.height < box.height + pad * 2;
+          return `saved ${path} (${sel} + ${pad}px)${clamped ? " - clipped to the viewport on at least one side" : ""}${await readMatchNote(sel)}`;
         }
         await page.screenshot({ path, fullPage: full });
         // --full captures past the viewport via CDP, so the page never moves and
@@ -6176,30 +6336,31 @@ async function daemon() {
         // Date.now" actually need - a post-load `eval` loses the race, and a
         // reload wipes it. addInitScript returns a Disposable, so a rule can be
         // taken back off without restarting the browser.
-        let src = null, file = null, clear = false, remove = null, label = null;
+        let src = null, file = null, clear = false, remove = null, label = null, stub = null;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
           const initNeed = (flag, i) => {
             const v = args[i];
             // Without this, `init --remove` (no #) fell through to the LISTING and
             // exited 0, so "nothing was removed" read as "removed".
-            if (v == null || String(v).startsWith("--")) throw new Error(`init: ${flag} needs a value - try init <js> | --file <path> | --label <name> | --remove <#> | --clear`);
+            if (v == null || String(v).startsWith("--")) throw new Error(`init: ${flag} needs a value - try init <js> | --stub <name> | --file <path> | --label <name> | --remove <#> | --clear`);
             return v;
           };
           if (a === "--clear") clear = true;
           else if (a === "--remove") remove = initNeed(a, ++i);
           else if (a === "--file") file = initNeed(a, ++i);
           else if (a === "--label") label = initNeed(a, ++i);
-          else if (a.startsWith("--")) throw new Error(`init: unknown flag '${a}' - try init <js> | --file <path> | --label <name> | --remove <#> | --clear`);
+          else if (a === "--stub") stub = initNeed(a, ++i);
+          else if (a.startsWith("--")) throw new Error(`init: unknown flag '${a}' - try init <js> | --stub <name> | --file <path> | --label <name> | --remove <#> | --clear`);
           else if (src == null) src = a;
           else src += " " + a; // an unquoted multi-word snippet
         }
         const list = () => initScripts.length
           ? initScripts.map((r) => `  #${r.i}  ${r.label ? r.label + "  " : ""}${r.src.length} chars`).join("\n")
           : "  (none)";
-        if (clear && (remove != null || file != null || src != null)) throw new Error("init: --clear takes nothing else - it removes every registered script");
-        if (remove != null && (file != null || src != null)) throw new Error("init: --remove <#> takes nothing else");
-        if (label != null && src == null && file == null) throw new Error("init: --label names a script, so it needs one - init '<js>' --label <name>");
+        if (clear && (remove != null || file != null || src != null || stub != null)) throw new Error("init: --clear takes nothing else - it removes every registered script");
+        if (remove != null && (file != null || src != null || stub != null)) throw new Error("init: --remove <#> takes nothing else");
+        if (label != null && src == null && file == null && stub == null) throw new Error("init: --label names a script, so it needs one - init '<js>' --label <name>");
         if (clear) {
           const n = initScripts.length;
           for (const r of initScripts) await r.disposable.dispose().catch(() => { /* context going away */ });
@@ -6217,6 +6378,16 @@ async function daemon() {
           if (src) throw new Error("init: pass a snippet OR --file <path>, not both");
           try { src = readFileSync(file, "utf8"); }
           catch { throw new Error(`init: cannot read '${file}' (paths are resolved from the directory browse runs in)`); }
+        }
+        if (stub != null) {
+          if (src || file != null) throw new Error("init: --stub is a ready-made script, so it takes no snippet and no --file");
+          const body = INIT_STUBS[String(stub).toLowerCase()];
+          if (!body) throw new Error(`init: no stub '${stub}' - available: ${Object.keys(INIT_STUBS).join(", ")}`);
+          src = body;
+          // Labelled by default, and the label is the point: a "Copied!" badge
+          // photographed with a faked clipboard is indistinguishable from a real
+          // one, so the transcript has to say which it was.
+          label = label || `stub:${String(stub).toLowerCase()}`;
         }
         if (src == null) return `${initScripts.length} init script${initScripts.length === 1 ? "" : "s"} registered\n${list()}`;
         if (!String(src).trim()) throw new Error("init: needs a js snippet, e.g. browse init 'window.gtag = (...a) => (window.__ga ||= []).push(a)'");
@@ -6247,7 +6418,7 @@ async function daemon() {
       // `home` is what lets a remote client recognise this dir in a reply that
       // ran it through tildePath, and rewrite it to where it mirrored the files.
       res.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir() }));
+        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir(), build: buildId() }));
       return;
     }
     // Artifact read-out, for a client on another machine (see the remote-host

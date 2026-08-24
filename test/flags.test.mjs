@@ -208,6 +208,19 @@ console.log("\nbrowse -p <name> clear");
 
 /* ── help ───────────────────────────────────────────────────────────────── */
 
+console.log("\nversion");
+{
+  // The package version is a constant nobody bumps, so on its own it cannot tell
+  // two builds apart, and telling them apart is the whole point: a --remote box
+  // runs the browse its image was built with, which may predate every flag this
+  // client accepts. The build id is a content hash, so it moves whenever the
+  // code does.
+  const r = browse("version");
+  check("version prints a build id, exit 0", r.code === 0 && /^browse \S+ \(build [0-9a-f]{8}\)$/.test(r.out),
+    `${r.code} ${r.out}`);
+  check("…and it is stable across runs", browse("version").out === r.out, `${r.out} vs ${browse("version").out}`);
+}
+
 console.log("\nhelp");
 {
   let r = browse("help");

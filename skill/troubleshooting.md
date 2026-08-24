@@ -28,6 +28,16 @@
 - **An empty `text`/`snapshot` is usually hydration, not a blank page.** Both
   give a still-loading page a short settle and then say whether it stayed empty;
   if it did, check `url` and `errors` before concluding the app is broken.
+- **A dev server on `127.0.0.1` can render and never come alive.** Next (16+)
+  treats a host that is not in `allowedDevOrigins` as cross-origin and refuses to
+  serve its own dev assets to it: HTTP 200, chunks 200, no page error, no failed
+  request, a spinner forever. Reach a dev server as `localhost` by default. When
+  an empty read or a timed-out `wait` says the page never hydrated, that is this
+  and the fix is the hostname, not a longer timeout.
+- **A headless browser denies the clipboard**, so a "Copy" button never reaches
+  its "Copied!" state and that state cannot be photographed. `browse init --stub
+  clipboard` + `reload` before the click; the transcript then records that the
+  clipboard was faked, which a screenshot alone cannot show.
 - **Clicks timing out on camoufox while other camoufox sessions are running.**
   Seen at roughly 1 in 15 sessions under parallel load and never on an idle
   machine (17/18 and 16/16 clean in back-to-back runs). The locator resolves and
