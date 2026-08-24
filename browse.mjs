@@ -2171,9 +2171,15 @@ function saveRemoteRun(rec) {
  *  once, on the command that starts the session (every later command reattaches
  *  and never gets here, so this cannot turn into a per-command banner). */
 function warnBuildSkew(h) {
-  if (!h || !h.build || h.build === buildId()) return;
+  if (!h || h.build === buildId()) return;
+  // No build in /health at all is not "nothing to compare": only a daemon older
+  // than this field answers that way, so it is the STALEST case there is - and
+  // the one every box restored from an image baked before it will hit. Reporting
+  // it as unknown-therefore-fine would silence the warning for exactly the
+  // sessions it was written for.
+  const what = h.build ? `a different browse build (${h.build})` : "a browse too old to say which build it is";
   process.stderr.write(
-    `note: ${REMOTE} runs a different browse build (${h.build}) than this one (${buildId()}), so fixes here are not there.\n` +
+    `note: ${REMOTE} runs ${what}, not this one (${buildId()}), so fixes here are not there.\n` +
     `  Refresh it: ${upstashBox() ? `browse box install ${upstashBox().id}` : `git pull in the browse checkout on ${REMOTE}`}` +
     `${upstashBox() ? ", and 'browse box image' to bake it into the warm image" : ""}\n`);
 }
@@ -4481,27 +4487,40 @@ async function daemon() {
    *  really is a framework dev document, and NOTHING has hydrated it. Returns ""
    *  otherwise: a wrong diagnosis costs more than none. */
   async function hydrationHint() {
-    let host = "";
-    try { host = new URL(page.url()).hostname; } catch { return ""; }
-    if (host !== "127.0.0.1" && host !== "[::1]" && host !== "::1") return "";
+    let u = null;
+    try { u = new URL(page.url()); } catch { return ""; }
+    if (u.hostname !== "127.0.0.1" && u.hostname !== "[::1]") return "";
     let r = null;
     try {
-      r = await page.evaluate(() => {
-        const dev = !!document.querySelector('script[src*="/_next/"], script[src*="/@vite/"], script#__NEXT_DATA__');
-        const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+      // Through a locator, not page.evaluate: this runs on a FAILURE path, where
+      // the page is as likely as not mid-navigation or blocking its main thread,
+      // and page.evaluate takes no timeout - it would wait for an execution
+      // context forever and hold up the error it is only decorating. The two
+      // sibling hints are time-boxed for the same reason.
+      r = await L("body").first().evaluate((body) => {
+        const doc = body.ownerDocument, win = doc.defaultView;
+        const framework = !!doc.querySelector('script[src*="/_next/"], script[src*="/@vite/"], script#__NEXT_DATA__');
+        const hook = win.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+        // What MOUNTING leaves behind, and only mounting: a live renderer, a
+        // React fiber on a real element, Vue's client-side mount attribute.
+        // Server-only markers (svelte's data-svelte-h) are deliberately absent -
+        // they are present on exactly the unhydrated shell this looks for.
         const mounted = !!(hook && hook.renderers && hook.renderers.size)
-          // Roots a devtools hook misses: any element carrying a React fiber, or
-          // a framework that is not React at all but does mark its root.
-          || [...document.body.children].some((el) =>
+          || [...body.children].some((el) =>
             Object.keys(el).some((k) => k.startsWith("__react") || k.startsWith("__vue")))
-          || !!document.querySelector("[data-v-app], [data-svelte-h]");
-        return { dev, mounted, html: document.body ? document.body.innerHTML.length : 0 };
-      });
-    } catch { return ""; } // mid-navigation, or a page that refuses evaluate
-    if (!r || !r.dev || r.mounted || r.html < 200) return "";
-    const url = page.url().replace("127.0.0.1", "localhost");
-    return `the page rendered server-side (${r.html} chars of HTML) but nothing hydrated it, and it is served over 127.0.0.1 - a dev server ` +
-      `treats that as a cross-origin host and blocks its own dev assets. Re-open it as localhost: browse goto ${url}`;
+          || !!doc.querySelector("[data-v-app]");
+        return { framework, mounted, html: body.innerHTML.length };
+      }, undefined, { timeout: 3000 });
+    } catch { return ""; } // mid-navigation, blocked, or no body yet
+    if (!r || !r.framework || r.mounted || r.html < 200) return "";
+    const local = new URL(u.href); local.hostname = "localhost";
+    // The FACT first, the likely cause second. A production build serves /_next/
+    // assets too, and it can fail to hydrate for its own reasons (a thrown
+    // exception, a chunk that 404s) - so the cross-origin explanation is offered
+    // as the thing to rule out first, not asserted.
+    return `the page rendered server-side (${r.html} chars of HTML) and nothing hydrated it - no React/Vue root exists. ` +
+      `On a DEV server that is usually the host: Next treats ${u.hostname} as cross-origin and blocks its own dev assets. ` +
+      `Try browse goto ${local.href} - if it is not that, the app's own JS threw ('browse console --level error' says).`;
   }
 
   /** An observe command that comes back EMPTY is far more often a page still
@@ -5575,7 +5594,7 @@ async function daemon() {
         return `${clipped}${body}\n— ${list.length} shown${more}${capped}`;
       }
       case "screenshot": {
-        let name = null, full = false, sel = null, pad = 0;
+        let name = null, full = false, sel = null, pad = 0, padSeen = false;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
           if (a === "--full") full = true;
@@ -5589,6 +5608,7 @@ async function daemon() {
             if (v == null || !/^\d+$/.test(String(v)))
               throw new Error(`screenshot: --pad wants whole pixels, e.g. --pad 24${v == null ? "" : ` (got '${v}')`}`);
             pad = Number(v);
+            padSeen = true; // `--pad 0` is still a --pad: the guards below are about the FLAG
           }
           // Checked, not just consumed. `--sel` with the selector forgotten shot
           // the WHOLE viewport and exited 0 - the agent asked for one element and
@@ -5611,8 +5631,8 @@ async function daemon() {
         // Padding is a margin around ONE element, so it means nothing without one
         // and silently ignoring it is how you get an unpadded crop back and
         // believe the flag did something.
-        if (pad && !sel) throw new Error("screenshot: --pad grows an ELEMENT shot, so it needs --sel <selector> (a page shot has nothing to pad around)");
-        if (pad && full) throw new Error("screenshot: --full shoots the whole page and --pad crops around one element - pick one");
+        if (padSeen && !sel) throw new Error("screenshot: --pad grows an ELEMENT shot, so it needs --sel <selector> (a page shot has nothing to pad around)");
+        if (padSeen && full) throw new Error("screenshot: --full shoots the whole page and --pad crops around one element - pick one");
         name = (name || `shot-${Date.now()}.png`).replace(/[^\w.-]/g, "_");
         // Playwright picks its encoder from the extension, so a bare name like
         // `checkout` failed with a raw 'unsupported mime type "null"'. The name
@@ -5627,6 +5647,10 @@ async function daemon() {
         // A .pdf name means print the page, not screenshot it (headless only).
         // page.pdf() is Chromium-only — Firefox/camoufox has no equivalent.
         if (name.endsWith(".pdf")) {
+          // page.pdf prints the WHOLE page: there is no element form and no clip,
+          // so accepting these and printing a full page at exit 0 is the same
+          // silent wrong-artifact this command already refuses elsewhere.
+          if (sel || padSeen) throw new Error(`screenshot: a .pdf name prints the whole page, so it cannot take ${sel && padSeen ? "--sel or --pad" : sel ? "--sel" : "--pad"} - save a .png to shoot one element`);
           if (context.__engine !== "chromium")
             throw new Error(
               `PDF export is Chromium-only (engine: ${context.__engine}). Re-run ` +

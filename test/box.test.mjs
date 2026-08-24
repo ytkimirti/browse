@@ -229,6 +229,27 @@ try {
   check("...and says so when the build still differs from this checkout",
     /build deadbeef, this checkout is \w{8}/.test(fresh.err), fresh.err);
 
+  // A browse old enough to print no build at all is the STALEST box there is,
+  // and reading that as "nothing to compare" would silence the note for exactly
+  // the boxes it was written for.
+  await reset({}, []);
+  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [], version: "browse 0.1.0" }) });
+  const ancient = box(["up"]);
+  check("a box whose browse cannot even name its build is called stale, not unknown",
+    ancient.code === 0 && /too old to name its build/.test(ancient.err), `exit ${ancient.code} · ${ancient.err}`);
+
+  // The refresh is a convenience. When it fails, the box is fine and the image is
+  // fine — saying "this image has no browse on it" and deleting the box (which
+  // folding the refresh into the readiness probe did) sends you to rebuild an
+  // image that was never the problem.
+  await reset({}, []);
+  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [], refreshFails: true }) });
+  const offline = box(["up"]);
+  check("a box that cannot reach the repo still comes up", offline.code === 0, `exit ${offline.code} · ${offline.err}`);
+  check("...and says the refresh failed rather than blaming the image",
+    /could not bring the box's browse up to date/.test(offline.err) && !/has no browse on it/.test(offline.err), offline.err);
+  check("...and nothing was deleted", (await deletedIds()) === "", await deletedIds());
+
   console.log("\npush");
   await reset();
   box(["up"]);

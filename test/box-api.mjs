@@ -15,6 +15,11 @@ import http from "node:http";
 
 const KEY = "box_faketestkey";
 let boxes = [], created = [], deleted = [], execs = [], uploads = [], seq = 0;
+// What a box's `browse version` answers, and whether the git refresh works
+// there. Both are set per case: a box carrying a browse too old to name its
+// build, and a box that cannot reach the repo, are the two the CLI has to
+// report differently instead of blaming the image.
+let version = "browse 0.1.0 (build deadbeef)", refreshFails = false;
 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
@@ -30,6 +35,8 @@ const server = http.createServer(async (req, res) => {
   if (url === "/__reset") {
     const b = await body();
     boxes = b.boxes || []; created = []; deleted = []; execs = []; uploads = []; seq = 0;
+    version = b.version ?? "browse 0.1.0 (build deadbeef)";
+    refreshFails = !!b.refreshFails;
     return send(200, { ok: true });
   }
   if (url === "/__log") return send(200, { boxes, created, deleted, execs, uploads });
@@ -53,12 +60,20 @@ const server = http.createServer(async (req, res) => {
   const exec = /^\/v2\/box\/([^/]+)\/exec$/.exec(url);
   if (req.method === "POST" && exec) {
     if (!boxes.some((b) => b.id === exec[1])) return send(404, { error: "Box has been deleted" });
-    execs.push(String(((await body()).command || []).join(" ")));
+    const cmd = String(((await body()).command || []).join(" "));
+    execs.push(cmd);
+    // The refresh runs in its own call, and a box with no route to the repo is
+    // the case that must NOT read as a broken image.
+    if (/git -C/.test(cmd)) {
+      return refreshFails
+        ? send(200, { exit_code: 128, output: "fatal: unable to access repository\n" })
+        : send(200, { exit_code: 0, output: `${version}\n` });
+    }
     // What `up`'s readiness probe asks for: a version line, then a `df -Pm` line
     // — MEGABYTES, which is what the -m asks for and what the CLI divides down.
     // The build in the version line is deliberately NOT this checkout's: an image
     // carrying older code is the case `up` has to notice out loud.
-    return send(200, { exit_code: 0, output: "browse 0.1.0 (build deadbeef)\noverlay 10240 979 9261 10% /\n" });
+    return send(200, { exit_code: 0, output: `${version}\noverlay 10240 979 9261 10% /\n` });
   }
   // Uploads: record the destination paths, which is what the push cases assert
   // on (which files were sent, and that an oversized one never got here at all).

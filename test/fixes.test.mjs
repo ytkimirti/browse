@@ -855,6 +855,18 @@ try {
     const withFull = browse("screenshot", "pad-full.png", "--sel", "#btn", "--pad", "8", "--full");
     check("--pad with --full is refused, not silently resolved",
       withFull.code === 1 && /pick one/.test(withFull.err), `exit ${withFull.code} · ${withFull.err}`);
+    // Zero is a value, not an absent flag: guarding on truthiness let `--pad 0`
+    // past both checks above and shot the whole viewport at exit 0.
+    const zero = browse("screenshot", "pad-zero.png", "--pad", "0");
+    check("--pad 0 without --sel is refused too, not treated as no flag at all",
+      zero.code === 1 && /--sel/.test(zero.err) && !existsSync(join(OUT, "pad-zero.png")),
+      `exit ${zero.code} · ${zero.err}`);
+    // A .pdf name prints the whole page: there is no element form, so accepting
+    // these and printing a full page at exit 0 is the wrong artifact, silently.
+    const pdf = browse("screenshot", "one.pdf", "--sel", "#btn", "--pad", "8");
+    check("a .pdf name refuses the element flags instead of ignoring them",
+      pdf.code === 1 && /whole page/.test(pdf.err) && !existsSync(join(OUT, "one.pdf")),
+      `exit ${pdf.code} · ${pdf.err}`);
   }
 
   /* ------------------------------------------------- init --stub clipboard */

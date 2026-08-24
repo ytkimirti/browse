@@ -215,6 +215,11 @@ const NEVER_PUSH = new Set([".git", "node_modules", ".next"]);
 // form"}` - which reads as a bug in browse, arrives only after the whole tree
 // has been read into memory and uploaded, and says nothing about what to do.
 const PUSH_LIMIT = 100 * 1024 * 1024;
+// Each file costs two multipart parts (its `paths` field and the file itself),
+// each with a boundary line, headers and a filename. Counting only the file
+// bytes let a tree of many small files measure under the cap here and still come
+// back as the opaque 400 this check exists to preempt.
+const PART_OVERHEAD = 260;
 const mb = (n) => `${(n / 1024 / 1024).toFixed(1)}MB`;
 
 async function filesUnder(path) {
@@ -263,7 +268,7 @@ async function push(id, paths, dest) {
   const files = [];
   for (const p of paths) files.push(...await filesUnder(p).catch(() => die(`no such file: ${p}`)));
   if (!files.length) die("nothing to push");
-  const total = files.reduce((n, f) => n + (f.size || 0), 0);
+  const total = files.reduce((n, f) => n + (f.size || 0) + PART_OVERHEAD + 2 * f.rel.length, 0);
   const big = files.find((f) => (f.size || 0) > PUSH_LIMIT);
   if (big) {
     die(`${big.rel} is ${mb(big.size)} - the box upload API caps one file at ${mb(PUSH_LIMIT)}.\n` +
@@ -527,15 +532,32 @@ switch (cmd) {
     // worth saving it. Failure is not fatal - a box with no network out still has
     // the image's browse on it, and the version line below is then the honest
     // record of what is running.
-    const ready = await exec(box.id, `command -v browse >/dev/null || exit 1; ` +
-      `git -C ${WORK}/browse fetch -q --depth 1 origin HEAD >/dev/null 2>&1 && ` +
-      `git -C ${WORK}/browse reset -q --hard FETCH_HEAD >/dev/null 2>&1; ` +
-      `browse version && df -Pm ${WORK} | tail -1`);
+    const ready = await exec(box.id, `command -v browse >/dev/null && browse version && df -Pm ${WORK} | tail -1`);
     if (ready.exit_code !== 0) {
       await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
       die(`image ${snapshot} has no browse on it — rebuild it with: browse box image`);
     }
-    const [version = "", dfLine = ""] = String(ready.output).trim().split("\n");
+    let [version = "", dfLine = ""] = String(ready.output).trim().split("\n");
+    // THEN refresh the checkout the image baked in, in its own call. An image is
+    // a photograph of a machine: the browse on it is as old as the day it was
+    // taken, and nothing downstream can tell - three sessions in one day were
+    // spent re-finding bugs already fixed on main, because a box restored from a
+    // week-old image accepts today's flags (the CLIENT parses them) and then
+    // ignores them. Separate from the probe above on purpose: a refresh that
+    // fails (no network out, a HEAD whose deps this image never installed) says
+    // so and leaves the box alone, where folding it into the probe made it
+    // indistinguishable from "this image has no browse" - which deletes the box
+    // and sends you to rebuild an image that was never the problem.
+    const upd = await exec(box.id,
+      `git -C ${WORK}/browse fetch -q --depth 1 origin HEAD && ` +
+      `git -C ${WORK}/browse reset -q --hard FETCH_HEAD && browse version`);
+    // The version line is found by SHAPE, not by position: a box relays whatever
+    // else the shell wrote (a git note, an apt warning) on the same stream.
+    const line = (/^browse .*$/m.exec(String(upd.output)) || [])[0] || "";
+    const refreshed = upd.exit_code === 0 && /\(build \w+\)/.test(line);
+    if (refreshed) version = line;
+    else say(`note: could not bring the box's browse up to date, so it runs the image's (${version.trim() || "unknown"}) - ` +
+             `if a flag there does nothing, that is why`);
     const freeMb = Number(dfLine.trim().split(/\s+/)[3]);
     // The build hash is what makes the version line mean anything (the package
     // version is a constant). Compared against THIS checkout, so a box tracking
@@ -543,8 +565,12 @@ switch (cmd) {
     // starts rather than through a flag that silently does nothing.
     const boxBuild = (/\(build (\w+)\)/.exec(version) || [])[1];
     const mine = await localBuild();
-    if (boxBuild && mine && boxBuild !== mine) {
-      say(`note: the box runs build ${boxBuild}, this checkout is ${mine} - it tracks ${REPO} HEAD, so anything uncommitted or unpushed here is not on it`);
+    // A version line with NO build in it is not an unknown: only a browse older
+    // than that field prints one, so it is the stalest box there is.
+    if (mine && boxBuild !== mine) {
+      say(boxBuild
+        ? `note: the box runs build ${boxBuild}, this checkout is ${mine} - it tracks ${REPO} HEAD, so anything uncommitted or unpushed here is not on it`
+        : `note: the box runs a browse too old to name its build (${version.trim() || "no version"}), this checkout is ${mine} - rebuild the image with 'browse box image'`);
     }
     // Remember the image too, so a one-off `--snapshot` becomes the default and
     // the next `up` needs no arguments.
