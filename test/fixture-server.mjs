@@ -12,6 +12,7 @@
 //   /ui          interaction fixture for the regression test: a draggable source,
 //                a click counter, a target=_blank link, an iframe, a long page
 //   /frame       the iframe's document (its own location + marker text)
+//   /ambig       two buttons matching one selector, the first under a modal backdrop
 
 import http from "node:http";
 
@@ -97,6 +98,26 @@ document.getElementById('long').textContent =
 const FRAME = `<!doctype html><meta charset=utf8><title>frame</title>
 <div id=fs>inside-the-frame</div>`;
 
+// The ambiguous-selector fixture: the page's own "Create" and a modal's "Create"
+// both match `button.go`, and the page's one sits UNDER the modal's backdrop. It
+// is the exact shape that cost a real session minutes — browse acts on the first
+// match, the backdrop eats the click, and Playwright retries actionability with
+// nothing in the output naming the other button.
+const AMBIG = `<!doctype html><meta charset=utf8><title>ambig</title>
+<button class=go id=pagebtn>Create</button>
+<div id=backdrop style="position:fixed;inset:0;background:rgba(0,0,0,.5)"></div>
+<div id=modal style="position:fixed;top:60px;left:60px;background:#fff;padding:24px">
+  <button class=go id=modalbtn>Create</button>
+  <!-- The string an agent copies off the screen is a PLACEHOLDER here, not text,
+       so text= can never match it - the antd search-box shape. -->
+  <input id=search placeholder="Search country...">
+</div>
+<div id=clicked>none</div>
+<script>
+for (const b of document.querySelectorAll('.go'))
+  b.addEventListener('click', () => { document.getElementById('clicked').textContent = b.id; });
+</script>`;
+
 // One page for the observation commands: a status that FLIPS on a timer (so
 // `wait --text` has something to hold for that a `wait <selector>` cannot),
 // console output at three levels including one logged during page load (which
@@ -172,9 +193,9 @@ http.createServer((req, res) => {
   if (url === "/api/user") { hits.user++; return json(res, { id: 99, name: "real-user" }); }
   if (url === "/api/config") { hits.config++; return json(res, { env: "prod", debug: false }); }
   if (url === "/api/other") { hits.other++; return json(res, { from: "server" }); }
-  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/stalled" || url === "/auth/sign-in") {
+  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/stalled" || url === "/auth/sign-in" || url === "/ambig") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/stalled": STALLED, "/auth/sign-in": SIGNIN }[url];
+    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/stalled": STALLED, "/auth/sign-in": SIGNIN, "/ambig": AMBIG }[url];
     return res.end(body);
   }
   // Answers nothing, ever: holds the page's 'load' event open.

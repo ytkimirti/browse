@@ -143,6 +143,12 @@ try {
   res = await get(port, "/file?p=transcript.md");
   check("/file serves the transcript", res.status === 200 && res.buf.length > 0, `${res.status}`);
 
+  // browsed.log is what a `middleware` handler's console.log lands in, and it is
+  // pulled with the transcript on close — so it has to be servable like any other
+  // artifact, not just present on the remote's disk.
+  res = await get(port, "/file?p=browsed.log");
+  check("/file serves browsed.log", res.status === 200 && res.buf.length > 0, `${res.status}`);
+
   res = await get(port, "/file?p=nope.png");
   check("/file 404s a missing artifact", res.status === 404, `${res.status}`);
 
@@ -324,6 +330,10 @@ if (!REMOTE_HOST) {
       `${mp4}: ${mp4 && existsSync(mp4) ? `${statSync(mp4).size}B, box '${head}'` : "missing"}`);
     check("…and the transcript came with it", existsSync(join(dir, "transcript.md")), dir);
     check("…and the network log came with it", existsSync(join(dir, "network.jsonl")), dir);
+    // A `middleware` handler's console.log lands ONLY in browsed.log, so on a
+    // remote session the one file carrying the agent's own instrumentation used
+    // to be the one file that never came down.
+    check("…and browsed.log came with it", existsSync(join(dir, "browsed.log")), dir);
 
     r = browseRemote("close");
     check("closing an already-closed remote session is a no-op",

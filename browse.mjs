@@ -112,7 +112,7 @@ import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFi
 // for the sake of a diagnostic that only ever runs after a crash.
 import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, freemem, totalmem } from "node:os";
 import { join, resolve, basename } from "node:path";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -478,6 +478,12 @@ const OUTPUT_FPS = (() => {
 // it (BROWSE_KEEP_WEBM=1 / `browse close --keep-raw`) when you may want to re-cut
 // the session differently later - that is one ffmpeg call off the surviving webm.
 const KEEP_WEBM = process.env.BROWSE_KEEP_WEBM === "1";
+// Recording is on by default and is most of what browse is for. Off (BROWSE_VIDEO=0
+// / `browse --no-video`) is for the runs that only READ - assert a count, mint a
+// token, export storage state - where the browser-side encode and the ffmpeg
+// finalize buy a file nobody will watch. Screenshots, the transcript and the
+// network log are unaffected; only the video is.
+const VIDEO_ON = process.env.BROWSE_VIDEO !== "0";
 // Real popups break the recording: recordVideo is per CONTEXT, but Playwright
 // writes one .webm per PAGE and only the first page's file is finalized - so a
 // popup records to a file nobody reads while the main clip freezes. By default we
@@ -731,6 +737,11 @@ const ELEMENT_TARGETED = new Set([
 ]);
 /** Element-targeted commands that should also flash a click ripple. */
 const CLICK_LIKE = new Set(["click", "dblclick", "rightclick", "check", "uncheck"]);
+/** How long an act command waits when its selector matched more than one VISIBLE
+ *  element. Short on purpose: browse is guessing at that point, and a wrong guess
+ *  that retries to the default is the most expensive failure in the tool. Pass
+ *  `--timeout <ms>` to override it. */
+const AMBIGUOUS_MS = Math.max(500, Number(process.env.BROWSE_AMBIGUOUS_MS) || 4000);
 /** The navigation verbs: they take `--timeout <ms>` (and a url, where it makes
  *  sense) and reject everything else - see the NAV_CMDS branch in dispatchCmd. */
 const NAV_CMDS = new Set(["open", "goto", "reload", "goBack", "goForward"]);
@@ -1168,7 +1179,11 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     server compiling a route on first hit. goBack/goForward FAIL when
                                     there is nowhere to go. A landing url that looks like a sign-in
                                     wall is called out inline, here and after a click.
-  browse click <selector>           click an element
+  browse click <selector>           click an element. Every act command here takes --timeout <ms> as
+                                    its LAST two arguments (default 12000): raise it for a control that
+                                    is still rendering, lower it to fail fast. A selector matching more
+                                    than one VISIBLE element gives up after ${AMBIGUOUS_MS}ms instead and lists
+                                    what it matched, with whatever is covering each one.
   browse dblclick <selector>        double-click an element
   browse rightclick <selector>      right-click it — opens the app's context menu
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
@@ -1373,6 +1388,11 @@ session; on an already-live session browse refuses rather than ignoring them):
   --popups / --no-popups            let target=_blank open REAL popups, vs rewriting them into
                                     same-tab navigation so the recording stays one file
   --net / --no-net                  network logging (default on — see 'browse net')
+  --video / --no-video              record the session (default on — it is the point of the tool).
+                                    --no-video is for a run that only READS the page (assert a
+                                    count, mint a token, export state): no browser-side encode, no
+                                    ffmpeg finalize, no mp4. Screenshots, transcript.md and the
+                                    network log are unaffected
   --type-delay <ms>                 per-keystroke delay for fill/type (default 45, 0 = paste)
   --idle <ms>                       auto-close after this long idle (default 1800000, 0 = never)
   e.g. browse --headful --chromium -p google open https://accounts.google.com
@@ -1420,6 +1440,7 @@ Every launch flag is also an env var (a flag on the command WINS over the env):
   BROWSE_VIEWPORT=WxH      --viewport           BROWSE_CURSOR=0|1                --no-cursor/--cursor
   BROWSE_KEYLOG=0|1        --no-keylog/--keylog BROWSE_POPUPS=0|1                --no-popups/--popups
   BROWSE_NET=0|1           --no-net/--net       BROWSE_TYPE_DELAY=<ms>           --type-delay
+  BROWSE_VIDEO=0|1         --no-video/--video
   BROWSE_IDLE_MS=<ms>      --idle
   BROWSE_SESSION=<name>    -s <name>            BROWSE_PROFILE=<name>            -p <name>
   BROWSE_REMOTE=<sshhost>  --remote <sshhost>
@@ -1456,6 +1477,8 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_BIND              address the DAEMON listens on (default 127.0.0.1). --remote already
                            passes 0.0.0.0 down, since a forward into a container lands on its
                            external interface — set this only to override that
+  BROWSE_AMBIGUOUS_MS      how long an act command waits when its selector matched more than one
+                           visible element, before giving up and listing them (4000)
   BROWSE_FFMPEG            path to the ffmpeg used for the mp4 finalize
   BROWSE_PW_BASE           path whose parent dir holds node_modules/playwright
   BROWSE_CAMOUFOX_PYTHON   python that can 'import camoufox' (default python3)`;
@@ -2167,7 +2190,10 @@ async function mirrorResult(d, text, { full = false } = {}) {
     const esc = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     for (const m of String(text).matchAll(new RegExp(`${esc}/([\\w./@-]+)`, "g"))) rels.add(m[1]);
   }
-  if (full) for (const f of ["transcript.md", "network.jsonl"]) rels.add(f);
+  // browsed.log too: a `middleware` handler's console.log lands ONLY there, so on
+  // a remote session the one place an agent's own instrumentation prints was the
+  // one artifact that never came down - it cost a `box exec` dig to read it.
+  if (full) for (const f of ["transcript.md", "network.jsonl", "browsed.log"]) rels.add(f);
   mkdirSync(local, { recursive: true });
   const missed = [];
   for (const rel of rels) {
@@ -2487,6 +2513,7 @@ const LAUNCH_FLAGS = Object.assign(Object.create(null), {
   "--keylog": ["BROWSE_KEYLOG", "1"], "--no-keylog": ["BROWSE_KEYLOG", "0"],
   "--popups": ["BROWSE_POPUPS", "1"], "--no-popups": ["BROWSE_POPUPS", "0"],
   "--net": ["BROWSE_NET", "1"], "--no-net": ["BROWSE_NET", "0"],
+  "--video": ["BROWSE_VIDEO", "1"], "--no-video": ["BROWSE_VIDEO", "0"],
 });
 /** Launch flags that take a value. `check` rejects a malformed one loudly —
  *  silently falling back to the default is how you record 40 minutes at the
@@ -2613,10 +2640,9 @@ async function client(argv) {
     // died as "unknown flag" with nothing pointing at the real problem, which is
     // placement. If a real command is sitting further along the line, say so.
     // Deliberately does NOT claim which command owns the flag: the word found
-    // here is just the first command-shaped one on the line, and `--timeout` in
-    // front of `click` would then be "a flag of click" — advice that fails on the
-    // very next turn, since click takes no --timeout. Where it goes is the part
-    // that is always true, and help is what says which command takes it.
+    // here is just the first command-shaped one on the line, so calling it the
+    // owner is advice that fails whenever the guess is wrong. Where it goes is
+    // the part that is always true, and help is what says which command takes it.
     const real = POST_FLAGS.has(cmd)
       && argv.slice(1).find((a) => !a.startsWith("-") && (DAEMON_COMMANDS.has(a) || LOCAL_CMDS.has(a)));
     if (real) {
@@ -2950,6 +2976,30 @@ function ffmpegBin() {
   return bin;
 }
 
+/** Why the last finalize did not produce an mp4. `close` is the only place a
+ *  user sees this, and for two sessions running it said "ffmpeg missing/failed"
+ *  about an ffmpeg that was installed and working: the real cause was the kernel
+ *  killing the encode on a 3.4 GB remote box. A finalize can fail for reasons
+ *  that live on opposite ends of the machine, so name the one that happened. */
+let FFMPEG_FAIL = null;
+function ffmpegFailNote() {
+  const f = FFMPEG_FAIL;
+  if (!f) return "ffmpeg missing/failed - mp4 not written";
+  if (f.kind === "missing") return "no ffmpeg on this machine - mp4 not written ('browse setup' installs one)";
+  if (f.kind === "signal") {
+    const mb = (n) => `${Math.round(n / 1e6)}MB`;
+    // Free memory is the evidence for the OOM reading, and it is the number the
+    // fix is chosen from (a bigger box / --size), so print it rather than assert.
+    const mem = f.total ? ` (${mb(f.free)} free of ${mb(f.total)}${REMOTE_SIDE ? " on the remote" : ""})` : "";
+    return `ffmpeg was killed by ${f.signal || "a signal"} mid-encode${mem} - mp4 not written. ` +
+      `On a small machine that is the out-of-memory killer; the .webm below is intact, ` +
+      `so re-cut it with ffmpeg somewhere with more RAM`;
+  }
+  if (f.kind === "status") return `ffmpeg exited ${f.status} - mp4 not written (the .webm below is intact)`;
+  if (f.kind === "empty") return "ffmpeg wrote an empty mp4 - mp4 not written (the .webm below is intact)";
+  return `ffmpeg could not be run (${f.message || "spawn failed"}) - mp4 not written`;
+}
+
 /**
  * Does this ffmpeg have `drawtext`? Homebrew's core `ffmpeg` bottle is now a SLIM
  * build without libfreetype (drawtext moved to `ffmpeg-full`), so the speed badge
@@ -3257,20 +3307,32 @@ function makeGif(mp4Path) {
 function finalizeRecording(webmPath, marks = {}) {
   const { speedMarks = [], keepMarks = [], cutMarks = [], stepMarks = [] } = marks;
   const ff = ffmpegBin();
-  if (!ff) return null;
+  if (!ff) { FFMPEG_FAIL = { kind: "missing" }; return null; }
+  FFMPEG_FAIL = null;
   const outPath = join(OUT, "recording.mp4");
   const win = analyzeVideo(webmPath);
   const forced = win ? forcedIntervals(speedMarks || []) : [];
   const segs = win ? planSegments(win, forced, IDLE.mode, IDLE.speed, keepMarks || [], cutMarks || []) : null;
 
+  /** One ffmpeg run, remembering HOW it failed. The distinction is the whole
+   *  point: a non-zero status is ffmpeg refusing the arguments, `status === null`
+   *  is the kernel killing it — on a small box, an OOM — and those two send you
+   *  to completely different places. */
+  const ff1 = (args) => {
+    let r;
+    try { r = spawnSync(ff, ["-y", "-loglevel", "error", ...args], { stdio: "ignore" }); }
+    catch (e) { FFMPEG_FAIL = { kind: "spawn", message: e && e.message }; return false; }
+    if (!r || r.error) { FFMPEG_FAIL = { kind: "spawn", message: r && r.error && r.error.message }; return false; }
+    if (r.status === null) { FFMPEG_FAIL = { kind: "signal", signal: r.signal, free: freemem(), total: totalmem() }; return false; }
+    if (r.status !== 0) { FFMPEG_FAIL = { kind: "status", status: r.status }; return false; }
+    return true;
+  };
   // Run ffmpeg once with the given pre-output args; true on a non-empty result.
   const runFfmpeg = (middle) => {
-    const args = ["-y", "-loglevel", "error", "-i", webmPath, ...middle,
-      "-an", "-movflags", "+faststart", "-pix_fmt", "yuv420p", outPath];
-    let r;
-    try { r = spawnSync(ff, args, { stdio: "ignore" }); } catch { return false; }
-    if (!r || r.error || r.status !== 0) return false;
-    try { return statSync(outPath).size > 0; } catch { return false; }
+    if (!ff1(["-i", webmPath, ...middle, "-an", "-movflags", "+faststart", "-pix_fmt", "yuv420p", outPath])) return false;
+    try { if (statSync(outPath).size > 0) return true; } catch { /* not written at all */ }
+    FFMPEG_FAIL = { kind: "empty" };
+    return false;
   };
   const run = (...args) => {
     try {
@@ -3351,9 +3413,54 @@ function finalizeRecording(webmPath, marks = {}) {
       kept.map((_, i) => `[v${i}]`).join("") +
       `concat=n=${kept.length}:v=1:a=0,fps=${OUTPUT_FPS}[v]`;
 
+    /**
+     * The same cut, one segment at a time. The graph above holds every branch's
+     * decoded frames at once, so its memory grows with the segment count: 16
+     * branches over a 7 MB webm was enough for the OOM killer on a 3.4 GB remote
+     * box, and `close` then reported a missing ffmpeg about an ffmpeg that ran
+     * fine. Encoding each segment to its own file and stream-copying them
+     * together with the concat DEMUXER costs one decode pass per segment and a
+     * fixed amount of memory, which is the trade worth making once the graph has
+     * already died. Only reached after a failure, so an ordinary session pays
+     * nothing for it.
+     */
+    const viaSegments = (withBadge) => {
+      const parts = [];
+      const rmParts = () => { for (const p of parts) { try { rmSync(p, { force: true }); } catch { /* ignore */ } } };
+      for (let i = 0; i < kept.length; i++) {
+        const s = kept[i];
+        const part = join(OUT, `.seg-${String(i).padStart(3, "0")}.mp4`);
+        const vf = `setpts=(PTS-STARTPTS)${s.kind === "speed" ? "/" + s.factor : ""}` +
+          `${s.kind === "speed" && withBadge ? badge(s.factor) : ""},fps=${OUTPUT_FPS}`;
+        // -ss/-t AFTER -i for the same reason the plain path does it: the .webm
+        // carries no seek cues, so a pre-input seek lands wide of the cut.
+        const ok = ff1(["-i", webmPath, "-ss", s.start.toFixed(3),
+          "-t", Math.max(0.04, s.end - s.start).toFixed(3), "-vf", vf,
+          "-an", "-pix_fmt", "yuv420p", part]);
+        if (!ok) { parts.push(part); rmParts(); return false; }
+        parts.push(part);
+      }
+      const list = join(OUT, ".segments.txt");
+      // The demuxer resolves each path against the LIST's directory, and they are
+      // all siblings of it, so bare basenames keep quoting out of it entirely.
+      try { writeFileSync(list, parts.map((p) => `file '${basename(p)}'`).join("\n") + "\n"); }
+      catch (e) { FFMPEG_FAIL = { kind: "spawn", message: e.message }; rmParts(); return false; }
+      const ok = ff1(["-f", "concat", "-safe", "0", "-i", list, "-c", "copy",
+        "-movflags", "+faststart", outPath]);
+      rmParts();
+      try { rmSync(list, { force: true }); } catch { /* ignore */ }
+      if (!ok) return false;
+      try { return statSync(outPath).size > 0; } catch { FFMPEG_FAIL = { kind: "empty" }; return false; }
+    };
+
     const anySpeed = kept.some((s) => s.kind === "speed");
     if (font && anySpeed && runFfmpeg(["-filter_complex", graph(true), "-map", "[v]"])) return finish(kept);
-    return runFfmpeg(["-filter_complex", graph(false), "-map", "[v]"]) ? finish(kept) : null;
+    if (runFfmpeg(["-filter_complex", graph(false), "-map", "[v]"])) return finish(kept);
+    // Both graphs are gone. Retry segment-wise before giving the session a raw
+    // .webm — the badge goes with the first attempt, since a badge failure is
+    // already covered above and this pass is about surviving, not decorating.
+    logDaemon(`finalize: filter_complex over ${kept.length} segments failed (${JSON.stringify(FFMPEG_FAIL)}) — retrying segment-wise`);
+    return viaSegments(false) ? finish(kept) : null;
   }
 
   // No cut/speed plan — just trim dead lead-in/out if worthwhile, and retime to
@@ -3539,7 +3646,7 @@ async function daemon() {
     logDaemon(`uncaught exception (session kept alive): ${e?.stack || e}`);
   });
   mkdirSync(OUT, { recursive: true });
-  mkdirSync(VIDEO_DIR, { recursive: true });
+  if (VIDEO_ON) mkdirSync(VIDEO_DIR, { recursive: true });
   mkdirSync(SHOTS_DIR, { recursive: true });
   logDaemon(`starting daemon (session ${SESSION}, out ${OUT})`);
 
@@ -3597,7 +3704,13 @@ async function daemon() {
   }
   logDaemon(`engine ${engine}${engine === "camoufox" ? ` (${camouOpts.executable_path})` : ""}`);
   // recordVideo on the CONTEXT ⇒ the whole session is captured; flushed on close.
-  const recordVideo = { dir: VIDEO_DIR, size: VIEWPORT };
+  // Undefined when video is off: recording is the default and the point of the
+  // tool, but a session whose only job is to READ the page (assert a count, mint
+  // a token, dump some state) pays a browser-side encode and an ffmpeg finalize
+  // for a file nobody watches. Agents were already faking it with
+  // BROWSE_FFMPEG=/usr/bin/false, which still records the .webm and then just
+  // fails to convert it — a worse version of this with a misleading close.
+  const recordVideo = VIDEO_ON ? { dir: VIDEO_DIR, size: VIEWPORT } : undefined;
   let browser = null, context;
 
   // One launch attempt for a given engine, so a camoufox failure (missing build,
@@ -3875,7 +3988,7 @@ async function daemon() {
   // whole session lands in ONE .webm; we surface its EXACT path on `close`
   // so the caller gets the file it just recorded — never a guessed glob or a
   // stale/leftover .webm sitting in the artifacts dir.
-  const video = page.video();
+  const video = VIDEO_ON ? page.video() : null;
 
   // A popup or a tab the page opened itself: wire it and SWITCH to it, because
   // an agent left driving the page behind the popup is stranded with no way to
@@ -4181,12 +4294,15 @@ async function daemon() {
       webm = null;
     }
     if (webm || mp4) logTranscript(`_Recording saved: ${mp4 || webm}_\n`);
+    // Carried out with the paths: only the finalizer knows WHY there is no mp4,
+    // and `close` is the one place anybody reads that.
+    const mp4Fail = !mp4 && webm ? ffmpegFailNote() : null;
     // Retire this session's run file — but only if it is still ours.
     try {
       const info = JSON.parse(readFileSync(runFile(SESSION), "utf8"));
       if (info.pid === process.pid) rmSync(runFile(SESSION), { force: true });
     } catch { /* already gone */ }
-    return { webm, mp4 };
+    return { webm, mp4, mp4Fail };
   }
 
   let idleT = null;
@@ -4440,21 +4556,69 @@ async function daemon() {
    *  styled label, so "visible" would be exactly the wrong element there. */
   async function actionTarget(cmd, sel) {
     const all = L(sel);
-    const plain = { loc: all.first(), note: "", hiddenOnly: false };
+    const plain = { loc: all.first(), note: "", hiddenOnly: false, total: 1, shown: 1 };
     if (cmd === "setInputFiles") return plain;
     let total = 0;
     try { total = await all.count(); } catch { return plain; }
-    if (total < 2) return plain;
+    if (total < 2) return { ...plain, total, shown: total };
     let shown = 0;
     const visible = all.filter({ visible: true });
     try { shown = await visible.count(); } catch { return plain; }
-    if (shown === 0) return { loc: all.first(), note: "", hiddenOnly: true };
-    if (shown === total) return { loc: all.first(), note: ` (selector matched ${total}, acted on the first)`, hiddenOnly: false };
+    if (shown === 0) return { loc: all.first(), note: "", hiddenOnly: true, total, shown };
+    if (shown === total) return { loc: all.first(), note: ` (selector matched ${total}, acted on the first)`, hiddenOnly: false, total, shown };
     return {
       loc: visible.first(),
       note: ` (selector matched ${total}, ${total - shown} hidden - acted on the first visible)`,
       hiddenOnly: false,
+      total,
+      shown,
     };
+  }
+
+  /**
+   * What a selector ACTUALLY matched, one line each. An ambiguous selector is the
+   * most expensive failure in the tool: browse acts on the first match, and when
+   * that one is behind a modal the action retries actionability until the clock
+   * runs out while the output never names the other N-1 - two of these cost one
+   * session seven minutes. This turns that into a list you can act on in the same
+   * turn, and it says what is COVERING each one, because "there is a dialog on
+   * top of it" is the answer nearly every time.
+   */
+  async function matchList(sel, max = 6) {
+    let all, n = 0;
+    try { all = L(sel); n = await all.count(); } catch { return ""; }
+    if (n < 2) return "";
+    const rows = [];
+    for (let i = 0; i < Math.min(n, max); i++) {
+      let d = null;
+      try {
+        d = await all.nth(i).evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          const name = (el.getAttribute("aria-label") || el.innerText || el.getAttribute("placeholder") || el.value || "")
+            .trim().replace(/\s+/g, " ").slice(0, 44);
+          let over = "";
+          if (r.width && r.height) {
+            const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            // Only when something ELSE owns that point - an ancestor or a child
+            // of the target is the element itself as far as a click is concerned.
+            if (top && top !== el && !el.contains(top) && !top.contains(el)) {
+              const id = top.id ? `#${top.id}`
+                : typeof top.className === "string" && top.className.trim()
+                  ? "." + top.className.trim().split(/\s+/)[0] : "";
+              over = `${top.tagName.toLowerCase()}${id}`.slice(0, 40);
+            }
+          }
+          return { tag: el.tagName.toLowerCase(), name, shown: !!(r.width && r.height), over };
+        }, { timeout: 2000 });
+      } catch { /* detached mid-list: skip it rather than lose the others */ }
+      if (!d) continue;
+      rows.push(`  nth=${i}  <${d.tag}>${d.name ? ` "${d.name}"` : ""}` +
+        `${d.shown ? "" : "  [not rendered]"}${d.over ? `  [covered by <${d.over}>]` : ""}`);
+    }
+    if (!rows.length) return "";
+    return `'${sel}' matches ${n} elements${n > max ? ` (first ${max})` : ""} and browse acted on the first:\n` +
+      rows.join("\n") +
+      `\npick one with '${sel} >> nth=<i>', or narrow the selector (a dialog scope: 'role=dialog >> ${sel}').`;
   }
 
   /** The READ half of actionTarget's note. `click` has always said "selector
@@ -4558,12 +4722,15 @@ async function daemon() {
    *  field is confirmed present, so a bad selector fails FAST (~6s, like the rest
    *  of browse) instead of hanging on the type, and the bezel never shows text that
    *  didn't actually get typed. Password fields are masked to bullets. */
-  async function humanType(loc, text, clear) {
+  async function humanType(loc, text, clear, budget = null) {
     // Resolve the field quickly; a missing/typo'd selector should fail in seconds
     // so the caller adapts — not block for the full pressSequentially timeout.
-    await loc.waitFor({ state: "visible", timeout: 4000 });
-    try { await loc.click({ timeout: 4000 }); } catch { /* pressSequentially focuses it */ }
-    if (clear) { try { await loc.fill("", { timeout: 4000 }); } catch { /* just type over it */ } }
+    // An explicit --timeout replaces that floor in BOTH directions: a field that
+    // appears after a 20s route compile is exactly what it is for.
+    const t = budget || 4000;
+    await loc.waitFor({ state: "visible", timeout: t });
+    try { await loc.click({ timeout: t }); } catch { /* pressSequentially focuses it */ }
+    if (clear) { try { await loc.fill("", { timeout: t }); } catch { /* just type over it */ } }
     if (!text) return;
     if (KEYLOG) {
       let shown = text;
@@ -4573,7 +4740,7 @@ async function daemon() {
       try { await page.evaluate(([t, c]) => window.__browseKeys && window.__browseKeys.type(t, c), [shown, cps]); }
       catch { /* best-effort */ }
     }
-    await loc.pressSequentially(text, { delay: TYPE_DELAY, timeout: 20000 });
+    await loc.pressSequentially(text, { delay: TYPE_DELAY, timeout: Math.max(budget || 0, 20000) });
   }
 
   /** Tokens worth matching on: words from a selector or an accessible name, minus
@@ -4615,7 +4782,47 @@ async function daemon() {
     }
     cands.sort((a, b) => b.score - a.score || a.name.length - b.name.length);
     const top = cands.slice(0, 3).map((c) => `role=${c.role}[name="${c.name}"]`);
-    return top.length ? `did you mean: ${top.join(" · ")}` : "";
+    const attr = await attrHint(selector);
+    const lines = [top.length ? `did you mean: ${top.join(" · ")}` : "", attr].filter(Boolean);
+    return lines.join("\n");
+  }
+
+  /** `text=` reads TEXT CONTENT, so it can never match a placeholder, a value or
+   *  a title - and that is exactly where a string copied off the screen tends to
+   *  live (an antd search box shows "Search country..." as a placeholder). The
+   *  a11y hint above covers it only when the element also has an accessible name,
+   *  and when it does not, the failure reads as "that text is not on the page"
+   *  about text the agent can plainly see. Name the attribute instead. */
+  const TEXT_SELECTOR = /^text=(.+)$|:has-text\(\s*["'`](.+?)["'`]\s*\)|^\s*["'`](.+)["'`]\s*$/;
+  async function attrHint(selector) {
+    const m = TEXT_SELECTOR.exec(String(selector).trim());
+    const needle = m && (m[1] ?? m[2] ?? m[3]);
+    if (!needle) return "";
+    // text= takes /re/ and "quoted" forms too; strip what we can and give up on
+    // a regex rather than searching for its source as a literal.
+    const raw = String(needle).trim();
+    if (raw.startsWith("/")) return "";
+    const want = raw.replace(/^["'`]|["'`]$/g, "");
+    if (want.length < 2) return "";
+    try {
+      const found = await page.evaluate((w) => {
+        const needle = w.toLowerCase();
+        const ATTRS = ["placeholder", "value", "aria-label", "title", "alt"];
+        const out = [];
+        for (const el of document.querySelectorAll("*")) {
+          for (const a of ATTRS) {
+            const v = a === "value" ? el.value : el.getAttribute(a);
+            if (typeof v !== "string" || !v.toLowerCase().includes(needle)) continue;
+            out.push(`[${a}="${v.slice(0, 60)}"]`);
+            break;
+          }
+          if (out.length >= 3) break;
+        }
+        return out;
+      }, want);
+      if (!found.length) return "";
+      return `'${want}' is not TEXT on this page, it is an attribute - text= never matches those. Try: ${found.join(" · ")}`;
+    } catch { return ""; }
   }
 
   /** Append the closest existing elements to a selector failure, so the agent can
@@ -4876,6 +5083,19 @@ async function daemon() {
     }
     if (PAGE_METHODS.has(cmd)) {
       const typing = cmd === "fill" || cmd === "type";
+      // `--timeout <ms>`, written LAST, on any act command. It used to live only
+      // on `wait` and the navigation verbs, so a click that could not land burned
+      // the caller's whole budget at the 12s default with no way to say "give up
+      // sooner" or "this route compiles for 40s, hold". The pair has to be the
+      // last two args so a data value can still be the word "--timeout".
+      let actTimeout = null;
+      if (args.length >= 2 && args[args.length - 2] === "--timeout") {
+        const v = Number(args[args.length - 1]);
+        if (!Number.isFinite(v) || v <= 0) throw new Error(`${cmd}: --timeout wants milliseconds, e.g. --timeout 5000`);
+        if (v > MAX_TIMER_MS) throw new Error(`${cmd}: --timeout ${v}ms is longer than a timer can run (max ${MAX_TIMER_MS}, ~24 days) - check the digits`);
+        actTimeout = v;
+        args = args.slice(0, -2);
+      }
       // Extra args go into Playwright's options slot as plain strings, where they
       // are DROPPED - so `click x --timeout 3000` used to wait the default 12s
       // and exit 0 as if the flag had been honoured. `wait` and `screenshot`
@@ -4914,7 +5134,7 @@ async function daemon() {
           throw new Error(`${cmd}: --dialog needs a value: accept | dismiss | "accept:my answer"`);
         }
         throw new Error(`${cmd}: unexpected argument '${extra}' - ${cmd} takes only a selector` +
-          `${String(extra).startsWith("-") ? ". Per-command timeouts live on 'browse wait <selector> --timeout <ms>'" : ""}`);
+          `${String(extra).startsWith("-") ? ` (a per-command timeout is '--timeout <ms>', written last: browse ${cmd} '${args[0]}' --timeout 5000)` : ""}`);
       }
       // No Playwright key name contains a space, so a multi-character key with one
       // in it is prose that meant `type`/`fill` — a real session spent a turn on
@@ -4939,6 +5159,15 @@ async function daemon() {
           return `ok - ${await brief()}`;
         }
         const target = await actionTarget(cmd, args[0]);
+        // Fail FAST on a genuinely ambiguous selector. Two or more VISIBLE
+        // matches means browse is guessing which one you meant, and when the
+        // guess is wrong (the page's "Create Database" behind a modal's
+        // "Create") Playwright's actionability retry burns the full default
+        // before saying anything useful. A short budget plus the match list
+        // below turns that into one cheap round trip. An explicit --timeout
+        // always wins - that is how you say "no, wait for it".
+        const budget = actTimeout ?? (target.shown > 1 ? AMBIGUOUS_MS : null);
+        const opts = budget ? { timeout: budget } : undefined;
         await cursorGlideTo(target.loc);
         // Clicking into a field to type gets a ripple too, like a real click.
         if (CLICK_LIKE.has(cmd) || typing) await cursorClickFx();
@@ -4977,7 +5206,7 @@ async function daemon() {
         // Everything past the selector goes through a Locator, which is what makes
         // an iframe scope (see L) work without any per-command handling.
         try {
-          if (typing) await humanType(target.loc, args.slice(1).join(" "), cmd === "fill");
+          if (typing) await humanType(target.loc, args.slice(1).join(" "), cmd === "fill", budget);
           // setInputFiles takes ONE array argument - spreading it would silently
           // drop every file but the first.
           else if (cmd === "setInputFiles") {
@@ -4985,7 +5214,7 @@ async function daemon() {
             // "ENOENT: stat" that reads like a browse fault.
             const missing = args.slice(1).filter((f) => !existsSync(f));
             if (missing.length) throw new Error(`setInputFiles: no such file: ${missing.join(", ")} (paths are resolved from the directory browse runs in)`);
-            await target.loc.setInputFiles(args.slice(1));
+            await target.loc.setInputFiles(args.slice(1), opts);
           }
           // Not a Locator method: a right click is `click` with a button. It gets
           // its own command rather than a flag because every other act command
@@ -4993,14 +5222,29 @@ async function daemon() {
           // context menu is otherwise unreachable — dispatching a synthetic
           // `contextmenu` event through `eval` reaches a React handler but not a
           // menu the browser itself opens.
-          else if (cmd === "rightclick") await target.loc.click({ button: "right" });
-          else await target.loc[cmd](...args.slice(1));
+          else if (cmd === "rightclick") await target.loc.click({ button: "right", ...opts });
+          // Each remaining verb takes (value?, options) - spreading the args into
+          // that slot is what used to DROP a flag written after them.
+          else if (cmd === "press") await target.loc.press(args[1], opts);
+          else if (cmd === "selectOption") await target.loc.selectOption(args.slice(1), opts);
+          else await target.loc[cmd](opts);
         } catch (e) {
           // An action that threw leaves the watch connected for the rest of the
           // session otherwise — the note below is the only other thing that
           // takes it down, and it is not reached from here.
           if (watching) await stopWatchingDom(0);
-          throw await withSelectorHint(e, args[0], target.hiddenOnly);
+          let err = await withSelectorHint(e, args[0], target.hiddenOnly);
+          // The selector DID match, so "did you mean" has nothing to add and is
+          // skipped above. What it matched is the answer here.
+          if (target.total > 1) {
+            let list = "";
+            try { list = await matchList(args[0]); } catch { /* the list is a bonus */ }
+            if (list) {
+              err = new Error(`${err?.message || err}\n${list}` +
+                (budget === AMBIGUOUS_MS ? `\ngave up after ${AMBIGUOUS_MS}ms because the selector is ambiguous - '--timeout <ms>' waits longer.` : ""));
+            }
+          }
+          throw err;
         }
         // Let the popup land (context.on("page") switches to it) so this command
         // reports where the session actually IS, with its note attached.
@@ -5264,7 +5508,22 @@ async function daemon() {
           // A bare path is what an agent naturally passes; waitForURL wants a glob
           // (or a full url), so wrap a path into one rather than never matching.
           const pat = /^[a-z]+:\/\//i.test(url) || url.includes("*") ? url : `**${url}**`;
-          await page.waitForURL(pat, { timeout });
+          try { await page.waitForURL(pat, { timeout }); }
+          catch (e) {
+            // Playwright's message names the PATTERN and not where the page
+            // actually is, so a wait that timed out on a query string read as
+            // "the app never navigated" - and the fix is invisible without the
+            // real url in front of you.
+            const at = page.url();
+            const bare = url.replace(/\*+/g, "");
+            const close = bare && at.includes(bare) && pat !== `**${url}**`;
+            throw new Error(`wait --url '${url}': timed out after ${timeout}ms - the page is at ${at}` +
+              (close
+                // The glob is anchored at BOTH ends, so a pattern that stops at
+                // the path never matches a url that carries a query or a hash.
+                ? `\nthat url does contain '${bare}', but the pattern has to match the WHOLE url - write '${url}**' (or drop the '*' and browse anchors it for you).`
+                : ""), { cause: e });
+          }
           return `ok - ${await brief()}`;
         }
         if (sel != null && /^\d+$/.test(sel)) {
@@ -5676,7 +5935,28 @@ async function daemon() {
         if (args[i] === "--save") {
           mkdirSync(join(BROWSE_HOME, "state"), { recursive: true });
           await context.storageState({ path });
-          return `saved cookies + localStorage → ${path}` + (REMOTE_SIDE
+          // Count what actually landed. "saved cookies + localStorage" was true
+          // of a file holding nothing useful, and the only way to find out was a
+          // python one-liner over the JSON - on the run whose entire purpose was
+          // handing a login to another machine. The asymmetry is the point:
+          // cookies are context-wide, localStorage exists only for origins this
+          // session actually VISITED, so a state file can carry a login's cookies
+          // and none of its app state without saying so.
+          let inv = "";
+          try {
+            const st = JSON.parse(readFileSync(path, "utf8"));
+            const cookies = st.cookies || [], origins = st.origins || [];
+            const domains = new Set(cookies.map((c) => String(c.domain || "").replace(/^\./, "")));
+            const withLs = origins.filter((o) => (o.localStorage || []).length);
+            inv = `${cookies.length} cookie${cookies.length === 1 ? "" : "s"} across ${domains.size} domain${domains.size === 1 ? "" : "s"}` +
+              ` + localStorage for ${withLs.length} origin${withLs.length === 1 ? "" : "s"}`;
+            // The gap that bites: an auth provider's cookies are there, but the
+            // origin was never opened, so none of its localStorage came along.
+            const seen = new Set(origins.map((o) => { try { return new URL(o.origin).host; } catch { return o.origin; } }));
+            const authy = [...domains].filter((d) => /(^|\.)(clerk|auth0|okta|accounts|login|auth)\./.test(d) && !seen.has(d));
+            if (authy.length) inv += `\n  note: cookies for ${authy.slice(0, 3).join(", ")} but no localStorage from ${authy.length > 1 ? "those origins" : "that origin"} - this session never opened ${authy.length > 1 ? "them" : "it"}. Fine for an OAuth handoff; not enough if the app keeps its session in localStorage there.`;
+          } catch { /* the file is written either way - the inventory is a bonus */ }
+          return `saved ${inv || "cookies + localStorage"} → ${path}` + (REMOTE_SIDE
             ? " (on the REMOTE - that is where the browser is. `browse box pull <box> <path>` brings it here)" : "");
         }
         // NOT browser.newContext({ storageState }): recordVideo lives on THIS
@@ -5949,8 +6229,12 @@ async function daemon() {
           send({
             ok: true,
             result: (saved && (saved.mp4 || saved.webm)
-              ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (ffmpeg missing/failed - mp4 not written)`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`
-              : "closed - recording flushed (no video captured)") + lastNotes,
+              ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (${saved.mp4Fail || "ffmpeg missing/failed - mp4 not written"})`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`
+              : VIDEO_ON
+                ? "closed - recording flushed (no video captured)"
+                // Not a failure, and it must not read as one: the caller asked
+                // for this with --no-video. Name what IS there instead.
+                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)}`) + lastNotes,
           });
           // The gif is a two-pass encode that can outlast the client's 120s
           // timeout on a long session. It runs AFTER the reply, so the mp4 path

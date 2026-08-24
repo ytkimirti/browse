@@ -31,6 +31,12 @@ spawns, and pointing it at a dead port records the failure.
   matters, see `skill/engines.md`.
 - **The mp4 only comes back on `close`.** Kill the session without closing and
   the recording stays on the remote (browse tells you where). Close it properly.
+- **The finalize runs on the remote's RAM, not yours.** A long session with many
+  cuts is the heaviest thing browse does, and on a small machine the kernel can
+  kill it: `close` then says ffmpeg was killed by a signal, prints the free
+  memory, and hands you the intact `.webm`. It retries a bounded-memory encode
+  first, so this should be rare — when it does happen, re-cut that webm here
+  rather than re-recording, and give the next run a bigger machine.
 - **`--remote` goes on every command**, `close` included. Export `BROWSE_REMOTE`
   once and stay in that shell.
 - Commands that read the remote's disk, `profiles`, `clear` and `setup`, run

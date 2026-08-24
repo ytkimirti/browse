@@ -12,7 +12,7 @@
 // silently became yellow — which is the one failure an agent cannot see.
 
 import { spawnSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statfsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, statfsSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -165,19 +165,22 @@ try {
   // so `click x --timeout 3000` waited the default and exited 0 regardless.
   console.log("\nact commands reject unknown flags");
   fails("click rejects an unknown flag", ["click", "#btn", "--bogus"], /unexpected argument '--bogus'/);
-  fails("click rejects --timeout (it is a wait flag)", ["click", "#btn", "--timeout", "3000"], /unexpected argument '--timeout'.*browse wait/s);
+  // --timeout is the one flag they DO take now: a hung click used to burn the
+  // caller's whole budget because only `wait` could bound one.
+  works("click takes --timeout", ["click", "#btn", "--timeout", "5000"], /^ok/);
+  fails("...but not a non-numeric one", ["click", "#btn", "--timeout", "abc"], /--timeout wants milliseconds/);
   fails("hover rejects an unknown flag", ["hover", "#btn", "--nope"], /unexpected argument '--nope'/);
   // A single dash was the hole: `wait`/`screenshot` reject any leading dash, so
   // act commands must too, and a stray bare word is the same silent drop.
   fails("click rejects a SINGLE-dash flag", ["click", "#btn", "-timeout", "3000"], /unexpected argument '-timeout'/);
   fails("click rejects a stray bare argument", ["click", "#btn", "junk"], /unexpected argument 'junk'/);
   fails("--dialog with no value says the value is missing", ["click", "#btn", "--dialog"], /--dialog needs a value/);
-  check("no rejected click reached the page",
-    read("document.getElementById('clicks').textContent") === "3",
+  check("no rejected click reached the page (only the --timeout one did)",
+    read("document.getElementById('clicks').textContent") === "4",
     read("document.getElementById('clicks').textContent"));
   works("--dialog with a good value still works", ["click", "#btn", "--dialog", "accept"]);
   check("the one accepted click did reach the page",
-    read("document.getElementById('clicks').textContent") === "4",
+    read("document.getElementById('clicks').textContent") === "5",
     read("document.getElementById('clicks').textContent"));
   // Commands whose trailing args are DATA must still accept a dashed value -
   // rejecting those was the over-correction this section guards against.
@@ -472,7 +475,7 @@ try {
   const STATEFILE = join(OUT, "cookies.json");
   works("open a page that mints its own cookie", ["goto", `${BASE}/cookie`], /ok/);
   const savedSeq = read("document.cookie.replace(/.*sess=/, '')");
-  works("save that state", ["state", "--save", STATEFILE], /saved cookies/);
+  works("save that state", ["state", "--save", STATEFILE], /saved 1 cookie across 1 domain/);
   works("reload, so the page mints a newer one", ["goto", `${BASE}/cookie`], /ok/);
   check("...and it really is newer", read("document.cookie.replace(/.*sess=/, '')") !== savedSeq,
     `${savedSeq} -> ${read("document.cookie.replace(/.*sess=/, '')")}`);
@@ -497,8 +500,9 @@ try {
   check("...and the page's contextmenu handler fired",
     read("document.getElementById('ctxmenu').textContent") === "open",
     read("document.getElementById('ctxmenu').textContent"));
-  fails("rightclick rejects a stray argument", ["rightclick", "#ctx", "--timeout", "3000"],
-    /unexpected argument '--timeout'/);
+  fails("rightclick rejects a stray argument", ["rightclick", "#ctx", "--nope", "3000"],
+    /unexpected argument '--nope'/);
+  works("...but takes --timeout like every other act command", ["rightclick", "#ctx", "--timeout", "5000"], /^ok/);
   fails("rightclick on nothing fails", ["rightclick", "#no-such-thing"], /rightclick|Timeout/);
 
   /* ------------------------------------------------- a click that does nothing */
@@ -569,6 +573,175 @@ try {
     } finally {
       cr("close");
       rmSync(CRASHOUT, { recursive: true, force: true });
+    }
+  }
+
+  /* ------------------------------------------------ --timeout on a typing command */
+  // fill/type take their text as DATA, so the flag has to be recognised without
+  // eating a value that legitimately starts with a dash.
+  console.log("\n--timeout on a typing command");
+  {
+    browse("goto", `${BASE}/ui`);
+    const filled = browse("fill", "#in", "hello", "--timeout", "5000");
+    check("fill takes --timeout", filled.code === 0, `exit ${filled.code} · ${filled.err}`);
+    check("...without typing the flag into the field",
+      browse("eval", "document.getElementById('in').value").out.trim() === "hello",
+      browse("eval", "document.getElementById('in').value").out);
+  }
+
+  /* ------------------------------------ an ambiguous selector fails fast */
+  // Two visible matches means browse is GUESSING which one you meant. When the
+  // guess is the one under a modal backdrop, Playwright retries actionability in
+  // silence to the full default — two of these cost one real session 7 minutes.
+  console.log("\nan ambiguous selector fails fast and names what it matched");
+  {
+    browse("goto", `${BASE}/ambig`);
+    const t0 = Date.now();
+    const r = browse("click", "button.go");
+    const took = Date.now() - t0;
+    check("the click fails", r.code === 1, `exit ${r.code} · ${r.out}`);
+    check("...well before the 12s default", took < 11000, `took ${took}ms`);
+    check("...naming both matches", /matches 2 elements/.test(r.err), r.err);
+    check("...and what is covering the one it tried", /covered by <div#backdrop>/.test(r.err), r.err);
+    check("...and how to pick one", /nth=/.test(r.err), r.err);
+    check("...and that --timeout waits longer", /--timeout/.test(r.err), r.err);
+    const ok = browse("click", "button.go >> nth=1");
+    check("nth= disambiguates it", ok.code === 0, `exit ${ok.code} · ${ok.err}`);
+    check("...and the modal's button is the one that got clicked",
+      /modalbtn/.test(browse("eval", "document.getElementById('clicked').textContent").out),
+      browse("eval", "document.getElementById('clicked').textContent").out);
+  }
+
+  /* ----------------------------------- a text= that is really an attribute */
+  // `text=` reads text CONTENT. A string the agent read off the screen is often a
+  // placeholder, and the failure then reads as "that text is not on the page"
+  // about text plainly visible in the screenshot.
+  console.log("\na text= selector that is really an attribute says so");
+  {
+    const r = browse("click", "text=Search country...");
+    check("it fails", r.code === 1, `exit ${r.code} · ${r.out}`);
+    check("...saying the string is an attribute, not text", /is an attribute/.test(r.err), r.err);
+    check("...and naming the attribute selector", /\[placeholder="Search country\.\.\."\]/.test(r.err), r.err);
+    const ok = browse("click", '[placeholder="Search country..."]');
+    check("...which works", ok.code === 0, `exit ${ok.code} · ${ok.err}`);
+  }
+
+  /* ---------------------------------------------------------- wait --url */
+  console.log("\nwait --url says where the page actually is");
+  {
+    browse("goto", `${BASE}/ui?tab=one`);
+    // The glob has to match the WHOLE url, so a pattern that stops at the path
+    // never matches one carrying a query — and Playwright's own message names
+    // the pattern and not the page, which reads as "it never navigated".
+    const r = browse("wait", "--url", "**/ui", "--timeout", "1200");
+    check("it fails", r.code === 1, `exit ${r.code} · ${r.out}`);
+    check("...naming the url the page is actually on", /\/ui\?tab=one/.test(r.err), r.err);
+    check("...and the pattern that would have matched", /\*\*\/ui\*\*/.test(r.err), r.err);
+    const ok = browse("wait", "--url", "**/ui**", "--timeout", "2000");
+    check("...which does match", ok.code === 0, `exit ${ok.code} · ${ok.err}`);
+  }
+
+  /* -------------------------------------------------------- state --save */
+  // "saved cookies + localStorage" was equally true of a file holding nothing,
+  // and the only way to find out was a python parse of the JSON — on the run
+  // whose whole purpose was handing a login to another machine.
+  console.log("\nstate --save reports what it captured");
+  {
+    browse("goto", `${BASE}/ui`);
+    const f = join(OUT, "state.json");
+    const r = browse("state", "--save", f);
+    check("it saves", r.code === 0 && existsSync(f), `exit ${r.code} · ${r.err}`);
+    check("...with a countable inventory",
+      /\d+ cookies? across \d+ domains? \+ localStorage for \d+ origins?/.test(r.out), r.out);
+  }
+
+  /* ------------------------------------------------------------ --no-video */
+  // Agents were faking this with BROWSE_FFMPEG=/usr/bin/false, which still pays
+  // for the browser-side encode and then merely fails to convert it.
+  console.log("\n--no-video");
+  {
+    const NV = `${SESSION}-novideo`, NVOUT = mkdtempSync(join(tmpdir(), "browse-novid-"));
+    const nv = (...args) => browseIn(NV, NVOUT, {}, args);
+    try {
+      const opened = nv("--no-video", "open", `${BASE}/ui`);
+      check("a --no-video session opens", opened.code === 0, `exit ${opened.code} · ${opened.err}`);
+      const shot = nv("screenshot", "still.png");
+      check("...and still writes screenshots", shot.code === 0 && existsSync(join(NVOUT, "still.png")),
+        `exit ${shot.code} · ${shot.out}${shot.err}`);
+      const c = nv("close", 120000);
+      check("close says the video was off, not that something failed",
+        c.code === 0 && /video was off/.test(c.out) && !/ffmpeg/.test(c.out), `exit ${c.code} · ${c.out}${c.err}`);
+      check("...and wrote no mp4", !existsSync(join(NVOUT, "recording.mp4")), readdirSync(NVOUT).join(" "));
+      check("...and no raw webm either", !existsSync(join(NVOUT, "video")), readdirSync(NVOUT).join(" "));
+      check("...but kept the transcript", existsSync(join(NVOUT, "transcript.md")), readdirSync(NVOUT).join(" "));
+    } finally {
+      rmSync(NVOUT, { recursive: true, force: true });
+    }
+  }
+
+  /* -------------------------------------------- how the mp4 finalize fails */
+  // Two sessions on a real remote reported "ffmpeg missing/failed" from a box
+  // where ffmpeg was installed and working: the 16-branch filter_complex was
+  // OOM-killed on a 3.4 GB machine. Both halves of that are covered here with a
+  // wrapper ffmpeg that fails the way the kernel does — by signal.
+  console.log("\nthe mp4 finalize when ffmpeg dies");
+  {
+    const REAL = spawnSync("sh", ["-c", "command -v ffmpeg"], { encoding: "utf8" }).stdout.trim();
+    if (!REAL) console.log("  skip (no system ffmpeg to wrap)");
+    else {
+      const wrapper = (name, body) => {
+        const path = join(OUT, name);
+        writeFileSync(path, `#!/bin/sh\n${body}\nexec ${REAL} "$@"\n`);
+        chmodSync(path, 0o755);
+        return path;
+      };
+      // a) EVERY encode dies on a signal (probing -version/-filters still works,
+      //    which is exactly the state that made this look like a missing binary).
+      {
+        const oom = wrapper("ffmpeg-oom.sh",
+          `case " $* " in *" -version "*|*" -filters "*) ;; *) kill -9 $$ ;; esac`);
+        const S = `${SESSION}-oom`, O = mkdtempSync(join(tmpdir(), "browse-oom-"));
+        const b = (...args) => browseIn(S, O, { BROWSE_FFMPEG: oom }, args);
+        try {
+          b("open", `${BASE}/ui`);
+          b("wait", "1200");
+          const c = b("close", 180000);
+          check("close still succeeds", c.code === 0, `exit ${c.code} · ${c.err}`);
+          check("...and blames the signal, not a missing ffmpeg",
+            /killed by SIG/.test(c.out) && !/ffmpeg missing/.test(c.out), c.out);
+          check("...and says how much memory was free", /free of /.test(c.out), c.out);
+          check("...and keeps the webm as the recording", /webm:/.test(c.out), c.out);
+        } finally { rmSync(O, { recursive: true, force: true }); }
+      }
+      // b) only the N-branch graph dies — which is the real box's failure — so
+      //    the segment-wise retry has to produce the mp4 unattended.
+      {
+        const nograph = wrapper("ffmpeg-nograph.sh",
+          `case " $* " in *" -filter_complex "*) kill -9 $$ ;; esac`);
+        const S = `${SESSION}-seg`, O = mkdtempSync(join(tmpdir(), "browse-seg-"));
+        const b = (...args) => browseIn(S, O, { BROWSE_FFMPEG: nograph }, args);
+        try {
+          b("open", `${BASE}/ui`);
+          // A speed region forces a multi-segment plan, which is what the graph
+          // path is for: without one the finalize is a plain trim and never
+          // builds the graph that dies.
+          b("speed", "4");
+          b("wait", "2000");
+          b("speed", "off");
+          b("wait", "1200");
+          const c = b("close", 300000);
+          check("close succeeds", c.code === 0, `exit ${c.code} · ${c.err}`);
+          check("...and still hands back an mp4", /mp4:/.test(c.out), c.out);
+          const mp4 = join(O, "recording.mp4");
+          check("...that exists and is not empty",
+            existsSync(mp4) && statSync(mp4).size > 1000, readdirSync(O).join(" "));
+          const dlog = existsSync(join(O, "browsed.log")) ? readFileSync(join(O, "browsed.log"), "utf8") : "";
+          check("...written by the segment-wise retry", /retrying segment-wise/.test(dlog),
+            dlog.split("\n").slice(-4).join("\n"));
+          check("...leaving no segment temp files behind",
+            !readdirSync(O).some((f) => f.startsWith(".seg-") || f === ".segments.txt"), readdirSync(O).join(" "));
+        } finally { rmSync(O, { recursive: true, force: true }); }
+      }
     }
   }
 

@@ -193,8 +193,8 @@ try {
     /--dialog is a command's own flag.*goes AFTER the command/s);
   fails("--full before the command", ["--full", "screenshot"], /goes AFTER the command/);
   // The message must NOT claim which command owns the flag. The word found on
-  // the line is just the first command-shaped one, and `click` takes no
-  // --timeout — so "a flag of click" was advice that failed on the next turn.
+  // the line is just the first command-shaped one, and it is only ever a guess —
+  // naming it as the owner is advice that fails whenever the guess is wrong.
   const wrongOwner = browse("--timeout", "30000", "click", "#x");
   check("...and it does not claim the wrong owner",
     wrongOwner.code === 1 && !/flag of `click`/.test(wrongOwner.err), wrongOwner.err);
@@ -298,7 +298,7 @@ try {
   // reported it as saved state.
   fails("--save given a flag as its filename", ["state", "--save", "--clean"],
     /--save needs a filename - got the flag '--clean'/);
-  works("--save with a real path", ["state", "--save", STATE_FILE], /saved cookies/);
+  works("--save with a real path", ["state", "--save", STATE_FILE], /saved \d+ cookies? across \d+ domains?/);
   check("...and the state file is on disk", existsSync(STATE_FILE));
 
   /* --------------------------------------------------- multi-match reads */

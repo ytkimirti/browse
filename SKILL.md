@@ -76,6 +76,11 @@ recording need not be the deliverable. When the user wants a demo, or the moving
 interaction is the point, read `skill/recording.md` BEFORE the session starts,
 since the frame size is fixed the moment the browser spawns.
 
+Recording is on by default because it is usually the proof. Turn it off only when
+the run is a pure READ nobody will watch — asserting a count, minting a token,
+exporting state — and decide that on the FIRST command, since it is a launch
+flag. If there is any chance the user will ask "show me", keep it.
+
 ## Hand off artifacts
 
 Each session gets `~/.browse/sessions/<timestamp>/` with `transcript.md`,

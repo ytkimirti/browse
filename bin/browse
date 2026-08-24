@@ -62,7 +62,8 @@ if (( $# )); then
       --remote) REMOTE_SEEN=1; _i=$((_i + 2)) ;;
       -s|--session|-p|--profile|--viewport|--type-delay|--idle) _i=$((_i + 2)) ;;
       --headful|--headless|--camoufox|--chromium|--cursor|--no-cursor|\
-      --keylog|--no-keylog|--popups|--no-popups|--net|--no-net) _i=$((_i + 1)) ;;
+      --keylog|--no-keylog|--popups|--no-popups|--net|--no-net|\
+      --video|--no-video) _i=$((_i + 1)) ;;
       -*) break ;;
       *) CMD="${_argv[$_i]}"; CMD_AT="$_i"; break ;;
     esac
