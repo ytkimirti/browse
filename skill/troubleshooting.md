@@ -6,12 +6,12 @@
 - Daemon won't start → read `browsed.log` in the session dir it printed.
 - A missing selector fails in ~4-12s by design and the error lists the closest
   matches from the a11y tree — use those instead of retrying blindly.
-- **Two visible matches is a guess, and browse now refuses to make it slowly.**
-  An act command whose selector matches more than one VISIBLE element gives up in
-  seconds and lists what it matched, including whatever is painted on top of the
-  one it tried (a modal backdrop, nearly always). Scope the selector to the thing
-  you mean (`role=dialog >> ...`) or take the match you want by index; pass
-  `--timeout <ms>` only when the wait is genuinely the problem.
+- **A selector that matches several things is a guess, and a guess under a modal
+  is a guaranteed timeout.** When the match browse picks turns out to be covered
+  by something else it gives up quickly and lists every match with what is on top
+  of it — nearly always the dialog that just opened. Scope the selector to the
+  thing you actually mean (`role=dialog >> …`) rather than raising the wait;
+  waiting longer cannot uncover it.
 - **A hidden twin no longer eats the action.** UIs that keep a closed dialog or
   menu mounted (Ant Design, Radix `forceMount`) leave an invisible copy of the
   same input or button earlier in the DOM. An element command acts on the first

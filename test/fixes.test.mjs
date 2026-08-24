@@ -170,6 +170,13 @@ try {
   works("click takes --timeout", ["click", "#btn", "--timeout", "5000"], /^ok/);
   fails("...but not a non-numeric one", ["click", "#btn", "--timeout", "abc"], /--timeout wants milliseconds/);
   fails("hover rejects an unknown flag", ["hover", "#btn", "--nope"], /unexpected argument '--nope'/);
+  // Stripping the pair off `press '#sel' --timeout N` left a lone selector, and
+  // press's one-arg form then sent it to the keyboard AS A KEY.
+  fails("press <selector> --timeout is refused, not pressed as a key",
+    ["press", "#in", "--timeout", "5000"], /--timeout belongs to the element form/);
+  fails("...and so is a page-level press with one", ["press", "Escape", "--timeout", "5000"],
+    /waits for nothing, so it takes no timeout/);
+  works("press <selector> <key> --timeout still works", ["press", "#in", "a", "--timeout", "5000"], /^ok/);
   // A single dash was the hole: `wait`/`screenshot` reject any leading dash, so
   // act commands must too, and a stray bare word is the same silent drop.
   fails("click rejects a SINGLE-dash flag", ["click", "#btn", "-timeout", "3000"], /unexpected argument '-timeout'/);
@@ -610,6 +617,21 @@ try {
     check("...and the modal's button is the one that got clicked",
       /modalbtn/.test(browse("eval", "document.getElementById('clicked').textContent").out),
       browse("eval", "document.getElementById('clicked').textContent").out);
+    // The regression the fast path must NOT cause: three identical visible rows
+    // are ambiguous too, and completely actionable. Shortening those would break
+    // every "click the first row of a list" in the tool.
+    const rows = browse("click", "button.row");
+    check("an ambiguous but UNCOVERED selector still acts", rows.code === 0, `exit ${rows.code} · ${rows.err}`);
+    check("...saying which of them it took", /selector matched 3, acted on the first/.test(rows.out), rows.out);
+    check("...and the page saw exactly that one click",
+      browse("eval", "document.getElementById('rows').textContent").out.trim() === "1",
+      browse("eval", "document.getElementById('rows').textContent").out);
+    // An explicit --timeout is how you say "no, wait for it" — and the reply must
+    // not then blame the caller for a budget the caller set.
+    const explicit = browse("click", "button.go", "--timeout", String(4000));
+    check("an explicit --timeout still fails on the covered match", explicit.code === 1, `exit ${explicit.code}`);
+    check("...without claiming browse chose the budget",
+      !/gave up after/.test(explicit.err), explicit.err);
   }
 
   /* ----------------------------------- a text= that is really an attribute */
@@ -624,6 +646,15 @@ try {
     check("...and naming the attribute selector", /\[placeholder="Search country\.\.\."\]/.test(r.err), r.err);
     const ok = browse("click", '[placeholder="Search country..."]');
     check("...which works", ok.code === 0, `exit ${ok.code} · ${ok.err}`);
+    // The hint must stay quiet when the string really IS text on the page: told
+    // "that is an attribute" about visible text, an agent goes at the wrong fix.
+    const real = browse("click", "text=Rowdy-no-such-thing");
+    check("...and says nothing about attributes when there is no such attribute",
+      real.code === 1 && !/is an attribute/.test(real.err), real.err);
+    // :has-text() and the exact form fail for their own reasons, so they must not
+    // get the attribute claim either.
+    const hasText = browse("click", 'button:has-text("Search country")');
+    check("...nor for :has-text()", hasText.code === 1 && !/is an attribute/.test(hasText.err), hasText.err);
   }
 
   /* ---------------------------------------------------------- wait --url */
@@ -668,10 +699,20 @@ try {
       const shot = nv("screenshot", "still.png");
       check("...and still writes screenshots", shot.code === 0 && existsSync(join(NVOUT, "still.png")),
         `exit ${shot.code} · ${shot.out}${shot.err}`);
+      // Everything that only means something to a recording has to REFUSE here,
+      // not accept and do nothing.
+      const sp = nv("speed", "4");
+      check("...but speed refuses, instead of annotating a video that will not exist",
+        sp.code === 1 && /no-video/.test(sp.err), `exit ${sp.code} · ${sp.err}`);
+      const gif = nv("close", "--gif");
+      check("...and close --gif refuses too", gif.code === 1 && /no-video/.test(gif.err),
+        `exit ${gif.code} · ${gif.err}`);
       const c = nv("close", 120000);
       check("close says the video was off, not that something failed",
         c.code === 0 && /video was off/.test(c.out) && !/ffmpeg/.test(c.out), `exit ${c.code} · ${c.out}${c.err}`);
       check("...and wrote no mp4", !existsSync(join(NVOUT, "recording.mp4")), readdirSync(NVOUT).join(" "));
+      check("...and no leftover empty one either",
+        !readdirSync(NVOUT).some((f) => f.endsWith(".mp4")), readdirSync(NVOUT).join(" "));
       check("...and no raw webm either", !existsSync(join(NVOUT, "video")), readdirSync(NVOUT).join(" "));
       check("...but kept the transcript", existsSync(join(NVOUT, "transcript.md")), readdirSync(NVOUT).join(" "));
     } finally {
@@ -722,13 +763,18 @@ try {
         const b = (...args) => browseIn(S, O, { BROWSE_FFMPEG: nograph }, args);
         try {
           b("open", `${BASE}/ui`);
-          // A speed region forces a multi-segment plan, which is what the graph
-          // path is for: without one the finalize is a plain trim and never
-          // builds the graph that dies.
-          b("speed", "4");
-          b("wait", "2000");
+          // Almost the whole clip is ONE 2x speed region, so its length is what
+          // the output duration is made of. That is deliberate: the first version
+          // of this fallback cut each segment with output-side -ss/-t, which runs
+          // AFTER the setpts retime and silently wrote a ZERO-frame part for
+          // every sped segment — ffmpeg exits 0, concat swallows it, and the mp4
+          // comes out looking fine to any existence check. Only a duration
+          // assertion catches that.
+          b("speed", "2");
+          b("scroll", "200");
+          b("wait", "4000");
+          b("scroll", "-200");
           b("speed", "off");
-          b("wait", "1200");
           const c = b("close", 300000);
           check("close succeeds", c.code === 0, `exit ${c.code} · ${c.err}`);
           check("...and still hands back an mp4", /mp4:/.test(c.out), c.out);
@@ -738,6 +784,17 @@ try {
           const dlog = existsSync(join(O, "browsed.log")) ? readFileSync(join(O, "browsed.log"), "utf8") : "";
           check("...written by the segment-wise retry", /retrying segment-wise/.test(dlog),
             dlog.split("\n").slice(-4).join("\n"));
+          // >4s of real time at 2x is at least 2s of video, and the lead-in/tail
+          // keeps are short. Under the dropped-segment bug the sped stretch
+          // contributes NOTHING and this lands near zero. Only a lower bound: how
+          // much real time the keeps add is a property of the machine, so an
+          // upper bound tight enough to mean anything would be flaky (the same
+          // session measures 3s here and 7s on a slow remote).
+          const probe = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", mp4], { encoding: "utf8" });
+          const dur = Number((probe.stdout || "").trim());
+          check("...carrying the sped-up stretch, retimed, not dropped",
+            Number.isFinite(dur) && dur > 1.5, `duration=${probe.stdout || probe.stderr}`);
           check("...leaving no segment temp files behind",
             !readdirSync(O).some((f) => f.startsWith(".seg-") || f === ".segments.txt"), readdirSync(O).join(" "));
         } finally { rmSync(O, { recursive: true, force: true }); }

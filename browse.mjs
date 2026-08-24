@@ -1179,11 +1179,12 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     server compiling a route on first hit. goBack/goForward FAIL when
                                     there is nowhere to go. A landing url that looks like a sign-in
                                     wall is called out inline, here and after a click.
-  browse click <selector>           click an element. Every act command here takes --timeout <ms> as
-                                    its LAST two arguments (default 12000): raise it for a control that
-                                    is still rendering, lower it to fail fast. A selector matching more
-                                    than one VISIBLE element gives up after ${AMBIGUOUS_MS}ms instead and lists
-                                    what it matched, with whatever is covering each one.
+  browse click <selector>           click an element. Every command that takes a SELECTOR (click through
+                                    focus below — not drag or scroll) also takes --timeout <ms>, written
+                                    LAST: raise it for a control that is still rendering, lower it to
+                                    fail fast. When a selector matches several visible elements AND the
+                                    one browse picks is covered by something else, it gives up after
+                                    ${AMBIGUOUS_MS}ms instead and lists every match with what is on top of it.
   browse dblclick <selector>        double-click an element
   browse rightclick <selector>      right-click it — opens the app's context menu
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
@@ -3331,6 +3332,10 @@ function finalizeRecording(webmPath, marks = {}) {
   const runFfmpeg = (middle) => {
     if (!ff1(["-i", webmPath, ...middle, "-an", "-movflags", "+faststart", "-pix_fmt", "yuv420p", outPath])) return false;
     try { if (statSync(outPath).size > 0) return true; } catch { /* not written at all */ }
+    // A zero-byte recording.mp4 left in the dir contradicts the "mp4 not written"
+    // the caller is about to be told, and is exactly the file a script would pick
+    // up by glob.
+    try { rmSync(outPath, { force: true }); } catch { /* ignore */ }
     FFMPEG_FAIL = { kind: "empty" };
     return false;
   };
@@ -3430,14 +3435,24 @@ function finalizeRecording(webmPath, marks = {}) {
       for (let i = 0; i < kept.length; i++) {
         const s = kept[i];
         const part = join(OUT, `.seg-${String(i).padStart(3, "0")}.mp4`);
-        const vf = `setpts=(PTS-STARTPTS)${s.kind === "speed" ? "/" + s.factor : ""}` +
+        // The cut is `trim`, exactly as in one branch of the graph above — NOT
+        // -ss/-t. Output-side seeking happens AFTER -vf, so on a `speed` segment
+        // it would seek into the already-retimed timeline: measured, `-ss 4 -t 3`
+        // with `setpts=…/3` writes an EMPTY file and still exits 0, which every
+        // check below would then pass. `trim` reads the source timeline, which is
+        // what the segment boundaries are expressed in.
+        const vf = `trim=start=${s.start.toFixed(3)}:end=${s.end.toFixed(3)},` +
+          `setpts=(PTS-STARTPTS)${s.kind === "speed" ? "/" + s.factor : ""}` +
           `${s.kind === "speed" && withBadge ? badge(s.factor) : ""},fps=${OUTPUT_FPS}`;
-        // -ss/-t AFTER -i for the same reason the plain path does it: the .webm
-        // carries no seek cues, so a pre-input seek lands wide of the cut.
-        const ok = ff1(["-i", webmPath, "-ss", s.start.toFixed(3),
-          "-t", Math.max(0.04, s.end - s.start).toFixed(3), "-vf", vf,
-          "-an", "-pix_fmt", "yuv420p", part]);
-        if (!ok) { parts.push(part); rmParts(); return false; }
+        const ok = ff1(["-i", webmPath, "-vf", vf, "-an", "-pix_fmt", "yuv420p", part]);
+        // An empty part concatenates silently and shortens the clip by exactly
+        // that segment, so a zero-frame encode has to fail here, not later.
+        let bytes = 0;
+        try { bytes = statSync(part).size; } catch { /* never written */ }
+        if (!ok || bytes === 0) {
+          if (ok) FFMPEG_FAIL = { kind: "empty" };
+          parts.push(part); rmParts(); return false;
+        }
         parts.push(part);
       }
       const list = join(OUT, ".segments.txt");
@@ -3457,9 +3472,11 @@ function finalizeRecording(webmPath, marks = {}) {
     if (font && anySpeed && runFfmpeg(["-filter_complex", graph(true), "-map", "[v]"])) return finish(kept);
     if (runFfmpeg(["-filter_complex", graph(false), "-map", "[v]"])) return finish(kept);
     // Both graphs are gone. Retry segment-wise before giving the session a raw
-    // .webm — the badge goes with the first attempt, since a badge failure is
-    // already covered above and this pass is about surviving, not decorating.
+    // .webm, badge first and then without — the same two attempts, for the same
+    // reason: an unlabelled fast-forward reads as a jump cut, but no recording at
+    // all is worse than an unlabelled one.
     logDaemon(`finalize: filter_complex over ${kept.length} segments failed (${JSON.stringify(FFMPEG_FAIL)}) — retrying segment-wise`);
+    if (font && anySpeed && viaSegments(true)) return finish(kept);
     return viaSegments(false) ? finish(kept) : null;
   }
 
@@ -4556,7 +4573,7 @@ async function daemon() {
    *  styled label, so "visible" would be exactly the wrong element there. */
   async function actionTarget(cmd, sel) {
     const all = L(sel);
-    const plain = { loc: all.first(), note: "", hiddenOnly: false, total: 1, shown: 1 };
+    const plain = { loc: all.first(), note: "", hiddenOnly: false, total: 1, shown: 1, covered: false };
     if (cmd === "setInputFiles") return plain;
     let total = 0;
     try { total = await all.count(); } catch { return plain; }
@@ -4564,15 +4581,37 @@ async function daemon() {
     let shown = 0;
     const visible = all.filter({ visible: true });
     try { shown = await visible.count(); } catch { return plain; }
-    if (shown === 0) return { loc: all.first(), note: "", hiddenOnly: true, total, shown };
-    if (shown === total) return { loc: all.first(), note: ` (selector matched ${total}, acted on the first)`, hiddenOnly: false, total, shown };
+    if (shown === 0) return { ...plain, loc: all.first(), hiddenOnly: true, total, shown };
+    const loc = shown === total ? all.first() : visible.first();
     return {
-      loc: visible.first(),
-      note: ` (selector matched ${total}, ${total - shown} hidden - acted on the first visible)`,
+      loc,
+      note: shown === total
+        ? ` (selector matched ${total}, acted on the first)`
+        : ` (selector matched ${total}, ${total - shown} hidden - acted on the first visible)`,
       hiddenOnly: false,
       total,
       shown,
+      covered: await coveredByOther(loc),
     };
+  }
+
+  /** Is something ELSE painted over this element's centre? That is the whole
+   *  difference between the two ambiguous selectors: "matched 3, the first is the
+   *  row you meant" is ordinary and must keep the full timeout, while "matched 2,
+   *  the first is behind the modal that just opened" is a guaranteed actionability
+   *  timeout worth abandoning in seconds. Only asked when a selector already
+   *  matched more than one visible element, so an ordinary action pays nothing.
+   *  browse's own overlays never count - the cursor is drawn over the page. */
+  async function coveredByOther(loc) {
+    try {
+      return await loc.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) return false;
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (!top || top === el || el.contains(top) || top.contains(el)) return false;
+        return !top.closest?.("[data-browse-overlay]");
+      }, undefined, { timeout: 2000 });
+    } catch { return false; } // detached or cross-origin: do not shorten on a guess
   }
 
   /**
@@ -4609,7 +4648,11 @@ async function daemon() {
             }
           }
           return { tag: el.tagName.toLowerCase(), name, shown: !!(r.width && r.height), over };
-        }, { timeout: 2000 });
+        // Locator.evaluate is (fn, arg, options): the timeout goes in the THIRD
+        // slot. Passing it second made it the page function's argument and left
+        // the timeout at the context default, so a list re-rendering under this
+        // could spend 12s per row describing a failure that just gave up in 4.
+        }, undefined, { timeout: 2000 });
       } catch { /* detached mid-list: skip it rather than lose the others */ }
       if (!d) continue;
       rows.push(`  nth=${i}  <${d.tag}>${d.name ? ` "${d.name}"` : ""}` +
@@ -4722,7 +4765,7 @@ async function daemon() {
    *  field is confirmed present, so a bad selector fails FAST (~6s, like the rest
    *  of browse) instead of hanging on the type, and the bezel never shows text that
    *  didn't actually get typed. Password fields are masked to bullets. */
-  async function humanType(loc, text, clear, budget = null) {
+  async function humanType(loc, text, clear, budget = null, typeBudget = null) {
     // Resolve the field quickly; a missing/typo'd selector should fail in seconds
     // so the caller adapts — not block for the full pressSequentially timeout.
     // An explicit --timeout replaces that floor in BOTH directions: a field that
@@ -4740,7 +4783,10 @@ async function daemon() {
       try { await page.evaluate(([t, c]) => window.__browseKeys && window.__browseKeys.type(t, c), [shown, cps]); }
       catch { /* best-effort */ }
     }
-    await loc.pressSequentially(text, { delay: TYPE_DELAY, timeout: Math.max(budget || 0, 20000) });
+    // Typing has its own budget: how long it takes is a function of the TEXT
+    // (delay x characters), not of how long the field took to appear, so the
+    // ambiguity floor must not bound it. Only an explicit --timeout does.
+    await loc.pressSequentially(text, { delay: TYPE_DELAY, timeout: typeBudget || 20000 });
   }
 
   /** Tokens worth matching on: words from a selector or an accessible name, minus
@@ -4782,36 +4828,40 @@ async function daemon() {
     }
     cands.sort((a, b) => b.score - a.score || a.name.length - b.name.length);
     const top = cands.slice(0, 3).map((c) => `role=${c.role}[name="${c.name}"]`);
-    const attr = await attrHint(selector);
-    const lines = [top.length ? `did you mean: ${top.join(" · ")}` : "", attr].filter(Boolean);
-    return lines.join("\n");
+    return top.length ? `did you mean: ${top.join(" · ")}` : "";
   }
 
-  /** `text=` reads TEXT CONTENT, so it can never match a placeholder, a value or
-   *  a title - and that is exactly where a string copied off the screen tends to
+  /** `text=` reads TEXT CONTENT, so it can never match a placeholder, a title or
+   *  an alt - and that is exactly where a string copied off the screen tends to
    *  live (an antd search box shows "Search country..." as a placeholder). The
-   *  a11y hint above covers it only when the element also has an accessible name,
-   *  and when it does not, the failure reads as "that text is not on the page"
-   *  about text the agent can plainly see. Name the attribute instead. */
-  const TEXT_SELECTOR = /^text=(.+)$|:has-text\(\s*["'`](.+?)["'`]\s*\)|^\s*["'`](.+)["'`]\s*$/;
+   *  a11y hint covers it only when the element also has an accessible name, and
+   *  when it does not, the failure reads as "that text is not on the page" about
+   *  text the agent can plainly see. Name the attribute instead.
+   *
+   *  Deliberately ONLY the bare substring form `text=foo`. `:has-text("foo")` and
+   *  the exact form `text="foo"` fail for their own reasons (wrong ancestor, a
+   *  longer string), and telling someone their text "is really an attribute" when
+   *  it IS on the page sends them at the wrong fix. */
+  const TEXT_SELECTOR = /^text=(.+)$/;
   async function attrHint(selector) {
     const m = TEXT_SELECTOR.exec(String(selector).trim());
-    const needle = m && (m[1] ?? m[2] ?? m[3]);
-    if (!needle) return "";
-    // text= takes /re/ and "quoted" forms too; strip what we can and give up on
-    // a regex rather than searching for its source as a literal.
-    const raw = String(needle).trim();
-    if (raw.startsWith("/")) return "";
-    const want = raw.replace(/^["'`]|["'`]$/g, "");
-    if (want.length < 2) return "";
+    if (!m) return "";
+    const want = m[1].trim();
+    // A regex or the exact "quoted" form: not the substring match this is about.
+    if (want.length < 2 || want.startsWith("/") || /^["'`]/.test(want)) return "";
     try {
-      const found = await page.evaluate((w) => {
+      // Through a locator, not page.evaluate: under a `browse target <iframe>`
+      // scope the count that gated this hint came from the FRAME, so searching
+      // the top document would answer about a different page.
+      const found = await L("body").first().evaluate((body, w) => {
         const needle = w.toLowerCase();
-        const ATTRS = ["placeholder", "value", "aria-label", "title", "alt"];
+        // No `value`: an input's value can be a password, and a hint is not worth
+        // printing a credential to stdout. placeholder/label/title/alt are chrome.
+        const ATTRS = ["placeholder", "aria-label", "title", "alt"];
         const out = [];
-        for (const el of document.querySelectorAll("*")) {
+        for (const el of body.ownerDocument.querySelectorAll("*")) {
           for (const a of ATTRS) {
-            const v = a === "value" ? el.value : el.getAttribute(a);
+            const v = el.getAttribute(a);
             if (typeof v !== "string" || !v.toLowerCase().includes(needle)) continue;
             out.push(`[${a}="${v.slice(0, 60)}"]`);
             break;
@@ -4819,9 +4869,9 @@ async function daemon() {
           if (out.length >= 3) break;
         }
         return out;
-      }, want);
+      }, want, { timeout: 3000 });
       if (!found.length) return "";
-      return `'${want}' is not TEXT on this page, it is an attribute - text= never matches those. Try: ${found.join(" · ")}`;
+      return `'${want}' is not text on this page, it is an attribute - text= only reads text content. Try: ${found.join(" · ")}`;
     } catch { return ""; }
   }
 
@@ -4858,8 +4908,14 @@ async function daemon() {
     }
     if (n !== 0) return e; // found it - the failure is about something else
     const msg = e && e.message ? e.message : String(e);
-    let hint = "";
-    try { hint = await selectorHint(selector); } catch { /* the hint is a bonus */ }
+    // Two independent hints. selectorHint reads the a11y tree and gives up when a
+    // selector's words are all noise ("text=Name") or ariaSnapshot throws; the
+    // attribute hint has nothing to do with either, so it must not sit behind
+    // them - "Name" as a placeholder is precisely the case it exists for.
+    const hints = [];
+    try { hints.push(await selectorHint(selector)); } catch { /* the hint is a bonus */ }
+    try { hints.push(await attrHint(selector)); } catch { /* likewise */ }
+    const hint = hints.filter(Boolean).join("\n");
     return hint ? new Error(`${msg}\n${hint}`) : e;
   }
 
@@ -4983,6 +5039,12 @@ async function daemon() {
 
   async function dispatchCmd(cmd, args) {
     if (cmd === "close") {
+      // Both flags are about a video. Accepting them on a --no-video session and
+      // doing nothing is the silent drop every other flag check here rejects.
+      if (!VIDEO_ON) {
+        const dead = ["--gif", "--keep-raw"].find((f) => args.includes(f));
+        if (dead) throw new Error(`close: ${dead} is about the recording, and this session was started with --no-video`);
+      }
       return { __close: true, gif: args.includes("--gif"), keepRaw: KEEP_WEBM || args.includes("--keep-raw") };
     }
 
@@ -5088,13 +5150,24 @@ async function daemon() {
       // the caller's whole budget at the 12s default with no way to say "give up
       // sooner" or "this route compiles for 40s, hold". The pair has to be the
       // last two args so a data value can still be the word "--timeout".
-      let actTimeout = null;
+      let actTimeout = null, timeoutWritten = false;
       if (args.length >= 2 && args[args.length - 2] === "--timeout") {
         const v = Number(args[args.length - 1]);
         if (!Number.isFinite(v) || v <= 0) throw new Error(`${cmd}: --timeout wants milliseconds, e.g. --timeout 5000`);
         if (v > MAX_TIMER_MS) throw new Error(`${cmd}: --timeout ${v}ms is longer than a timer can run (max ${MAX_TIMER_MS}, ~24 days) - check the digits`);
         actTimeout = v;
+        timeoutWritten = true;
         args = args.slice(0, -2);
+      }
+      // `press` is the one command whose floor is ONE argument, so stripping the
+      // pair off `press '#todo' --timeout 5000` left a lone selector that the
+      // page-level branch below happily sent to the keyboard as a key name. And
+      // on a genuine page-level press there is no element to wait for, so the
+      // flag has nothing to mean - dropping it silently is the exit-0 lie every
+      // other flag check here exists to prevent.
+      if (cmd === "press" && timeoutWritten && args.length < 2) {
+        throw new Error(`press: --timeout belongs to the element form - \`browse press '<selector>' <key> --timeout <ms>\`. ` +
+          `A page-level press (\`browse press Escape\`) waits for nothing, so it takes no timeout.`);
       }
       // Extra args go into Playwright's options slot as plain strings, where they
       // are DROPPED - so `click x --timeout 3000` used to wait the default 12s
@@ -5159,14 +5232,13 @@ async function daemon() {
           return `ok - ${await brief()}`;
         }
         const target = await actionTarget(cmd, args[0]);
-        // Fail FAST on a genuinely ambiguous selector. Two or more VISIBLE
-        // matches means browse is guessing which one you meant, and when the
-        // guess is wrong (the page's "Create Database" behind a modal's
-        // "Create") Playwright's actionability retry burns the full default
-        // before saying anything useful. A short budget plus the match list
-        // below turns that into one cheap round trip. An explicit --timeout
-        // always wins - that is how you say "no, wait for it".
-        const budget = actTimeout ?? (target.shown > 1 ? AMBIGUOUS_MS : null);
+        // Fail FAST when the selector is ambiguous AND the match browse picked is
+        // covered by something else - the page's "Create Database" sitting under
+        // the modal's "Create". That pair is a guaranteed actionability timeout,
+        // and it used to burn the full default in silence. A list of identical
+        // visible rows is ambiguous too but perfectly actionable, so it keeps the
+        // normal timeout. An explicit --timeout always wins either way.
+        const budget = actTimeout ?? (target.covered ? AMBIGUOUS_MS : null);
         const opts = budget ? { timeout: budget } : undefined;
         await cursorGlideTo(target.loc);
         // Clicking into a field to type gets a ripple too, like a real click.
@@ -5206,7 +5278,7 @@ async function daemon() {
         // Everything past the selector goes through a Locator, which is what makes
         // an iframe scope (see L) work without any per-command handling.
         try {
-          if (typing) await humanType(target.loc, args.slice(1).join(" "), cmd === "fill", budget);
+          if (typing) await humanType(target.loc, args.slice(1).join(" "), cmd === "fill", budget, actTimeout);
           // setInputFiles takes ONE array argument - spreading it would silently
           // drop every file but the first.
           else if (cmd === "setInputFiles") {
@@ -5241,7 +5313,9 @@ async function daemon() {
             try { list = await matchList(args[0]); } catch { /* the list is a bonus */ }
             if (list) {
               err = new Error(`${err?.message || err}\n${list}` +
-                (budget === AMBIGUOUS_MS ? `\ngave up after ${AMBIGUOUS_MS}ms because the selector is ambiguous - '--timeout <ms>' waits longer.` : ""));
+                (!timeoutWritten && budget === AMBIGUOUS_MS
+                  ? `\ngave up after ${AMBIGUOUS_MS}ms because the element browse picked is covered - '--timeout <ms>' waits longer.`
+                  : ""));
             }
           }
           throw err;
@@ -5664,6 +5738,9 @@ async function daemon() {
         // recording clock. `browse speed <n>` (n>=2) opens/re-opens the region;
         // `browse speed off` closes it; bare `browse speed` uses the default
         // factor. See finalizeRecording / forcedIntervals.
+        // Every mark here annotates a recording. With --no-video there is none, so
+        // "speed: 8x from 12.3s" would confirm an effect that cannot exist.
+        if (!VIDEO_ON) throw new Error("speed: this session was started with --no-video, so there is no recording to fast-forward");
         const a = String(args[0] ?? "").trim().toLowerCase();
         const t = (Date.now() - recStartMs) / 1000;
         const open = speedMarks.length && speedMarks[speedMarks.length - 1].factor > 1;
@@ -6233,8 +6310,9 @@ async function daemon() {
               : VIDEO_ON
                 ? "closed - recording flushed (no video captured)"
                 // Not a failure, and it must not read as one: the caller asked
-                // for this with --no-video. Name what IS there instead.
-                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)}`) + lastNotes,
+                // for this with --no-video. Name what IS there instead - and keep
+                // the mock disclosure, which is about the SCREENSHOTS too.
+                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`) + lastNotes,
           });
           // The gif is a two-pass encode that can outlast the client's 120s
           // timeout on a long session. It runs AFTER the reply, so the mp4 path

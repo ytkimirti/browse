@@ -266,6 +266,36 @@ try {
   check("the same command without the flag still works", r.code === 0, `${r.code} ${r.err}`);
 } finally {
   browseLive("close");
+}
+
+// --no-video on the engine this run is actually testing. Whether a context takes
+// recordVideo and whether page.video() answers are BOTH engine-dependent (a
+// camoufox on an unpatched playwright-core takes the option and records
+// nothing), so "no video was asked for and none appeared" has to be proven per
+// engine rather than assumed from chromium.
+console.log("\n--no-video");
+try {
+  const NV = `${SESSION}-novideo`;
+  // Its own artifacts dir: the session above recorded into OUT, so asserting
+  // "no video dir here" against that one would prove nothing.
+  const NVOUT = mkdtempSync(join(tmpdir(), "browse-novid-"));
+  const nv = (...args) => spawnSync(BIN, ["-s", NV, ...args], {
+    encoding: "utf8", timeout: 180000,
+    env: { ...ENV, BROWSE_ENGINE: ENGINE, BROWSE_OUT: NVOUT, BROWSE_HEADFUL: "0" },
+  });
+  let r = nv("--no-video", "open", "about:blank");
+  check("a --no-video session opens", r.status === 0, `${r.status} ${r.stderr}`);
+  r = nv("speed", "4");
+  check("…and speed refuses rather than annotating nothing",
+    r.status === 1 && /no-video/.test(r.stderr || ""), `${r.status} ${r.stderr}`);
+  r = nv("close");
+  check("…and close says the video was off, not that ffmpeg failed",
+    r.status === 0 && /video was off/.test(r.stdout || "") && !/ffmpeg/.test(r.stdout || ""),
+    `${r.status} ${r.stdout}${r.stderr}`);
+  check("…and no video dir was ever made", !existsSync(join(NVOUT, "video")), NVOUT);
+  check("…and no mp4 either", !existsSync(join(NVOUT, "recording.mp4")), NVOUT);
+  spawnSync("rm", ["-rf", NVOUT]);
+} finally {
   spawnSync("rm", ["-rf", HOME]);
 }
 

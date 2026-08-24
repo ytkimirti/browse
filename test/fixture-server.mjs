@@ -111,11 +111,20 @@ const AMBIG = `<!doctype html><meta charset=utf8><title>ambig</title>
   <!-- The string an agent copies off the screen is a PLACEHOLDER here, not text,
        so text= can never match it - the antd search-box shape. -->
   <input id=search placeholder="Search country...">
+  <!-- Ambiguous but perfectly actionable: three identical visible rows, nothing
+       on top of any of them. This must NOT get the covered-element fast path. -->
+  <button class=row>Row</button>
+  <button class=row>Row</button>
+  <button class=row>Row</button>
 </div>
+<div id=rows>0</div>
 <div id=clicked>none</div>
 <script>
 for (const b of document.querySelectorAll('.go'))
   b.addEventListener('click', () => { document.getElementById('clicked').textContent = b.id; });
+let rowN = 0;
+for (const b of document.querySelectorAll('.row'))
+  b.addEventListener('click', () => { document.getElementById('rows').textContent = String(++rowN); });
 </script>`;
 
 // One page for the observation commands: a status that FLIPS on a timer (so
