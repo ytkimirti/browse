@@ -37,8 +37,9 @@ spawns, and pointing it at a dead port records the failure.
   memory, and hands you the intact `.webm`. It retries a bounded-memory encode
   first, so this should be rare — when it does happen, re-cut that webm here
   rather than re-recording, and give the next run a bigger machine.
-- **`--remote` goes on every command**, `close` included. Export `BROWSE_REMOTE`
-  once and stay in that shell.
+- Keep the remote identity on every command, including teardown. Agent shell
+  calls may not retain an earlier export; use a wrapper or pass the environment
+  on each call. Read help for the remote flags and environment variables.
 - Commands that read the remote's disk, `profiles`, `clear` and `setup`, run
   over there, because that is the machine they are about. `net` still answers
   here: it copies the session's request log down first.
@@ -88,25 +89,20 @@ What a box changes on top of `--remote`:
   not, the opposite of what this is for.
 - **A fresh box with no `browse` on it means the image is stale.** Rebuild it
   with `browse box image` rather than installing onto the session's own box.
-- **Believe the build note over the symptom.** An image carries the browse of
-  the day it was built, so a box can run code older than the CLI you are typing
-  at: it accepts a flag the client parses here and ignores it there. `up` pulls
-  the box's checkout up to date and both `up` and the first `--remote` command
-  say so when the builds still differ. When that note is on screen, a flag that
-  "does nothing" or a bug you thought was fixed is that skew, not a new bug:
-  refresh (`browse box install <box>`) before reporting anything.
+- **Read the build note before diagnosing a mismatch.** A refreshed Box can
+  match the committed release while the local file has uncommitted fixes.
+  Refreshing cannot copy those local changes. Establish which code ran before
+  attributing a symptom to a stale image or a regression.
 - **`browse box url`** is worth offering alongside the video when the user will
   want to click around the app themselves. Say plainly that the link dies with
   the box.
-- **An ssh error usually means the box is gone**, deleted or expired;
-  `browse box ls` says. The recording went with it and there is nothing to
-  recover, so start over rather than hunting.
+- **Diagnose an ssh error before replacing the Box.** Check its status,
+  credentials and noninteractive executable path. An existing Box may still
+  hold recoverable artifacts. A deleted or expired Box has lost its recording.
 
-## Before you point it at a shared machine
+## Completion
 
-To be reachable through the tunnel from outside a container, the daemon binds
-`0.0.0.0` on the remote. Anything that can route to that machine can then drive
-your browser and read the session's recordings. That is fine for a box (its
-network is its own) and fine for a VPS only you reach. On anything shared, set
-`BROWSE_BIND` yourself, and remember a live session holds real logins if you
-used `-p`.
+Keep the Box until the close process has completed and its artifacts are verified
+locally. A browser disappearing from the session list can precede encoding and
+copying. If the command runner yields, retain its process handle and wait for the
+result. Deleting the Box during that interval can destroy the only recording.

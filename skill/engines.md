@@ -4,9 +4,9 @@
 patches applied in C++; it clears Cloudflare's JS managed challenge *headlessly*,
 which Chromium cannot do at all: its new-headless is handed an unsolved
 `cf_clearance`, and headed Chrome can't be hidden on macOS because
-`--window-position` is clamped onto the nearest real display. If camoufox isn't
-installed, browse logs it and falls back to Chromium on its own, and says so in
-the `browse open` output.
+`--window-position` is clamped onto the nearest real display. An unavailable engine can change which saved state is accessible.
+An explicit engine or a named profile must keep that identity; browse fails
+startup when it cannot. Check `browse help` for engine selection and setup.
 
 Reach for `--chromium` when you need `browse emulate tz= locale= cpu= net=`
 (CDP-only), a `.pdf`
@@ -28,7 +28,7 @@ macOS one itself.)
 A Firefox profile and a Chromium user-data dir are incompatible formats, so `-p foo`
 stores two separate logins. A login made under one engine is invisible to the
 other, and reads as the profile simply having lost it. `browse profiles` shows
-which engine(s) each name actually holds a login under, so you can see which half
+which engine(s) each name has stored data under, so you can see which half
 you are missing.
 
 ## Setup (one time)

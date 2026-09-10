@@ -35,8 +35,11 @@ script runner.
    registered, so set them up before `open`, or `reload` after. Never rewrite a
    dev server's HTML document with `middleware` to inject a script: on Next/Vite
    that produces an endless reload loop that reads exactly like an app bug.
-5. **Always `close`** when done, with the same `-s`. It finalizes the video and
-   prints the mp4 path. A forgotten session auto-closes after 30 min idle.
+5. **Finish the recording.** Wait for `close` to finish and verify the reported
+   artifacts exist locally before handing them off or deleting the remote.
+   A tool returning a running process handle is still working. Preserve the
+   full tool result and wait on that handle; printing only its output loses the
+   handle. An empty live-session list does not prove finalization finished.
 
 ## Start the app before the first command
 
@@ -60,9 +63,9 @@ is not blank, connection-refused, or a framework error overlay.
 - **`-p <name>`, on every command**, when you need to stay logged in across
   `close` → `open`. Log in by hand once under `--headful`, `close`, then reuse it.
   A profile is stored per engine, so log in on the engine you will drive with
-  (`skill/engines.md`). Check it is still good with `browse profiles <name>`
-  BEFORE opening: a saved login that quietly expired is the most common way a
-  run dies, and that check costs no browser and no recording.
+  (`skill/engines.md`). Cookie metadata is an inventory, not proof of login.
+  For an authenticated task, read [authentication](skill/auth.md) and establish
+  access to the exact target before the capture pass.
 - **Launch flags** (`--headful`, `--chromium`, `--viewport`, …) only on the
   command that STARTS the session — which is whichever one you run first, so an
   `init` or `middleware` registered before `open` is the one that carries them.
@@ -83,8 +86,13 @@ me" afterwards, keep the recording: it cannot be added later.
 
 ## Hand off artifacts
 
+Track the requested surfaces as captured, blocked, or not visited. A fixture
+or mock demonstrates only that fixture or mock. When real-page coverage is
+blocked, tell the user promptly and keep the task incomplete until the requested
+coverage is delivered or the user explicitly changes it.
+
 Each session gets `~/.browse/sessions/<timestamp>/` with `transcript.md`,
-`recording.mp4`, `browsed.log`, `network.jsonl`, and auto per-step screenshots
+`recording.mp4`, `browsed.log`, `network.jsonl`, `console.jsonl`, and auto per-step screenshots
 under `shots/` (Read them as images to see what a step looked like). Give the user
 the bare `~/…` path that `close` printed, pasteable straight into their shell.
 
@@ -95,6 +103,9 @@ Cover: what flow you recorded, what worked, any friction (selector misses,
 timing/pacing, missing commands, video quality), and one concrete improvement idea
 for this skill. These get reviewed across sessions to keep improving the skill, so
 be candid and specific; a few bullets is enough.
+Separate the observed command/result from your suspected cause. Check help
+before proposing a missing capability, and keep tool-wrapper failures distinct
+from browser failures.
 
 ## More
 
@@ -105,3 +116,4 @@ be candid and specific; a few bullets is enough.
 - `skill/remote.md` — running the browser on another machine (`--remote`), and on
   a disposable Upstash Box (`browse box`)
 - `skill/troubleshooting.md` — daemon won't start, selector misses, install, ffmpeg
+- `skill/auth.md` - authenticated capture, expired profiles and redirect loops

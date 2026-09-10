@@ -41,3 +41,15 @@ next action.
 Only tab 0 is recorded: a popup's time is cut from the video and a `target new`
 tab is not in it at all. Park tab 0 on a STATIC page before working in another one
 (motionless time there is cut; a spinner or live log is not).
+
+## Comparable stills
+
+Match viewport, theme, data, scroll and hover state across an A/B pair. Keep the
+normal viewport when capturing popups: shrinking it to crop a tooltip can flip
+the tooltip's placement. Inspect the saved images, especially tall elements under
+sticky headers, before claiming the layout is verified.
+
+For short-lived states, use the screenshot condition in help to wait and capture
+inside one browser command. This removes the agent round trip; it does not freeze
+time. If a state can disappear during capture, use a disclosed fixture or the
+recording as evidence instead of claiming a later still shows it.
