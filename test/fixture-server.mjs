@@ -116,8 +116,13 @@ const AMBIG = `<!doctype html><meta charset=utf8><title>ambig</title>
   <button class=row>Row</button>
   <button class=row>Row</button>
   <button class=row>Row</button>
+  <!-- The post-update session regression: text=Pause matches this prose before
+       the real button. Clicking the prose succeeds mechanically and does nothing. -->
+  <p>Uploads can pause and resume safely.</p>
+  <button id=pause>Pause</button>
 </div>
 <div id=rows>0</div>
+<div id=paused>no</div>
 <div id=clicked>none</div>
 <script>
 for (const b of document.querySelectorAll('.go'))
@@ -125,6 +130,20 @@ for (const b of document.querySelectorAll('.go'))
 let rowN = 0;
 for (const b of document.querySelectorAll('.row'))
   b.addEventListener('click', () => { document.getElementById('rows').textContent = String(++rowN); });
+document.getElementById('pause').addEventListener('click', () => { document.getElementById('paused').textContent = 'yes'; });
+</script>`;
+
+// Playwright's screenshot default briefly mutates a focused input's inline
+// caret-color. React's hydration observer sees that as a mismatch even though
+// Playwright restores the attribute before the screenshot promise resolves.
+const CARET = `<!doctype html><meta charset=utf8><title>caret</title>
+<input id=focus autofocus><div id=mutations></div>
+<script>
+const seen = [];
+new MutationObserver((rs) => {
+  for (const r of rs) if (r.type === 'attributes') seen.push(r.target.getAttribute('style') || '<removed>');
+  document.getElementById('mutations').textContent = JSON.stringify(seen);
+}).observe(document.getElementById('focus'), {attributes:true, attributeFilter:['style']});
 </script>`;
 
 // One page for the observation commands: a status that FLIPS on a timer (so
@@ -229,9 +248,9 @@ http.createServer((req, res) => {
   if (url === "/api/user") { hits.user++; return json(res, { id: 99, name: "real-user" }); }
   if (url === "/api/config") { hits.config++; return json(res, { env: "prod", debug: false }); }
   if (url === "/api/other") { hits.other++; return json(res, { from: "server" }); }
-  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/stalled" || url === "/auth/sign-in" || url === "/ambig" || url === "/unhydrated" || url === "/copy") {
+  if (url === "/ui" || url === "/frame" || url === "/corner" || url === "/lab" || url === "/late" || url === "/stalled" || url === "/auth/sign-in" || url === "/ambig" || url === "/unhydrated" || url === "/copy" || url === "/caret") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/stalled": STALLED, "/auth/sign-in": SIGNIN, "/ambig": AMBIG, "/unhydrated": UNHYDRATED, "/copy": COPY }[url];
+    const body = { "/ui": UI, "/frame": FRAME, "/corner": CORNER, "/lab": LAB, "/late": LATE, "/stalled": STALLED, "/auth/sign-in": SIGNIN, "/ambig": AMBIG, "/unhydrated": UNHYDRATED, "/copy": COPY, "/caret": CARET }[url];
     return res.end(body);
   }
   // The dev chunk the unhydrated page asks for. 404, like a Next dev server

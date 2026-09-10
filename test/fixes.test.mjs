@@ -626,6 +626,19 @@ try {
     check("...and the page saw exactly that one click",
       browse("eval", "document.getElementById('rows').textContent").out.trim() === "1",
       browse("eval", "document.getElementById('rows').textContent").out);
+    // The exact regression from two sessions after the ambiguity fast-path
+    // shipped: text=Pause matched prose before a button. The prose was uncovered,
+    // so clicking it returned success and the run trusted a state change that
+    // never happened. Mixed control/non-control matches must be refused instead.
+    const mixed = browse("click", "text=Pause");
+    check("a selector spanning prose and a control is refused",
+      mixed.code === 1 && /controls and non-controls/.test(mixed.err), `exit ${mixed.code} · ${mixed.err}`);
+    check("...without clicking the prose or the button",
+      browse("eval", "document.getElementById('paused').textContent").out.trim() === "no",
+      browse("eval", "document.getElementById('paused').textContent").out);
+    check("...and a role selector is the working correction",
+      browse("click", 'role=button[name="Pause"]').code === 0 &&
+      browse("eval", "document.getElementById('paused').textContent").out.trim() === "yes");
     // An explicit --timeout is how you say "no, wait for it" — and the reply must
     // not then blame the caller for a budget the caller set.
     const explicit = browse("click", "button.go", "--timeout", String(4000));
@@ -655,6 +668,20 @@ try {
     // get the attribute claim either.
     const hasText = browse("click", 'button:has-text("Search country")');
     check("...nor for :has-text()", hasText.code === 1 && !/is an attribute/.test(hasText.err), hasText.err);
+  }
+
+  /* ---------------- screenshots do not manufacture hydration mismatches */
+  console.log("\nscreenshots leave focused-input caret styles alone");
+  {
+    browse("goto", `${BASE}/caret`);
+    // goto takes an automatic step screenshot; the observer is installed by the
+    // document itself before that shot. Then exercise the explicit page and
+    // locator screenshot paths too.
+    browse("screenshot", "caret-page.png");
+    browse("screenshot", "caret-element.png", "--sel", "#focus");
+    const mutations = browse("eval", "document.getElementById('mutations').textContent").out.trim();
+    check("auto, page and element screenshots never write caret-color inline",
+      mutations === '""', mutations || "no mutations");
   }
 
   /* ---------------------------------------------------------- wait --url */

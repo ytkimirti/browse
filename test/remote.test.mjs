@@ -297,6 +297,21 @@ if (!REMOTE_HOST) {
     const remoteShot = (/\[(shots\/[^\]]+\.png)\]/.exec(r.out) || [])[1];
     check("…and names the step screenshot", !!remoteShot, r.out);
 
+    r = browseRemote("net", "--last", "1");
+    check("a live remote net query copies the log before answering",
+      r.code === 0 && /logged/.test(r.out) && !/0 logged/.test(r.out), `${r.code} ${r.out}${r.err}`);
+
+    // Failure must never fall through to a missing local mirror and claim the
+    // browser made zero requests. A no-net session gives the pull a real 404.
+    const noNet = { BROWSE_NET: "0" };
+    r = browseRemoteEnv(noNet, "-s", `${SESSION}-nonet`, "open", "https://example.com");
+    check("a no-net remote session still opens", r.code === 0, `${r.code} ${r.err}`);
+    r = browseRemoteEnv(noNet, "-s", `${SESSION}-nonet`, "net");
+    check("a failed live-log copy exits non-zero instead of saying 0 logged",
+      r.code === 1 && /could not copy the live network log/.test(r.err) && !/0 logged/.test(r.out),
+      `${r.code} ${r.out}${r.err}`);
+    browseRemoteEnv(noNet, "-s", `${SESSION}-nonet`, "close");
+
     r = browseRemote("dir");
     const dir = r.out.split("\n")[0].trim();
     check("dir prints a LOCAL mirror dir", r.code === 0 && existsSync(dir), `${r.code} ${r.out}`);

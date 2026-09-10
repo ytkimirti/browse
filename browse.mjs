@@ -1227,9 +1227,10 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
   browse click <selector>           click an element. Every command that takes a SELECTOR (click through
                                     focus below — not drag or scroll) also takes --timeout <ms>, written
                                     LAST: raise it for a control that is still rendering, lower it to
-                                    fail fast. When a selector matches several visible elements AND the
-                                    one browse picks is covered by something else, it gives up after
-                                    ${AMBIGUOUS_MS}ms instead and lists every match with what is on top of it.
+                                    fail fast. A selector spanning controls and non-controls is refused
+                                    (text=Pause must not click prose instead of the Pause button). When
+                                    several controls match and the first is covered, browse gives up after
+                                    ${AMBIGUOUS_MS}ms and lists every match with what is on top of it.
   browse dblclick <selector>        double-click an element
   browse rightclick <selector>      right-click it — opens the app's context menu
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
@@ -2748,7 +2749,17 @@ async function client(argv) {
     const live = await findDaemon();
     if (live) {
       const local = mirrorDir(live.out);
-      if (await pullFile(live.port, "network.jsonl", join(local, "network.jsonl"))) argv = [...argv, "--dir", local];
+      const dest = join(local, "network.jsonl");
+      if (!(await pullFile(live.port, "network.jsonl", dest))) {
+        // Never fall through to netCommand here. That would query an absent or
+        // stale local mirror and print the most damaging plausible lie in a
+        // network investigation: "0 logged". pullFile is atomic, so any last
+        // good mirror remains available for an explicit --dir query.
+        process.stderr.write(`browse: could not copy the live network log from ${REMOTE}; no network result was produced.\n` +
+          `browse: The last good mirror, if any, is ${dest}. Retry this command, or query it explicitly with --dir.\n`);
+        return 1;
+      }
+      argv = [...argv, "--dir", local];
     }
   }
   // List every live daemon across all session names (and sweep stale run files).
@@ -3674,7 +3685,7 @@ function camoufoxLaunchOptions() {
   const script =
     "import json,sys;from browserforge.fingerprints import Screen;" +
     "from camoufox.utils import launch_options;" +
-    `print(json.dumps(launch_options(headless=True,humanize=0.5,config={'showcursor':False},` +
+    `print(json.dumps(launch_options(headless=${HEADFUL ? "False" : "True"},humanize=0.5,config={'showcursor':False},` +
     `window=(${VIEWPORT.width},${VIEWPORT.height}),` +
     `screen=Screen(min_width=${VIEWPORT.width},min_height=${VIEWPORT.height}),i_know_what_im_doing=True)))`;
   // camoufox is a Python package but this skill is global, so a project venv is
@@ -3853,11 +3864,21 @@ async function daemon() {
       // `camoufox server` mode: server mode cannot do a persistent profile, and
       // `-p` logins surviving close→open is the whole point of profiles.
       return { browser: null, context: await launcher.launchPersistentContext(userDataDir, {
-        headless: !HEADFUL, viewport: VIEWPORT, recordVideo, args, ...extra,
+        headless: !HEADFUL,
+        // Camoufox spoofs window geometry. Its own NewBrowser wrapper therefore
+        // defaults headed contexts to no_viewport: forcing Playwright's viewport
+        // creates a 1280x800 content surface in the top-left of a monitor-sized
+        // native window, with the rest painted dark grey. That is exactly what a
+        // human login session showed. Headless keeps the fixed viewport because
+        // recording dimensions and deterministic layout depend on it.
+        ...(camou && HEADFUL ? { noViewport: true } : { viewport: VIEWPORT }),
+        recordVideo, args, ...extra,
       }) };
     }
     const b = await launcher.launch({ headless: !HEADFUL, args, ...extra });
-    return { browser: b, context: await b.newContext({ viewport: VIEWPORT, recordVideo }) };
+    return { browser: b, context: await b.newContext({
+      ...(camou && HEADFUL ? { noViewport: true } : { viewport: VIEWPORT }), recordVideo,
+    }) };
   };
 
   try {
@@ -4443,7 +4464,12 @@ async function daemon() {
   async function autoShot(cmd, args) {
     step++;
     const name = `step-${String(step).padStart(2, "0")}-${cmd}${shotSlug(cmd, args)}.png`;
-    try { await page.screenshot({ path: `${SHOTS_DIR}/${name}`, timeout: 5000 }); return `shots/${name}`; }
+    // Playwright defaults to caret:"hide", which briefly writes
+    // style="caret-color: transparent" onto every focused input. React can see
+    // that temporary mutation during hydration and reports it as an app-owned
+    // mismatch. Screenshots do not need to alter page state: a visible caret is
+    // a truthful frame, and the recording already keeps it.
+    try { await page.screenshot({ path: `${SHOTS_DIR}/${name}`, timeout: 5000, caret: "initial" }); return `shots/${name}`; }
     catch { return null; }
   }
 
@@ -4716,6 +4742,25 @@ async function daemon() {
     try { shown = await visible.count(); } catch { return plain; }
     if (shown === 0) return { ...plain, loc: all.first(), hiddenOnly: true, total, shown };
     const loc = shown === total ? all.first() : visible.first();
+    // A text selector that spans prose and a control is not ordinary list
+    // ambiguity: acting on the first can click a paragraph and report success
+    // while the button the agent meant remains untouched. Refuse that mixed-kind
+    // guess; repeated controls (rows, menu items) keep the existing first-match
+    // behaviour.
+    let mixedKinds = false;
+    if (CLICK_LIKE.has(cmd)) {
+      try {
+        const kinds = await visible.evaluateAll((els) => els.map((el) => {
+          const tag = el.tagName.toLowerCase();
+          const role = (el.getAttribute("role") || "").toLowerCase();
+          const interactiveRoles = new Set(["button", "link", "checkbox", "radio", "menuitem", "option", "tab", "switch", "textbox", "combobox", "spinbutton", "slider"]);
+          return ["button", "input", "select", "textarea", "summary"].includes(tag) ||
+            (tag === "a" && el.hasAttribute("href")) || interactiveRoles.has(role) ||
+            el.isContentEditable || el.tabIndex >= 0;
+        }));
+        mixedKinds = kinds.includes(true) && kinds.includes(false);
+      } catch { /* detached while classifying: let the real action decide */ }
+    }
     return {
       loc,
       note: shown === total
@@ -4724,6 +4769,7 @@ async function daemon() {
       hiddenOnly: false,
       total,
       shown,
+      mixedKinds,
       covered: await coveredByOther(loc),
     };
   }
@@ -5370,6 +5416,13 @@ async function daemon() {
           return `ok - ${await brief()}`;
         }
         const target = await actionTarget(cmd, args[0]);
+        if (target.mixedKinds) {
+          let list = "";
+          try { list = await matchList(args[0]); } catch { /* the list is the answer's bonus */ }
+          throw new Error(`click: '${args[0]}' matches both controls and non-controls, so acting on the first could report success without doing what you meant.` +
+            (list ? `\n${list}` : "") +
+            `\nUse a role selector for the control (for example role=button[name="…"]), or pick one with '>> nth=<i>'.`);
+        }
         // Fail FAST when the selector is ambiguous AND the match browse picked is
         // covered by something else - the page's "Create Database" sitting under
         // the modal's "Create". That pair is a guaranteed actionability timeout,
@@ -5660,7 +5713,7 @@ async function daemon() {
         }
         if (sel) {
           if (!pad) {
-            try { await L(sel).first().screenshot({ path }); }
+            try { await L(sel).first().screenshot({ path, caret: "initial" }); }
             catch (e) { throw await withSelectorHint(e, sel); }
             return `saved ${path} (${sel})${await readMatchNote(sel)}`;
           }
@@ -5684,11 +5737,11 @@ async function daemon() {
           const bottom = Math.min(vp.height, box.y + box.height + pad);
           const clip = { x: left, y: top, width: right - left, height: bottom - top };
           if (clip.width <= 0 || clip.height <= 0) throw new Error(`screenshot: '${sel}' is off screen, so there is nothing to pad around - scroll it into view first`);
-          await page.screenshot({ path, clip });
+          await page.screenshot({ path, clip, caret: "initial" });
           const clamped = clip.width < box.width + pad * 2 || clip.height < box.height + pad * 2;
           return `saved ${path} (${sel} + ${pad}px)${clamped ? " - clipped to the viewport on at least one side" : ""}${await readMatchNote(sel)}`;
         }
-        await page.screenshot({ path, fullPage: full });
+        await page.screenshot({ path, fullPage: full, caret: "initial" });
         // --full captures past the viewport via CDP, so the page never moves and
         // the recording is unaffected - but anything that only loads once it is
         // scrolled to simply isn't in the DOM yet.
