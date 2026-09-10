@@ -277,9 +277,20 @@ try {
   check("a file over the API's cap is refused here, exit 1", tooBig.code === 1 && /caps one file at 100.0MB/.test(tooBig.err),
     `exit ${tooBig.code} · ${tooBig.err}`);
   check("...with the tar-and-unpack recipe, not just the limit",
-    /tar --exclude=node_modules.*\n.*browse box push fakebox-1 \/tmp\/push.tgz/.test(tooBig.err), tooBig.err);
+    /tar --exclude=node_modules.*\n.*browse box push 'fakebox-1' \/tmp\/push.tgz/.test(tooBig.err), tooBig.err);
   check("...and nothing was uploaded at all", (await log()).uploads.length === 0,
     JSON.stringify((await log()).uploads));
+  const archive = join(SRC, "already.tgz");
+  writeFileSync(archive, "compressed fixture");
+  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [{ id: "fakebox-1", status: "running" }], uploadStatus: 413 }) });
+  const rejected = box(["push", "fakebox-1", archive]);
+  check("service rejection preserves status, size and useful archive advice", rejected.code === 1 && /upload → 413/.test(rejected.err) && /0.0MB/.test(rejected.err) && /already landed|may already have landed/.test(rejected.err) && /should be split/.test(rejected.err) && !/tar --exclude/.test(rejected.err), rejected.err);
+  const listing = spawnSync(join(ROOT, "bin", "browse"), ["box", "ls"], { encoding: "utf8", timeout: 10000,
+    env: { ...process.env, BROWSE_HOME: HOME, BROWSE_REMOTE: `fakebox-1@${new URL(BASE).host}`, UPSTASH_BOX_URL: BASE, UPSTASH_BOX_API_KEY: "" } });
+  check("ambient remote allows Box management and ls provides usable host", listing.status === 0 && listing.stdout.includes(`fakebox-1@${new URL(BASE).host}`), listing.stdout + listing.stderr);
+  const explicit = spawnSync(join(ROOT, "bin", "browse"), ["--remote", "fakebox-1", "box", "ls"], { encoding: "utf8", timeout: 10000,
+    env: { ...process.env, BROWSE_HOME: HOME, UPSTASH_BOX_URL: BASE, UPSTASH_BOX_API_KEY: "" } });
+  check("explicit remote on Box management still fails", explicit.status === 1 && /takes no --remote/.test(explicit.stderr), explicit.stderr);
   rmSync(SRC, { recursive: true, force: true });
 
   /* ---------------------------------------------------------------- errors */

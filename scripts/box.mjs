@@ -248,17 +248,20 @@ async function filesUnder(path) {
 /** The way to move something bigger than one request: tar it, push the archive,
  *  unpack it there. Printed with the caller's real arguments so it can be run as
  *  written. */
+const quote = (s) => "'" + String(s).replace(/'/g, "'\"'\"'") + "'";
+const isArchive = (file) => /\.(?:tgz|gz|bz2|xz|zip|zst|7z|tar)$/i.test(file);
+const splitAdvice = (file) => `Split ${quote(file)} into parts smaller than the rejected payload (for example 32 MB), upload each part separately, then concatenate them in filename order on the Box. Verify the reassembled SHA-256 before extracting or using the file.`;
 const tarRecipe = (id, paths, dest) => {
   // `-C <parent> <name>` per path, so the archive holds `<name>/…` and unpacks to
   // <dest>/<name>, the same layout `push` would have produced. Works for a file
   // and a directory alike, which a `-C <path> .` form does not.
   const entries = paths.map((p) => {
     const abs = resolvePath(p);
-    return `-C ${JSON.stringify(join(abs, ".."))} ${JSON.stringify(basename(abs))}`;
+    return `-C ${quote(join(abs, ".."))} ${quote(basename(abs))}`;
   }).join(" ");
   return `  tar --exclude=node_modules --exclude=.next --exclude=.git -czf /tmp/push.tgz ${entries}\n` +
-    `  browse box push ${id} /tmp/push.tgz --to ${dest}\n` +
-    `  browse box exec ${id} 'tar -xzf ${dest}/push.tgz -C ${dest}'`;
+    `  browse box push ${quote(id)} /tmp/push.tgz --to ${quote(dest)}\n` +
+    `  browse box exec ${quote(id)} ${quote(`tar -xzf ${quote(dest + "/push.tgz")} -C ${quote(dest)}`)}`;
 };
 
 async function push(id, paths, dest) {
@@ -272,12 +275,12 @@ async function push(id, paths, dest) {
   const big = files.find((f) => (f.size || 0) > PUSH_LIMIT);
   if (big) {
     die(`${big.rel} is ${mb(big.size)} - the box upload API caps one file at ${mb(PUSH_LIMIT)}.\n` +
-        `     Split it, or send it compressed:\n${tarRecipe(id, paths, dest)}`);
+        `     ${isArchive(big.rel) ? splitAdvice(big.abs) : `Split it, or send it compressed:\n${tarRecipe(id, paths, dest)}`}`);
   }
   if (total > PUSH_LIMIT) {
-    die(`${files.length} files, ${mb(total)} - the box upload API caps one request at ${mb(PUSH_LIMIT)}.\n` +
+    die(`${files.length} files, ${mb(total)} - this client limits one upload request to ${mb(PUSH_LIMIT)}.\n` +
         `     ${NEVER_PUSH.size} directory names are skipped already (${[...NEVER_PUSH].join(", ")}); the rest is real payload.\n` +
-        `     Tar the tree and push the archive instead:\n${tarRecipe(id, paths, dest)}`);
+        `     Upload fewer files per request, or reduce a source tree with an archive. Already compressed files should be split into smaller parts.`);
   }
   const form = new FormData();
   let n = 0;
@@ -295,9 +298,9 @@ async function push(id, paths, dest) {
   // about the FORM, not about the files in it. Keep its words, and add what this
   // side knows: how much was sent, and the way to send more than that.
   if (!res.ok) {
-    die(`upload → ${res.status} ${(await res.text()).slice(0, 200)}\n` +
+    die(`upload → ${res.status} ${clip(await res.text(), 200)}\n` +
         `     (${n} file${n > 1 ? "s" : ""}, ${mb(total)} in one request)` +
-        `${res.status === 400 || res.status === 413 ? `\n     If it is the size, tar the tree and push the archive:\n${tarRecipe(id, paths, dest)}` : ""}`);
+        `${res.status === 400 || res.status === 413 ? `\n     The service rejected this payload; its reported limit may differ from the local byte count.\n     Reduce the source tree (exclude generated assets and caches), or split large files into smaller parts and reassemble on the box.\n     An existing archive should be split, not archived again. Check the destination before retrying: earlier files may already have landed.` : ""}`);
   }
   say(`pushed ${n} file${n > 1 ? "s" : ""} to ${dest}/ on ${id}`);
   // Uploads arrive without their exec bit, which is silent until something tries
@@ -438,8 +441,9 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
                               exec's OWN shell (the pattern is in its command line) and kills
                               the command that is doing the killing — go by port or pid file
   push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}; skips .git, node_modules
-                              and .next). ONE request is capped at 100 MB: over that it refuses here,
-                              before the upload, and prints the tar-and-unpack recipe instead
+                              and .next). Local preflight limits a file or request to 100 MiB;
+                              service acceptance can be lower. Rejection reports the local byte count.
+                              Reduce source trees; split an existing archive instead of archiving again.
   pull <box> <remote> [local]       copy one file out
   url <box> <port>            public https URL for a port, to hand someone who wants to click
                               around the app themselves. The server must be listening on
@@ -671,7 +675,7 @@ switch (cmd) {
   case "ls": {
     const list = await listBoxes();
     for (const b of list) {
-      process.stdout.write(`${(b.id || "").padEnd(24)} ${(b.status || "?").padEnd(8)} ${b.name || ""}\n`);
+      process.stdout.write(`${(b.id || "").padEnd(24)} ${(b.status || "?").padEnd(8)} ${b.name || ""}  ${sshHost(b.id)}\n`);
     }
     if (!list.length) say("(no boxes)");
     const images = await listImages();

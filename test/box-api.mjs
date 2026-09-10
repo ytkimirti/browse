@@ -19,7 +19,7 @@ let boxes = [], created = [], deleted = [], execs = [], uploads = [], seq = 0;
 // there. Both are set per case: a box carrying a browse too old to name its
 // build, and a box that cannot reach the repo, are the two the CLI has to
 // report differently instead of blaming the image.
-let version = "browse 0.1.0 (build deadbeef)", refreshFails = false;
+let version = "browse 0.1.0 (build deadbeef)", refreshFails = false, uploadStatus = 200;
 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
@@ -36,7 +36,7 @@ const server = http.createServer(async (req, res) => {
     const b = await body();
     boxes = b.boxes || []; created = []; deleted = []; execs = []; uploads = []; seq = 0;
     version = b.version ?? "browse 0.1.0 (build deadbeef)";
-    refreshFails = !!b.refreshFails;
+    refreshFails = !!b.refreshFails; uploadStatus = b.uploadStatus || 200;
     return send(200, { ok: true });
   }
   if (url === "/__log") return send(200, { boxes, created, deleted, execs, uploads });
@@ -86,7 +86,7 @@ const server = http.createServer(async (req, res) => {
     // per file, in order, each its own part with an empty header block.
     const paths = [...raw.matchAll(/name="paths"\r\n\r\n([^\r]*)\r\n/g)].map((m) => m[1]);
     uploads.push({ box: upload[1], bytes: n, paths });
-    return send(200, { ok: true });
+    return send(uploadStatus, uploadStatus === 200 ? { ok: true } : { error: "file exceeds maximum size of 100 MB" });
   }
   const one = /^\/v2\/box\/([^/]+)$/.exec(url);
   if (req.method === "DELETE" && one) {
