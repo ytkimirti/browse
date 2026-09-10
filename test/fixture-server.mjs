@@ -243,6 +243,11 @@ const json = (res, o) => {
 
 http.createServer((req, res) => {
   const url = req.url.split("?")[0];
+  if (url === "/auth-cycle") {
+    const n = Number(new URL(req.url, "http://localhost").searchParams.get("n") || 0);
+    res.writeHead(200, { "content-type": "text/html" });
+    return res.end(n < 10 ? `<script>setTimeout(()=>location.replace('/auth-cycle?n=${n + 1}'),100)</script>` : "<p id=cycle-done>Stopped</p>");
+  }
   if (url === "/__hits") return json(res, hits);
   if (url === "/__reset") { for (const k of Object.keys(hits)) hits[k] = 0; return json(res, hits); }
   if (url === "/api/user") { hits.user++; return json(res, { id: 99, name: "real-user" }); }

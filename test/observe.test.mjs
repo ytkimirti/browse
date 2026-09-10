@@ -280,7 +280,7 @@ try {
     const r = browse("console", "--grep", "XXXXXXXX");
     check("one enormous line cannot dump 50KB into the caller",
       r.code === 0 && r.out.length < 8000, `${r.out.length} chars`);
-    check("…and it says how much it cut", /chars, read it whole with 'browse eval'/.test(r.out), r.out.slice(0, 200));
+    check("…and it says how much it cut", /chars, read it whole with 'browse console --json'/.test(r.out), r.out.slice(0, 200));
   }
 
   /* ── navigation reports where it LANDED ─────────────────────────────────── */
@@ -474,7 +474,7 @@ try {
       check("sqlite3 available to build the cookie fixture", false, made.stderr || "no sqlite3 on PATH");
     } else {
       let r = local("profiles");
-      check("the table counts live logins", r.code === 0 && /seeded\s+chromium.*1 host logged in/.test(r.out), r.out);
+      check("the table counts unexpired cookie hosts", r.code === 0 && /seeded\s+chromium.*1 host with unexpired cookies/.test(r.out), r.out);
 
       r = local("profiles", "seeded");
       check("the detail view lists the live host", r.code === 0 && /live\.example\.com\s+expires in 30d/.test(r.out), r.out);
@@ -503,7 +503,7 @@ try {
       writeFileSync(join(HOME, "run", "pretend.json"),
         JSON.stringify({ port: 1, pid: 2147480000, out: "/tmp", profile: "openprof", engine: "chromium" }));
       r = local("profiles", "openprof");
-      check("…and a DEAD session's run file does not fake that", r.code === 0 && /no cookies at all/.test(r.out), r.out);
+      check("…and a DEAD session's run file does not fake that", r.code === 0 && /no cookies stored here/.test(r.out), r.out);
 
       r = local("-p", "openprof", "--chromium", "clear");
       check("clear works once nothing live holds the profile", r.code === 0 && /cleared profile/.test(r.out), `code ${r.code} ${r.out} ${r.err}`);

@@ -111,6 +111,7 @@ import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFi
 // SyntaxError — it would take `browse help` down on a node this still supports,
 // for the sake of a diagnostic that only ever runs after a crash.
 import * as nodeFs from "node:fs";
+import { pipeline } from "node:stream";
 import { createHash } from "node:crypto";
 import { homedir, freemem, totalmem } from "node:os";
 import { join, resolve, basename } from "node:path";
@@ -1231,6 +1232,9 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     (text=Pause must not click prose instead of the Pause button). When
                                     several controls match and the first is covered, browse gives up after
                                     ${AMBIGUOUS_MS}ms and lists every match with what is on top of it.
+                                    click/dblclick/rightclick/hover also take --position <x,y> after
+                                    the selector, before --timeout: pixels from the padding-box top-left.
+                                    Out-of-bounds positions fail. Use rect to inspect the element first.
   browse dblclick <selector>        double-click an element
   browse rightclick <selector>      right-click it — opens the app's context menu
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
@@ -1270,23 +1274,37 @@ Observe (do these often — this is your "check" step):
   browse text [selector]            visible text (whole page if no selector)
   browse title | url                page title / current URL
   browse content                    raw HTML (truncated)
-  browse errors                     console + page errors seen so far
-  browse console [--level log,warn] [--grep <pat>] [--since <#>] [--last <n>|--all]
+  browse rect <selector>            JSON geometry for the first match: top-page bounding box, frame-local
+                                    viewport clipping and center hit-test. Does not scroll or change state.
+                                    Center coverage is a sample, not proof the whole element is unobscured.
+  browse errors [console filters]    console + page errors, with the same archive and filter options below
+  browse console [--dir <session-dir>] [--level log,warn] [--grep <pat>] [--since <#>] [--last <n>|--all] [--json] [--ungroup]
                                     every console message the page logged, in order, with its # —
                                     the log/info/warn sibling of 'errors' (which is only the alarm).
+                                    console.jsonl persists the full history; --dir reads it after close
+                                    without launching a browser. Without --dir, a live session is required.
+                                    Consecutive duplicates group with their count and last #; --ungroup
+                                    keeps each event separate. --since <#> reads after that baseline.
+                                    --json returns complete selected records without text truncation.
                                     Captured from the first command, so a log fired during page load
                                     is there; past 5000 messages the OLDEST are dropped and the count
                                     is reported. --last defaults to 40 (--all for every one), a very
                                     long line is cut with a note, and object arguments are resolved to
                                     real JSON on both engines. A %c-styled log keeps its CSS arguments
                                     on chromium; firefox/camoufox applies the styling and drops them.
-  browse screenshot [name] [--full] [--sel <selector>] [--pad <px>]
+  browse screenshot [name] [--full] [--sel <selector>] [--pad <px>] [--after <selector>] [--text <substring>] [--timeout <ms>] [--hide <css>]
                                     save a screenshot into the session dir. --full captures the whole
                                     scrollable page (without moving it, so the recording is untouched),
                                     --sel shoots one element, and a name ending in .pdf prints a PDF.
                                     --sel crops to the element's BORDER box, so a caption, ring or
                                     badge that overflows it comes back sliced: --pad <px> keeps that
                                     many pixels around it (clamped to the viewport, and it says so).
+                                    --after waits for a visible match, optionally containing --text,
+                                    immediately before capture in the same command (default timeout 10000).
+                                    It removes the agent round trip, but does not freeze a transient state.
+                                    --text/--timeout require --after. --hide is a repeatable CSS selector,
+                                    hidden only during the image capture and disclosed in the result.
+                                    These capture options do not apply to PDF output.
 
 Tabs, frames, emulation, saved logins:
   browse target                     list tabs (index, title, url, * = active)
@@ -2082,9 +2100,8 @@ function upstashBox() {
  *     has no such teardown, and authenticates with the key ssh just used.
  *  3. Plain `ssh <host> <cmd>` — every ordinary machine.
  *
- *  None of the three is checked for an exit status: a box relays neither that
- *  nor stdout back over ssh, so the only honest proof is /health answering on
- *  the forwarded port, which ensureRemoteDaemon is already waiting for. */
+ *  Probe the executable through the same mechanism used to spawn it, then
+ *  wait for /health to establish that browser startup completed. */
 async function spawnRemoteDaemon(remotePort) {
   const env = {
     ...forwardedEnv(),
@@ -2116,14 +2133,25 @@ async function spawnRemoteDaemon(remotePort) {
     return;
   }
   const box = upstashBox();
-  if (box) return boxExec(box, remoteCmd);
-  ssh([REMOTE, remoteCmd]);
+  if (box) {
+    const check = await boxExec(box, `${REMOTE_BIN} version`);
+    if (check.exit_code !== 0 || !/^browse /m.test(check.output || ""))
+      throw new Error(`cannot run '${REMOTE_BIN}' on ${REMOTE}; check BROWSE_REMOTE_BIN or the Box installation before starting a session`);
+    const started = await boxExec(box, remoteCmd);
+    if (started.exit_code !== 0) throw new Error(`remote spawn failed on ${REMOTE}; inspect ${SPAWN_LOG}`);
+    return;
+  }
+  const check = ssh([REMOTE, `${REMOTE_BIN} version`], { encoding: "utf8", timeout: 20000 });
+  if (check.status !== 0 || !/^browse /m.test(check.stdout || "")) {
+    throw new Error(`cannot run '${REMOTE_BIN}' on ${REMOTE} in a noninteractive shell. Set BROWSE_REMOTE_BIN to its absolute executable path.\n${clipForRead((check.stderr || check.error?.message || "no browse version returned").trim(), "remote startup", "check the remote executable", 1000)}`);
+  }
+  const started = ssh([REMOTE, remoteCmd], { encoding: "utf8", timeout: 20000 });
+  if (started.status !== 0) throw new Error(`remote spawn failed on ${REMOTE}: ${(started.stderr || started.error?.message || "no exit status").trim()}`);
 }
 
 /** POST one command to a box's exec API. The API key is the same one its ssh
  *  takes as a password, so a box needs no credential browse doesn't already
- *  have. Throws only on a refused request — a command that ran and failed is
- *  diagnosed by the health poll, with the daemon's own log to point at. */
+ *  have. Return the command's exit status so startup failures can fail promptly. */
 async function boxExec(box, command) {
   const key = boxApiKey() || sshPassword();
   if (!key) throw new Error(
@@ -2132,8 +2160,10 @@ async function boxExec(box, command) {
     method: "POST",
     headers: { "X-Box-Api-Key": key, "content-type": "application/json" },
     body: JSON.stringify({ command: ["sh", "-c", command] }),
+    signal: AbortSignal.timeout(20000),
   }).catch((e) => { throw new Error(`box exec unreachable: ${e.message}`); });
   if (!res.ok) throw new Error(`box exec refused (${res.status}) — is ${box.id} the right box id?`);
+  return res.json();
 }
 
 /** Reattach to a live remote session WITHOUT starting anything: reuse the
@@ -2146,12 +2176,16 @@ async function findRemoteDaemon() {
   if (tunnelAlive()) {
     const h = await healthInfo(info.port);
     if (h && h.session === SESSION) return { ...info, ...h };
+    // Encoding can block this daemon's event loop. A close already in progress
+    // must retain its endpoint instead of becoming "no active session".
+    if (!h && info.phase === "closing") return info;
   }
   stopTunnel();
   let local;
   try { local = startTunnel(await freePort(), info.remotePort || remotePortFor(SESSION)); }
   catch { return null; }
   const h = await healthInfo(local);
+  if (!h && info.phase === "closing") return saveRemoteRun({ ...info, port: local });
   if (!h || h.session !== SESSION) { stopTunnel(); return null; }
   return saveRemoteRun({ ...info, port: local, ...h });
 }
@@ -2173,6 +2207,11 @@ function saveRemoteRun(rec) {
  *  and never gets here, so this cannot turn into a per-command banner). */
 function warnBuildSkew(h) {
   if (!h || h.build === buildId()) return;
+  const committed = spawnSync("git", ["-C", join(SELF, ".."), "show", "HEAD:browse.mjs"], { maxBuffer: 2 * 1024 * 1024, timeout: 3000 });
+  if (committed.status === 0 && h.build === createHash("sha256").update(committed.stdout).digest("hex").slice(0, 8)) {
+    process.stderr.write(`note: ${REMOTE} matches this checkout's committed browse build (${h.build}). Local browse.mjs has uncommitted changes (${buildId()}); a remote refresh cannot install them.\n`);
+    return;
+  }
   // No build in /health at all is not "nothing to compare": only a daemon older
   // than this field answers that way, so it is the STALEST case there is - and
   // the one every box restored from an image baked before it will hit. Reporting
@@ -2208,7 +2247,8 @@ async function ensureRemoteDaemon() {
       `${probe.kind === "browse" ? `browse session '${probe.health.session}'` : "something that is not browse"}\n` +
       `  Re-run with BROWSE_PORT=<a free port there>, or use a different -s name.`);
   }
-  await spawnRemoteDaemon(remotePort);
+  try { await spawnRemoteDaemon(remotePort); }
+  catch (e) { stopTunnel(); throw e; }
   // A cold remote installs Playwright + a browser on this first command, which
   // is minutes, not seconds — so this waits far longer than the local spawn.
   let h = null;
@@ -2235,21 +2275,28 @@ async function ensureRemoteDaemon() {
  *  network log) — a missing extra must not fail the command that named it. */
 function pullFile(port, rel, dest) {
   return new Promise((resolve) => {
+    let tmp = null, settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      if (tmp) { try { rmSync(tmp, { force: true }); } catch { /* cleanup only */ } }
+      resolve(ok);
+    };
     const req = http.get(
       { host: HOST, port, path: `/file?p=${encodeURIComponent(rel)}`, timeout: 300000 },
       (res) => {
-        if (res.statusCode !== 200) { res.resume(); return resolve(false); }
-        mkdirSync(join(dest, ".."), { recursive: true });
-        const tmp = `${dest}.part`;
-        const out = createWriteStream(tmp);
-        res.pipe(out);
-        out.on("error", () => resolve(false));
-        out.on("finish", () => {
-          try { renameSync(tmp, dest); resolve(true); } catch { resolve(false); }
-        });
+        if (res.statusCode !== 200) { res.resume(); return finish(false); }
+        try {
+          mkdirSync(join(dest, ".."), { recursive: true });
+          tmp = `${dest}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
+          pipeline(res, createWriteStream(tmp, { flags: "wx" }), (err) => {
+            if (err || !res.complete) return finish(false);
+            try { renameSync(tmp, dest); finish(true); } catch { finish(false); }
+          });
+        } catch { res.destroy(); finish(false); }
       });
-    req.on("error", () => resolve(false));
-    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.on("error", () => finish(false));
+    req.on("timeout", () => { req.destroy(); finish(false); });
   });
 }
 
@@ -2273,7 +2320,12 @@ async function mirrorResult(d, text, { full = false } = {}) {
   // browsed.log too: a `middleware` handler's console.log lands ONLY there, so on
   // a remote session the one place an agent's own instrumentation prints was the
   // one artifact that never came down - it cost a `box exec` dig to read it.
-  if (full) for (const f of ["transcript.md", "network.jsonl", "browsed.log"]) rels.add(f);
+  if (full) {
+    const manifest = await healthInfo(d.port, "/manifest");
+    if (!manifest || !Array.isArray(manifest.files))
+      throw new Error(`cannot read the artifact manifest from ${REMOTE}. The session is retained; retry close before deleting the host.`);
+    for (const f of manifest.files) rels.add(f);
+  }
   mkdirSync(local, { recursive: true });
   const missed = [];
   for (const rel of rels) {
@@ -2319,9 +2371,9 @@ function sshPassthrough(argv) {
 
 /** GET /health — the answering daemon's { session, out, home }, or null. Over a
  *  tunnel this is also the tunnel's own liveness check. */
-function healthInfo(port) {
+function healthInfo(port, path = "/health") {
   return new Promise((resolve) => {
-    const req = http.get({ host: HOST, port, path: "/health", timeout: REMOTE ? 8000 : 1500 }, (res) => {
+    const req = http.get({ host: HOST, port, path, timeout: REMOTE ? 8000 : 1500 }, (res) => {
       let buf = "";
       res.setEncoding("utf8");
       res.on("data", (c) => (buf += c));
@@ -2342,7 +2394,8 @@ async function findDaemon() {
   try { info = JSON.parse(readFileSync(runFile(SESSION), "utf8")); } catch { return null; }
   if (!info || !info.port) return null;
   const h = await healthInfo(info.port);
-  return h && h.session === SESSION ? { ...info, ...h } : null;
+  return h && h.session === SESSION ? { ...info, ...h }
+    : !h && info.phase === "closing" && pidAlive(info.pid) ? info : null;
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -2367,7 +2420,7 @@ async function ensureDaemon() {
   // client is already spawning this session's browser — just wait for it.
   mkdirSync(RUN_DIR, { recursive: true });
   const lock = runFile(SESSION) + ".lock";
-  let spawner = false;
+  let spawner = false, spawnedChild = null;
   try { writeFileSync(lock, String(process.pid), { flag: "wx" }); spawner = true; }
   catch {
     try {
@@ -2401,10 +2454,16 @@ async function ensureDaemon() {
       },
       });
       child.unref();
+      spawnedChild = child;
     }
     // Launching Chromium takes a few seconds; poll generously.
     for (let i = 0; i < 60; i++) {
       if ((d = await findDaemon())) return d;
+      if (spawnedChild && (spawnedChild.exitCode !== null || spawnedChild.signalCode !== null)) {
+        let detail = "";
+        try { detail = readFileSync(DAEMON_LOG, "utf8").slice(-3000); } catch { /* no log yet */ }
+        throw new Error(`browser startup failed; see ${DAEMON_LOG}\n${detail}`);
+      }
       await sleep(1000);
     }
   } finally {
@@ -2561,7 +2620,7 @@ const RETIRED = Object.assign(Object.create(null), {
  *  user-facing list and this is the machine one. */
 const DAEMON_COMMANDS = new Set([
   ...MUTATING, ...PAGE_METHODS, "open", "snapshot", "text", "title", "url",
-  "content", "errors", "console", "screenshot", "wait", "scroll", "eval", "toast", "speed", "init",
+  "content", "errors", "console", "rect", "screenshot", "wait", "scroll", "eval", "toast", "speed", "init",
   "target", "emulate", "state", "middleware", "dir", "close",
 ]);
 /** Flags a command used to accept, refused in the CLIENT so a stale spelling
@@ -2740,6 +2799,27 @@ async function client(argv) {
   // and call it an answer. `whoami` and `sessions` stay here: they are about
   // which session THESE commands drive, and the run files that answer that are
   // local. `net` stays too, by copying the log down (below).
+  if ((cmd === "console" || cmd === "errors") && argv.includes("--dir")) {
+    const args = argv.slice(1);
+    const at = args.indexOf("--dir"), dir = args[at + 1];
+    if (!dir || dir.startsWith("--")) throw new Error(`${cmd}: --dir needs a session directory`);
+    args.splice(at, 2);
+    const file = join(resolve(dir.replace(/^~(?=\/|$)/, homedir())), "console.jsonl");
+    let raw;
+    try { raw = readFileSync(file, "utf8"); }
+    catch (e) { throw new Error(`cannot read console archive ${file}: ${e.code}. This session may predate console recording.`); }
+    const entries = new Map();
+    const lines = raw.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (!lines[i]) continue;
+      try { const e = JSON.parse(lines[i]); entries.set(e.i, e); }
+      catch { throw new Error(`invalid console archive ${file}, line ${i + 1}; copy it again if the session is still writing`); }
+    }
+    const list = [...entries.values()].sort((a, b) => a.i - b.i)
+      .filter((e) => cmd !== "errors" || e.level === "error" || e.level === "pageerror");
+    process.stdout.write(consoleQuery(list, args) + "\n");
+    return 0;
+  }
   if (REMOTE && REMOTE_ONLY.has(cmd)) return sshPassthrough(argv);
   // `net` reads a file, and for a remote session that file is over there. Copy
   // the live session's log into its mirror and query that, so diagnosing a
@@ -2801,7 +2881,9 @@ async function client(argv) {
         // match against /health is the session half.
         const name = file.includes("~") ? file.slice(file.indexOf("~") + 1) : file;
         const h = await healthInfo(info.port);
-        if (h && h.session === name) lines.push(`${name}  (port ${info.port})${info.host ? `  on ${info.host}` : ""}  ${info.out}`);
+        if (h && h.session === name) lines.push(`${name}  (port ${info.port}, ${h.phase || "live"})${info.host ? `  on ${info.host}` : ""}  ${info.out}`);
+        else if (info.phase === "closing" && (info.host || pidAlive(info.pid)))
+          lines.push(`${name}  (closing; health unavailable, completion unconfirmed)  ${info.out}`);
         else rmSync(path, { force: true });
       } catch { /* unreadable — skip */ }
     }
@@ -2841,7 +2923,7 @@ async function client(argv) {
           if (!c) { out.push("  (cannot read this profile's cookie db — needs sqlite3 on PATH)"); continue; }
           if (c.unreadable) { out.push(`  (cookie db unreadable: ${c.unreadable})`); continue; }
           if (c.open) { out.push("  a live session is driving this profile and its newest cookies are still in memory — 'browse close' first"); continue; }
-          if (!c.hosts.length) { out.push("  no cookies at all — nothing is logged in here"); continue; }
+          if (!c.hosts.length) { out.push("  no cookies stored here; verify authentication in the target app"); continue; }
           for (const h of c.hosts.slice(0, 60)) {
             const when = h.ms === 0 ? "session cookie — dies on close, so it is NOT a saved login"
               : h.live ? `expires ${humanUntil(h.ms)}` : `EXPIRED ${humanAge(h.ms)}`;
@@ -2851,7 +2933,7 @@ async function client(argv) {
         }
       }
       out.push("", "(cookie HOSTS and expiries only — no values are read. A live cookie is not proof the",
-        " session is still valid server-side, but an expired/absent one IS proof it is not.)");
+        " session is valid server-side. Verify access to the exact target app before capturing.)");
       process.stdout.write(out.join("\n") + "\n");
       return 0;
     }
@@ -2864,7 +2946,7 @@ async function client(argv) {
       p.engines.forEach((e, i) => {
         const c = e.cookies;
         const logins = !c ? "cookies: ? (no sqlite3)" : c.unreadable ? "cookies: ? (db unreadable)"
-          : c.open ? "in use — cannot tell yet" : c.live ? `${c.live} host${c.live > 1 ? "s" : ""} logged in` : "no live cookies";
+          : c.open ? "in use - cannot tell yet" : c.live ? `${c.live} host${c.live > 1 ? "s" : ""} with unexpired cookies` : "no live cookies";
         out.push(`${(i ? "" : p.name).padEnd(nameW)}  ${e.engine.padEnd(8)}  ${e.size.padStart(5)}  ${String(e.used).padEnd(9)}  ${logins}`);
       });
     }
@@ -2953,11 +3035,14 @@ async function client(argv) {
       `        so the flag belongs on that one. Run \`browse${s} close\` and re-open with it, or use -s <name>.\n`);
     return 1;
   }
+  if ((cmd === "console" || cmd === "errors") && !(await findDaemon()))
+    throw new Error(`no live session '${SESSION}'; read saved evidence with '${cmd} --dir <session-dir>'`);
   const d = await ensureDaemon();
   // `init --file <path>` is read by the DAEMON, which sits in whatever directory
   // the session was first opened from - a relative path would resolve against a
   // directory the caller never chose. Resolve it here, where the cwd is theirs.
   const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
+  if (CLOSERS.has(cmd)) writeFileSync(runFile(SESSION), JSON.stringify({ ...d, phase: "closing" }));
   const res = await post(d.port, { cmd, args, hold: !!REMOTE }, postTimeout(cmd, args));
   if (res.ok) {
     let text = res.result == null ? "" : String(res.result);
@@ -2986,6 +3071,9 @@ async function landArtifacts(d, cmd, text) {
           missed = missed.filter((m) => m !== "recording.gif");
       }
     }
+    if (missed.length) {
+      throw new Error(`artifact download incomplete: ${missed.join(", ")}. Successful files are in ${local}. The remote session is retained for up to 10 minutes; retry the same close command before deleting ${REMOTE}.`);
+    }
     await sayBye(d.port);
     stopTunnel();
     rmSync(runFile(SESSION), { force: true });
@@ -3008,6 +3096,109 @@ function sayBye(port) {
     req.on("timeout", () => { req.destroy(); resolve(); });
     req.end();
   });
+}
+
+// Shared by the live daemon and archived queries. Consecutive duplicates collapse
+// without hiding the order or the sequence number used as a diagnostic baseline.
+function groupMessages(list) {
+  const out = [];
+  for (const entry of list) {
+    const prev = out.at(-1);
+    if (prev && prev.level === entry.level && prev.text === entry.text) {
+      prev.count++; prev.lastIndex = entry.i;
+    } else out.push({ ...entry, count: 1, lastIndex: entry.i });
+  }
+  return out;
+}
+function consoleQuery(consoleLog, args, consoleDropped = 0) {
+  const CONSOLE_MAX = 5000;
+  // The log/info/warn/debug sibling of `errors`. Filters mirror `net`'s
+  // (--since <#>, --grep, --last) so one mental model covers both logs.
+  let level = null, grep = null, since = null, last = 40, json = false, group = true;
+  const USAGE = "try [--level log,warn,error] [--grep <pattern>] [--since <#>] [--last <n>|--all]";
+  // Every value is checked. A missing one used to slide through as
+  // NaN/undefined and answer "no console messages matched", which is the
+  // silent wrong answer this whole round exists to remove.
+  const val = (flag, i) => {
+    const v = args[i];
+    if (v == null || v === "" || String(v).startsWith("--")) throw new Error(`console: ${flag} needs a value - ${USAGE}`);
+    return v;
+  };
+  const num = (flag, i) => {
+    const n = Number(val(flag, i));
+    if (!Number.isSafeInteger(n) || n < 0) throw new Error(`console: ${flag} wants a number - ${USAGE}`);
+    return n;
+  };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--level") level = String(val(a, ++i)).toLowerCase();
+    else if (a === "--grep") grep = val(a, ++i);
+    else if (a === "--since") since = num(a, ++i);
+    // 0 means "all", the same as it does on `browse net --last 0`.
+    else if (a === "--last" || a === "-n") last = num(a, ++i);
+    else if (a === "--all") last = 0;
+    else if (a === "--json") json = true;
+    else if (a === "--ungroup") group = false;
+    else throw new Error(`console: unknown argument '${a}' - ${USAGE}`);
+  }
+  // Firefox says "warning", chromium says "warning" too but everyone TYPES
+  // "warn" (it is what help used to print and what console.warn is called).
+  // Alias both ways rather than answering "(no messages matched)" about a
+  // level that does exist - an unvalidated level looked exactly like a
+  // quiet page.
+  const LEVEL_ALIAS = { warn: "warning", warning: "warning", err: "error", error: "error", log: "log", info: "info", debug: "debug", trace: "trace", dir: "dir", table: "table", assert: "assert", count: "count", pageerror: "pageerror", timeEnd: "timeEnd", startGroup: "startGroup", endGroup: "endGroup" };
+  let levels = null;
+  if (level) {
+    levels = [];
+    for (const raw of level.split(",").map((x) => x.trim()).filter(Boolean)) {
+      const seen = [...new Set(consoleLog.map((e) => e.level))];
+      const mapped = LEVEL_ALIAS[raw] || LEVEL_ALIAS[raw.toLowerCase()];
+      if (!mapped && !seen.includes(raw)) {
+        throw new Error(`console: '${raw}' is not a console level - try log, info, warn, error, debug` +
+          `${seen.length ? ` (this session has logged: ${seen.join(", ")})` : ""}`);
+      }
+      levels.push(mapped || raw);
+    }
+  }
+  const grepMatch = grep ? netMatcher(grep) : null;
+  let list = consoleLog.filter((e) =>
+    (!levels || levels.includes(e.level)) &&
+    (since == null || e.i > since) &&
+    (!grepMatch || grepMatch(e.text)));
+  const matched = list.length;
+  if (!matched && json) return "[]";
+  if (!matched) {
+    const dropped = consoleDropped ? `, ${consoleDropped} older ones already dropped past the ${CONSOLE_MAX} cap` : "";
+    return consoleLog.length
+      ? `(no console messages matched - ${consoleLog.length} kept this session${dropped})`
+      : "(no console messages yet)";
+  }
+  if (last > 0 && list.length > last) list = list.slice(-last);
+  // One serialized API response is enough to blow past every budget, so each
+  // LINE is capped before the whole body is: without this a single 50 KB
+  // log escaped the clip entirely and landed in the agent's context whole.
+  if (json) return JSON.stringify(list, null, 2);
+  const grouped = group ? groupMessages(list) : list;
+  const LINE_MAX = 2000;
+  const lines = grouped.map((e) => {
+    const head = `#${e.i}${e.count > 1 ? `..#${e.lastIndex} (${e.count} repeats)` : ""} ${e.t.toFixed(1)}s  ${e.level.padEnd(7)} `;
+    const text = e.text.length > LINE_MAX
+      ? `${e.text.slice(0, LINE_MAX)}…[+${e.text.length - LINE_MAX} chars, read it whole with 'browse console --json']`
+      : e.text;
+    return head + text;
+  });
+  // Clipped from the FRONT, unlike every other read: a log is read for what
+  // happened last, and keeping the head of `--all` would hand back the
+  // oldest lines and cut the ones the command just produced.
+  let body = lines.join("\n"), cut = 0;
+  while (body.length > READ_MAX && cut < lines.length - 1) {
+    cut = Math.max(cut + 1, Math.ceil(lines.length * (1 - READ_MAX / body.length)));
+    body = lines.slice(cut).join("\n");
+  }
+  const clipped = cut ? `…[console truncated: ${cut} earlier line${cut > 1 ? "s" : ""} cut, newest kept. Narrow with --grep <pattern>, --level <l> or --since <#>]\n` : "";
+  const more = matched > list.length ? ` (of ${matched} matching, ${consoleLog.length} logged; --all for every one)` : ` of ${consoleLog.length} logged`;
+  const capped = consoleDropped ? ` · ${consoleDropped} dropped past the ${CONSOLE_MAX} cap; read console --dir <session-dir> for the archive` : "";
+  return `${clipped}${body}\n- ${list.length} shown${more}${capped}`;
 }
 
 /* ==================================================== recording finalizer */
@@ -3798,9 +3989,11 @@ async function daemon() {
   // so the note stays one actionable line and the full text goes to browsed.log.
   const fallback = (note, detail) => { engineNote = note; logDaemon(detail ? `${note} :: ${detail}` : note); };
   let engine = ENGINE, camouOpts = null;
+  const requireEngine = !!PROFILE || !!process.env.BROWSE_ENGINE;
   if (engine === "camoufox") {
     camouOpts = camoufoxLaunchOptions();
     if (!camouOpts) {
+      if (requireEngine) throw new Error("camoufox is unavailable. Run 'browse setup' to install it. The requested engine/profile was preserved; start a separate session with --chromium only if you intend to use its separate profile.");
       fallback("camoufox not installed — using chromium. Set it up with " +
                "`uv tool install camoufox` then " +
                "`~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch`, " +
@@ -3884,7 +4077,7 @@ async function daemon() {
   try {
     ({ browser, context } = await launchWith(engine));
   } catch (e) {
-    if (engine !== "camoufox") throw e;
+    if (engine !== "camoufox" || requireEngine) throw e;
     fallback("camoufox failed to launch — using chromium. " + (pinnedMissing
       ? "Its pinned playwright-core is missing: run `browse setup`."
       : "See browsed.log in the session dir."), e.message);
@@ -3934,9 +4127,9 @@ async function daemon() {
   // surface an agent reads most (it is appended to every command's output).
   const errors = [];
   const noteErr = (s) => {
-    if (errors.length >= 200) return null;
-    const e = { text: s };
+    const e = { i: consoleSeq + 1, text: s };
     errors.push(e);
+    if (errors.length > 200) errors.shift();
     return e;
   };
   // Every console message the page produced, in order, queryable after the fact
@@ -3945,6 +4138,11 @@ async function daemon() {
   const consoleLog = [];
   const CONSOLE_MAX = 5000;
   let consoleDropped = 0, consoleSeq = 0;
+  const consoleFile = join(OUT, "console.jsonl");
+  writeFileSync(consoleFile, "");
+  // Resolved object arguments append a revision with the same sequence number.
+  // Readers keep the last revision, so a crash still leaves the original event.
+  const persistConsole = (entry) => appendFileSync(consoleFile, JSON.stringify(entry) + "\n");
   /** In-flight argument resolutions. A command waits (briefly) for these before
    *  reporting errors, so the INLINE "new page errors" block - the surface an
    *  agent actually reads - carries the same resolved text `browse console` and
@@ -3965,6 +4163,7 @@ async function daemon() {
   function noteConsole(level, m, errEntry) {
     const entry = { i: ++consoleSeq, t: now(), level, text: m.text() };
     consoleLog.push(entry);
+    persistConsole(entry);
     while (consoleLog.length > CONSOLE_MAX) { consoleLog.shift(); consoleDropped++; }
     // Neither engine renders an object argument usefully: firefox gives
     // `JSHandle@object`, chromium a one-level DevTools preview
@@ -3982,6 +4181,7 @@ async function daemon() {
         if (!vals.length || vals.some((v) => v == null)) return;
         entry.text = vals.join(" ");
         if (errEntry) errEntry.text = "console: " + entry.text;
+        persistConsole(entry);
       })
       .catch(() => { /* page went away mid-resolve */ })
       .finally(() => { pendingArgs.delete(job); });
@@ -4060,7 +4260,24 @@ async function daemon() {
       // format string and its CSS args rather than DevTools' rendering.
       noteConsole(type, m, errEntry);
     });
-    p.on("pageerror", (e) => noteErr("pageerror: " + (e?.message || e)));
+    p.on("pageerror", (e) => {
+      const text = String(e?.message || e);
+      noteErr("pageerror: " + text);
+      noteConsole("pageerror", { text: () => text, args: () => [] });
+    });
+    let navigations = [], warnedAt = 0;
+    p.on("framenavigated", (frame) => {
+      if (frame !== p.mainFrame()) return;
+      const at = Date.now();
+      navigations = navigations.filter((t) => at - t < 10000);
+      navigations.push(at);
+      if (navigations.length >= 8 && at - warnedAt > 10000) {
+        warnedAt = at;
+        const text = "Repeated main-frame navigation: at least 8 navigations in 10s. Inspect the redirect/auth flow and close the session if it continues before collecting more captures.";
+        note(text);
+        noteConsole("warning", { text: () => text, args: () => [] });
+      }
+    });
     // An unanswered alert/confirm/prompt BLOCKS the page, so without this the
     // NEXT command just times out with nothing on screen to explain why. Accept
     // is the demo path; `--dialog dismiss` on the triggering command overrides.
@@ -4378,50 +4595,55 @@ async function daemon() {
 
   /** Flush the recording and finalize the mp4. Shared by `close` and the idle
    *  timer; runs at most once. */
-  let closing = false;
-  async function closeSession(reason, { keepRaw = KEEP_WEBM } = {}) {
-    if (closing) return null;
+  let closing = false, closePromise = null, closeReply = null, exitScheduled = false;
+  function closeSession(reason, { keepRaw = KEEP_WEBM } = {}) {
+    if (closePromise) return closePromise;
     closing = true;
-    // Close any still-open interval so the finalizer sees a bounded one: a
-    // session that ends on a popup would otherwise carry end=Infinity.
-    const openCut = cutMarks.find((c) => c.end === Infinity);
-    if (openCut) openCut.end = now();
-    logTranscript(`\n_Session closed ${new Date().toISOString()} (${reason})._\n`);
-    try { await context.close(); } catch { /* already gone */ } // flushes the .webm
-    try { if (browser) await browser.close(); } catch { /* already gone */ } // no-op for persistent profiles
-    // Report the EXACT saved path so the caller gets the file it just recorded.
-    // The .webm is finalized by context.close() above, so page.video().path()
-    // now points at a real file.
-    // video.path() returns the path the engine was ASKED to write, which exists
-    // only if the engine actually recorded. An engine that took the recordVideo
-    // option and then wrote nothing (camoufox with an unpatched playwright-core)
-    // otherwise reported a path to a missing file, and `close` blamed ffmpeg.
-    let webm = null;
-    try { webm = video ? await video.path() : null; } catch { /* no video */ }
-    if (webm && !existsSync(webm)) {
-      logDaemon(`engine '${engine}' recorded no video (expected ${webm})`);
-      webm = null;
-    }
-    const mp4 = webm ? finalizeRecording(webm, { speedMarks, keepMarks, cutMarks, stepMarks }) : null;
-    if (mp4 && !keepRaw) {
-      // The mp4 is the deliverable — the raw .webm is just its temp source.
-      // Keep it only when the mp4 could not be written (it's the sole recording),
-      // or when the caller asked to (--keep-raw / BROWSE_KEEP_WEBM=1) so the
-      // session can be re-cut later without re-recording it.
-      try { rmSync(webm, { force: true }); rmSync(VIDEO_DIR, { recursive: true, force: true }); } catch { /* keep it */ }
-      webm = null;
-    }
-    if (webm || mp4) logTranscript(`_Recording saved: ${mp4 || webm}_\n`);
-    // Carried out with the paths: only the finalizer knows WHY there is no mp4,
-    // and `close` is the one place anybody reads that.
-    const mp4Fail = !mp4 && webm ? ffmpegFailNote() : null;
-    // Retire this session's run file — but only if it is still ours.
+    closePromise = (async () => {
+      // Close any still-open interval so the finalizer sees a bounded one: a
+      // session that ends on a popup would otherwise carry end=Infinity.
+      const openCut = cutMarks.find((c) => c.end === Infinity);
+      if (openCut) openCut.end = now();
+      logTranscript(`\n_Session closed ${new Date().toISOString()} (${reason})._\n`);
+      try { await context.close(); } catch { /* already gone */ } // flushes the .webm
+      try { if (browser) await browser.close(); } catch { /* already gone */ } // no-op for persistent profiles
+      await settleConsoleArgs();
+      // Report the EXACT saved path so the caller gets the file it just recorded.
+      // The .webm is finalized by context.close() above, so page.video().path()
+      // now points at a real file.
+      // video.path() returns the path the engine was ASKED to write, which exists
+      // only if the engine actually recorded. An engine that took the recordVideo
+      // option and then wrote nothing (camoufox with an unpatched playwright-core)
+      // otherwise reported a path to a missing file, and `close` blamed ffmpeg.
+      let webm = null;
+      try { webm = video ? await video.path() : null; } catch { /* no video */ }
+      if (webm && !existsSync(webm)) {
+        logDaemon(`engine '${engine}' recorded no video (expected ${webm})`);
+        webm = null;
+      }
+      const mp4 = webm ? finalizeRecording(webm, { speedMarks, keepMarks, cutMarks, stepMarks }) : null;
+      if (mp4 && !keepRaw) {
+        // The mp4 is the deliverable — the raw .webm is just its temp source.
+        // Keep it only when the mp4 could not be written (it's the sole recording),
+        // or when the caller asked to (--keep-raw / BROWSE_KEEP_WEBM=1) so the
+        // session can be re-cut later without re-recording it.
+        try { rmSync(webm, { force: true }); rmSync(VIDEO_DIR, { recursive: true, force: true }); } catch { /* keep it */ }
+        webm = null;
+      }
+      if (webm || mp4) logTranscript(`_Recording saved: ${mp4 || webm}_\n`);
+      // Carried out with the paths: only the finalizer knows WHY there is no mp4,
+      // and `close` is the one place anybody reads that.
+      const mp4Fail = !mp4 && webm ? ffmpegFailNote() : null;
+      return { webm, mp4, mp4Fail };
+    })();
+    return closePromise;
+  }
+  process.on("exit", () => {
     try {
       const info = JSON.parse(readFileSync(runFile(SESSION), "utf8"));
       if (info.pid === process.pid) rmSync(runFile(SESSION), { force: true });
     } catch { /* already gone */ }
-    return { webm, mp4, mp4Fail };
-  }
+  });
 
   let idleT = null;
   function armIdle() {
@@ -4860,7 +5082,34 @@ async function daemon() {
   /** Glide the on-page cursor to an element's center before we act on it, so the
    *  recording shows the pointer travelling there. Best-effort: the real action
    *  must never be blocked or failed by a cursor hiccup. */
-  async function cursorGlideTo(loc) {
+  async function elementGeometry(sel) {
+    const all = L(sel), one = all.first();
+    const matches = await all.count();
+    if (!matches) throw new Error(`rect: no element matches '${sel}'`);
+    const box = await one.boundingBox();
+    const detail = await one.evaluate((el) => {
+      const b = el.getBoundingClientRect();
+      const x = b.left + b.width / 2, y = b.top + b.height / 2;
+      let hit = document.elementFromPoint(x, y);
+      while (hit?.shadowRoot) {
+        const inner = hit.shadowRoot.elementFromPoint?.(x, y);
+        if (!inner || inner === hit) break;
+        hit = inner;
+      }
+      const label = (e) => e ? e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') : null;
+      const style = getComputedStyle(el);
+      return {
+        visible: b.width > 0 && b.height > 0 && style.visibility !== 'hidden' && style.display !== 'none',
+        viewport: { width: innerWidth, height: innerHeight },
+        clipped: { left: Math.max(0, -b.left), top: Math.max(0, -b.top),
+          right: Math.max(0, b.right - innerWidth), bottom: Math.max(0, b.bottom - innerHeight) },
+        center: { x, y, hit: label(hit), covered: !!hit && hit !== el && !el.contains(hit) },
+        position: style.position,
+      };
+    });
+    return { selector: sel, matches, box, ...detail };
+  }
+  async function cursorGlideTo(loc, position) {
     if (!CURSOR || !loc) return;
     try {
       // Short timeouts: gliding the cursor is cosmetic, so a missing/typo'd
@@ -4869,9 +5118,13 @@ async function daemon() {
       try { await loc.scrollIntoViewIfNeeded({ timeout: 1500 }); } catch { /* ignore */ }
       const b = await loc.boundingBox({ timeout: 1500 });
       if (!b) return;
+      const border = position ? await loc.evaluate((el) => {
+        const s = getComputedStyle(el);
+        return { x: parseFloat(s.borderLeftWidth) || 0, y: parseFloat(s.borderTopWidth) || 0 };
+      }) : { x: 0, y: 0 };
       await page.evaluate(
         ([x, y]) => window.__browseCursor && window.__browseCursor.moveTo(x, y, 340),
-        [b.x + b.width / 2, b.y + b.height / 2],
+        [b.x + (position ? position.x + border.x : b.width / 2), b.y + (position ? position.y + border.y : b.height / 2)],
       );
     } catch { /* best-effort */ }
   }
@@ -5343,6 +5596,14 @@ async function daemon() {
         timeoutWritten = true;
         args = args.slice(0, -2);
       }
+      let position;
+      if (["click", "dblclick", "rightclick", "hover"].includes(cmd) && args[1] === "--position") {
+        const match = /^(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)$/.exec(args[2] || "");
+        if (!match) throw new Error(`${cmd}: --position needs nonnegative element-relative pixels x,y`);
+        position = { x: Number(match[1]), y: Number(match[2]) };
+        if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) throw new Error(`${cmd}: invalid position`);
+        args = [args[0], ...args.slice(3)];
+      }
       // `press` is the one command whose floor is ONE argument, so stripping the
       // pair off `press '#todo' --timeout 5000` left a lone selector that the
       // page-level branch below happily sent to the keyboard as a key name. And
@@ -5430,8 +5691,18 @@ async function daemon() {
         // visible rows is ambiguous too but perfectly actionable, so it keeps the
         // normal timeout. An explicit --timeout always wins either way.
         const budget = actTimeout ?? (target.covered ? AMBIGUOUS_MS : null);
-        const opts = budget ? { timeout: budget } : undefined;
-        await cursorGlideTo(target.loc);
+        const opts = { ...(budget ? { timeout: budget } : {}), ...(position ? { position } : {}) };
+        if (position) {
+          const size = await target.loc.evaluate((el) => {
+            const b = el.getBoundingClientRect(), s = getComputedStyle(el);
+            const pixels = (v) => parseFloat(v) || 0;
+            return { width: b.width - pixels(s.borderLeftWidth) - pixels(s.borderRightWidth),
+              height: b.height - pixels(s.borderTopWidth) - pixels(s.borderBottomWidth) };
+          }, undefined, { timeout: actTimeout ?? 12000 });
+          if (position.x >= size.width || position.y >= size.height)
+            throw new Error(`${cmd}: --position is outside the element's ${size.width}x${size.height} padding box; use 'browse rect' to inspect it`);
+        }
+        await cursorGlideTo(target.loc, position);
         // Clicking into a field to type gets a ripple too, like a real click.
         if (CLICK_LIKE.has(cmd) || typing) await cursorClickFx();
         // press shows its key chip up front; typing shows its overlay inside
@@ -5559,98 +5830,35 @@ async function daemon() {
       case "content": return clipForRead(await page.content(), "content", "use 'browse text <selector>' or 'browse eval' for the part you need");
       case "errors": {
         await settleConsoleArgs();
-        return errors.length ? errors.map((e) => e.text).join("\n") : "(no console/page errors)";
+        return consoleQuery(consoleLog.filter((e) => e.level === "error" || e.level === "pageerror"), args, consoleDropped);
       }
       case "console": {
         await settleConsoleArgs();
-        // The log/info/warn/debug sibling of `errors`. Filters mirror `net`'s
-        // (--since <#>, --grep, --last) so one mental model covers both logs.
-        let level = null, grep = null, since = null, last = 40;
-        const USAGE = "try [--level log,warn,error] [--grep <pattern>] [--since <#>] [--last <n>|--all]";
-        // Every value is checked. A missing one used to slide through as
-        // NaN/undefined and answer "no console messages matched", which is the
-        // silent wrong answer this whole round exists to remove.
-        const val = (flag, i) => {
-          const v = args[i];
-          if (v == null || String(v).startsWith("--")) throw new Error(`console: ${flag} needs a value - ${USAGE}`);
-          return v;
-        };
-        const num = (flag, i) => {
-          const n = Number(val(flag, i));
-          if (!Number.isFinite(n) || n < 0) throw new Error(`console: ${flag} wants a number - ${USAGE}`);
-          return n;
-        };
-        for (let i = 0; i < args.length; i++) {
-          const a = args[i];
-          if (a === "--level") level = String(val(a, ++i)).toLowerCase();
-          else if (a === "--grep") grep = val(a, ++i);
-          else if (a === "--since") since = num(a, ++i);
-          // 0 means "all", the same as it does on `browse net --last 0`.
-          else if (a === "--last" || a === "-n") last = num(a, ++i);
-          else if (a === "--all") last = 0;
-          else throw new Error(`console: unknown argument '${a}' - ${USAGE}`);
-        }
-        // Firefox says "warning", chromium says "warning" too but everyone TYPES
-        // "warn" (it is what help used to print and what console.warn is called).
-        // Alias both ways rather than answering "(no messages matched)" about a
-        // level that does exist - an unvalidated level looked exactly like a
-        // quiet page.
-        const LEVEL_ALIAS = { warn: "warning", warning: "warning", err: "error", error: "error", log: "log", info: "info", debug: "debug", trace: "trace", dir: "dir", table: "table", assert: "assert", count: "count", timeEnd: "timeEnd", startGroup: "startGroup", endGroup: "endGroup" };
-        let levels = null;
-        if (level) {
-          levels = [];
-          for (const raw of level.split(",").map((x) => x.trim()).filter(Boolean)) {
-            const seen = [...new Set(consoleLog.map((e) => e.level))];
-            const mapped = LEVEL_ALIAS[raw] || LEVEL_ALIAS[raw.toLowerCase()];
-            if (!mapped && !seen.includes(raw)) {
-              throw new Error(`console: '${raw}' is not a console level - try log, info, warn, error, debug` +
-                `${seen.length ? ` (this session has logged: ${seen.join(", ")})` : ""}`);
-            }
-            levels.push(mapped || raw);
-          }
-        }
-        const grepMatch = grep ? netMatcher(grep) : null;
-        let list = consoleLog.filter((e) =>
-          (!levels || levels.includes(e.level)) &&
-          (since == null || e.i > since) &&
-          (!grepMatch || grepMatch(e.text)));
-        const matched = list.length;
-        if (!matched) {
-          const dropped = consoleDropped ? `, ${consoleDropped} older ones already dropped past the ${CONSOLE_MAX} cap` : "";
-          return consoleLog.length
-            ? `(no console messages matched - ${consoleLog.length} kept this session${dropped})`
-            : "(no console messages yet)";
-        }
-        if (last > 0 && list.length > last) list = list.slice(-last);
-        // One serialized API response is enough to blow past every budget, so each
-        // LINE is capped before the whole body is: without this a single 50 KB
-        // log escaped the clip entirely and landed in the agent's context whole.
-        const LINE_MAX = 2000;
-        const lines = list.map((e) => {
-          const head = `#${e.i} ${e.t.toFixed(1)}s  ${e.level.padEnd(7)} `;
-          const text = e.text.length > LINE_MAX
-            ? `${e.text.slice(0, LINE_MAX)}…[+${e.text.length - LINE_MAX} chars, read it whole with 'browse eval']`
-            : e.text;
-          return head + text;
-        });
-        // Clipped from the FRONT, unlike every other read: a log is read for what
-        // happened last, and keeping the head of `--all` would hand back the
-        // oldest lines and cut the ones the command just produced.
-        let body = lines.join("\n"), cut = 0;
-        while (body.length > READ_MAX && cut < lines.length - 1) {
-          cut = Math.max(cut + 1, Math.ceil(lines.length * (1 - READ_MAX / body.length)));
-          body = lines.slice(cut).join("\n");
-        }
-        const clipped = cut ? `…[console truncated: ${cut} earlier line${cut > 1 ? "s" : ""} cut, newest kept. Narrow with --grep <pattern>, --level <l> or --since <#>]\n` : "";
-        const more = matched > list.length ? ` (of ${matched} matching, ${consoleLog.length} logged; --all for every one)` : ` of ${consoleLog.length} logged`;
-        const capped = consoleDropped ? ` · ${consoleDropped} dropped past the ${CONSOLE_MAX} cap` : "";
-        return `${clipped}${body}\n— ${list.length} shown${more}${capped}`;
+        return consoleQuery(consoleLog, args, consoleDropped);
+      }
+      case "rect": {
+        if (args.length !== 1 || args[0].startsWith("--")) throw new Error("rect: needs one selector");
+        return JSON.stringify(await elementGeometry(args[0]), null, 2);
       }
       case "screenshot": {
+        let after = null, wantedText = null, timeout = 10000, timeoutSeen = false;
+        const hide = [];
+        const need = (flag, i) => {
+          if (!args[i] || args[i].startsWith("--")) throw new Error(`screenshot: ${flag} needs a value`);
+          return args[i];
+        };
         let name = null, full = false, sel = null, pad = 0, padSeen = false;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
-          if (a === "--full") full = true;
+          if (a === "--after") after = need(a, ++i);
+          else if (a === "--text") wantedText = need(a, ++i);
+          else if (a === "--hide") hide.push(need(a, ++i));
+          else if (a === "--timeout") {
+            timeout = Number(need(a, ++i)); timeoutSeen = true;
+            if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_TIMER_MS)
+              throw new Error("screenshot: --timeout needs positive milliseconds within the timer limit");
+          }
+          else if (a === "--full") full = true;
           // --pad exists because an element screenshot clips to the element's
           // BORDER BOX: a caption that overflows its parent, a focus ring, a
           // shadow, a badge hanging off a corner all come back sliced with
@@ -5680,7 +5888,9 @@ async function daemon() {
           // dash counts too: `-full` would otherwise land as a file named _full.
           else if (a.startsWith("-")) throw new Error(`screenshot: unknown flag '${a}' - try [name] [--full] [--sel <selector>] [--pad <px>]`);
           else if (name == null) name = a;
+          else throw new Error(`screenshot: unexpected argument '${a}'`);
         }
+        if ((wantedText !== null || timeoutSeen) && !after) throw new Error("screenshot: --text and --timeout need --after <selector>");
         // Padding is a margin around ONE element, so it means nothing without one
         // and silently ignoring it is how you get an unpadded crop back and
         // believe the flag did something.
@@ -5703,6 +5913,7 @@ async function daemon() {
           // page.pdf prints the WHOLE page: there is no element form and no clip,
           // so accepting these and printing a full page at exit 0 is the same
           // silent wrong-artifact this command already refuses elsewhere.
+          if (after || hide.length) throw new Error("screenshot: --after and --hide apply to image captures, not PDFs");
           if (sel || padSeen) throw new Error(`screenshot: a .pdf name prints the whole page, so it cannot take ${sel && padSeen ? "--sel or --pad" : sel ? "--sel" : "--pad"} - save a .png to shoot one element`);
           if (context.__engine !== "chromium")
             throw new Error(
@@ -5711,11 +5922,28 @@ async function daemon() {
           await page.pdf({ path });
           return `saved ${path}`;
         }
+        for (const css of hide) {
+          const valid = await page.evaluate((s) => { try { document.querySelector(s); return true; } catch { return false; } }, css);
+          if (!valid) throw new Error(`screenshot: --hide needs a CSS selector, got '${css}'`);
+        }
+        const style = hide.map((css) => `${css} { visibility: hidden !important; }`).join("\n");
+        const captureOpts = { caret: "initial", ...(style ? { style } : {}) };
+        const disclosure = hide.length ? `\nnote: hidden for this screenshot: ${hide.join(", ")}` : "";
+        if (after) {
+          let target = L(after);
+          if (wantedText !== null) target = target.filter({ hasText: wantedText });
+          await target.filter({ visible: true }).first().waitFor({ state: "visible", timeout });
+        }
         if (sel) {
           if (!pad) {
-            try { await L(sel).first().screenshot({ path, caret: "initial" }); }
+            try { await L(sel).first().screenshot({ path, ...captureOpts }); }
             catch (e) { throw await withSelectorHint(e, sel); }
-            return `saved ${path} (${sel})${await readMatchNote(sel)}`;
+            let overlap = "";
+            try {
+              const geometry = await elementGeometry(sel);
+              if (geometry.center.covered) overlap = `\nnote: element center is covered by ${geometry.center.hit}; inspect the saved image and 'browse rect' before claiming full coverage`;
+            } catch { /* a transient element can disappear after its screenshot */ }
+            return `saved ${path} (${sel})${await readMatchNote(sel)}${overlap}${disclosure}`;
           }
           // Padded: a viewport shot clipped to the element's box grown by `pad`.
           // locator.screenshot() has no way to do this - it always crops to the
@@ -5737,11 +5965,11 @@ async function daemon() {
           const bottom = Math.min(vp.height, box.y + box.height + pad);
           const clip = { x: left, y: top, width: right - left, height: bottom - top };
           if (clip.width <= 0 || clip.height <= 0) throw new Error(`screenshot: '${sel}' is off screen, so there is nothing to pad around - scroll it into view first`);
-          await page.screenshot({ path, clip, caret: "initial" });
+          await page.screenshot({ path, clip, ...captureOpts });
           const clamped = clip.width < box.width + pad * 2 || clip.height < box.height + pad * 2;
-          return `saved ${path} (${sel} + ${pad}px)${clamped ? " - clipped to the viewport on at least one side" : ""}${await readMatchNote(sel)}`;
+          return `saved ${path} (${sel} + ${pad}px)${clamped ? ` - clipped to the viewport: left ${Math.max(0, pad - box.x)}px, top ${Math.max(0, pad - box.y)}px, right ${Math.max(0, box.x + box.width + pad - vp.width)}px, bottom ${Math.max(0, box.y + box.height + pad - vp.height)}px (includes padding)` : ""}${await readMatchNote(sel)}${disclosure}`;
         }
-        await page.screenshot({ path, fullPage: full, caret: "initial" });
+        await page.screenshot({ path, fullPage: full, ...captureOpts });
         // --full captures past the viewport via CDP, so the page never moves and
         // the recording is unaffected - but anything that only loads once it is
         // scrolled to simply isn't in the DOM yet.
@@ -5752,7 +5980,7 @@ async function daemon() {
           catch { /* mid-navigation */ }
           if (tall) tip = "\ntip: run 'browse scroll bottom' first if the page lazy-loads";
         }
-        return `saved ${path}${tip}`;
+        return `saved ${path}${tip}${disclosure}`;
       }
       case "wait": {
         // One verb for every "hold until…": an element appearing or disappearing,
@@ -6495,7 +6723,20 @@ async function daemon() {
       // `home` is what lets a remote client recognise this dir in a reply that
       // ran it through tildePath, and rewrite it to where it mirrored the files.
       res.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir(), build: buildId() }));
+        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir(), build: buildId(), phase: closeReply ? "finalized" : closing ? "closing" : "live" }));
+      return;
+    }
+    if (req.method === "GET" && req.url === "/manifest") {
+      const files = [];
+      const walk = (dir, prefix = "") => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          const rel = prefix + e.name;
+          if (e.isDirectory()) walk(join(dir, e.name), rel + "/");
+          else if (e.isFile()) files.push(rel);
+        }
+      };
+      try { walk(OUT); res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ files })); }
+      catch { res.writeHead(500).end("cannot list session artifacts"); }
       return;
     }
     // Artifact read-out, for a client on another machine (see the remote-host
@@ -6509,7 +6750,12 @@ async function daemon() {
       try { st = statSync(abs); } catch { /* not written (yet) */ }
       if (!st || !st.isFile()) { res.writeHead(404).end("no such artifact"); return; }
       res.writeHead(200, { "content-type": "application/octet-stream", "content-length": st.size });
-      createReadStream(abs).pipe(res);
+      if (!st.size) { res.end(); return; }
+      // Snapshot the advertised byte range even when a live log keeps growing.
+      const stream = createReadStream(abs, { end: st.size - 1 });
+      stream.on("error", () => res.destroy());
+      res.on("close", () => stream.destroy());
+      stream.pipe(res);
       return;
     }
     // A remote client asks the daemon to stay up past `close` so it can pull the
@@ -6532,6 +6778,8 @@ async function daemon() {
         // Timestamped BEFORE the command so the chapter lands on the moment the
         // viewer sees it start, but only PUSHED after it succeeds - a chapter
         // pointing at a command that threw points at nothing on screen.
+        if (closeReply && CLOSERS.has(cmd)) { send(closeReply); return; }
+        if (closing && !CLOSERS.has(cmd)) throw new Error("session is finalizing; wait for close to finish before issuing browser commands");
         const stepAt = now();
         const out = await dispatch(cmd, args);
         if (!CHAPTERLESS.has(cmd)) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
@@ -6551,7 +6799,7 @@ async function daemon() {
           // A note queued by the very last interception would otherwise die with
           // the process: this is its only chance to be said.
           const lastNotes = notes.length ? `\n${notes.splice(0).map((n) => "  " + n).join("\n")}` : "";
-          send({
+          closeReply = {
             ok: true,
             result: (saved && (saved.mp4 || saved.webm)
               ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (${saved.mp4Fail || "ffmpeg missing/failed - mp4 not written"})`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`
@@ -6561,10 +6809,13 @@ async function daemon() {
                 // for this with --no-video. Name what IS there instead - and keep
                 // the mock disclosure, which is about the SCREENSHOTS too.
                 : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`) + lastNotes,
-          });
+          };
+          send(closeReply);
           // The gif is a two-pass encode that can outlast the client's 120s
           // timeout on a long session. It runs AFTER the reply, so the mp4 path
           // always reaches the caller even if the gif takes minutes or fails.
+          if (exitScheduled) return;
+          exitScheduled = true;
           setTimeout(() => {
             if (wantGif) makeGif(saved.mp4);
             // `hold`: a client on another machine still has to COPY those files
@@ -6584,14 +6835,15 @@ async function daemon() {
         // `browse errors`. `errors` already lists them all, so we skip the append
         // there but still advance the cursor so they aren't echoed again later.
         await settleConsoleArgs();
-        const freshErrors = errors.slice(reportedErrors);
-        reportedErrors = errors.length;
-        if (cmd !== "errors" && freshErrors.length) {
-          result = `${result}\n⚠️ new page errors (${freshErrors.length}):\n${freshErrors.map((e) => "  " + e.text).join("\n")}`;
+        const freshErrors = errors.filter((e) => e.i > reportedErrors);
+        reportedErrors = consoleSeq;
+        const machineConsole = ["console", "errors"].includes(cmd) && args.includes("--json");
+        if (cmd !== "errors" && !machineConsole && freshErrors.length) {
+          result = `${result}\n⚠️ new page errors (${freshErrors.length}):\n${clipForRead(groupMessages(freshErrors).map((e) => "  " + e.text + (e.count > 1 ? ` (${e.count} repeats)` : "")).join("\n"), "errors", "browse errors --since " + (freshErrors[0].i - 1), 4000)}`;
         }
         // Same idea for things nothing asked for: a dialog we answered, a file
         // that downloaded, a popup we switched to. Drained, so each is said once.
-        if (notes.length) {
+        if (notes.length && !machineConsole) {
           result = `${result}\n${notes.splice(0).map((n) => "  " + n).join("\n")}`;
         }
         logTranscript(`### ${step || "·"} · \`${logLabel(cmd, args)}\`\n${transcriptBody(result)}\n\n`);
