@@ -78,7 +78,7 @@
  *                      drop it) | speed (fast-forward at BROWSE_IDLE_SPEED) | keep
  *   BROWSE_IDLE_SPEED  fast-forward factor: for BROWSE_IDLE_MODE=speed, and the
  *                      default N for `browse speed` (default 10)
- *   BROWSE_FPS         output frame rate of the finalized mp4 (default 30)
+ *   BROWSE_FPS         capture and output frame rate (default 30, max 60)
  *   BROWSE_NET_BODIES=0      don't capture request/response bodies
  *   BROWSE_NET_BODY_MAX      max bytes kept per body (default 32768)
  *   BROWSE_NET_SECRETS=1     keep auth headers/cookies verbatim (default: values hashed)
@@ -104,6 +104,7 @@ import http from "node:http";
 import { parseAI, aiConfig, runAI } from "./scripts/ai.mjs";
 import { parseTask, runTask } from "./scripts/ai-task.mjs";
 import { runtimeBuild } from "./scripts/build.mjs";
+import { loadRecordingPlaywright } from "./scripts/video.mjs";
 import net from "node:net";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -517,15 +518,16 @@ const INIT_STUBS = {
 })()`,
 };
 
-// Constant output frame rate for the finalized mp4. Playwright captures at ~25;
-// we retime to 30 for smoother playback (override with BROWSE_FPS).
+// Capture and output use the same cadence. The pinned recorder is adapted
+// in this daemon before Playwright loads; the shared install is unchanged.
 const OUTPUT_FPS = (() => {
   const v = Number(process.env.BROWSE_FPS ?? 30);
-  return Number.isFinite(v) && v >= 1 ? Math.round(v) : 30;
+  return Number.isFinite(v) && v >= 1 && v <= 60 ? Math.round(v) : 30;
 })();
 // The raw .webm is the mp4's temp source and is deleted once the mp4 lands. Keep
 // it (BROWSE_KEEP_WEBM=1 / `browse close --keep-raw`) when you may want to re-cut
 // the session differently later - that is one ffmpeg call off the surviving webm.
+const REALTIME = process.env.BROWSE_REALTIME === "1";
 const KEEP_WEBM = process.env.BROWSE_KEEP_WEBM === "1";
 // Recording is on by default and is most of what browse is for. Off (BROWSE_VIDEO=0
 // / `browse --no-video`) is for the runs that only READ - assert a count, mint a
@@ -782,6 +784,10 @@ function logLabel(cmd, args) {
 // overlay on it never cleared, with it off it cleared in under 4s). A stealth
 // run turns it off: --no-cursor.
 const CURSOR = process.env.BROWSE_CURSOR !== "0";
+const CURSOR_MS = (() => {
+  const ms = Number(process.env.BROWSE_CURSOR_MS ?? 120);
+  return Number.isFinite(ms) ? Math.max(0, Math.min(2000, ms)) : 120;
+})();
 /** How much bigger than macOS to draw the pointer. 1 = the real thing, which is
  *  12x19 px — authentic, but small in a 1280x800 video watched at half size.
  *  Clamped so a typo cannot paint a full-screen arrow. */
@@ -1026,7 +1032,8 @@ function cursorInitScript(scale) {
       moveTo(x, y, dur) {
         return new Promise((resolve) => {
           const sx = cx, sy = cy, dx = x - sx, dy = y - sy;
-          const d = dur || 320;
+          const d = dur ?? 120;
+          if (d === 0) { cx = x; cy = y; syncShape(); resolve(); return; }
           if (dx === 0 && dy === 0) { syncShape(); resolve(); return; }
           let t0;
           const frame = (ts) => {
@@ -1528,7 +1535,8 @@ Persistent profile (keep cookies + localStorage across close→open, e.g. stay l
 Artifacts (transcript.md, step screenshots, video) land in a per-session dir
 under ${join(BROWSE_HOME, "sessions")}/. On close, ffmpeg (if installed) trims the
 blank white lead-in and CUTS static "thinking" dead air (>= 2s with no on-screen
-change) out of the clip (BROWSE_IDLE_MODE=speed keeps+fast-forwards it instead,
+change) out of the clip (BROWSE_REALTIME=1 preserves the entire unedited timeline;
+BROWSE_IDLE_MODE=speed keeps+fast-forwards static stretches instead,
 =keep leaves it). A region you bracket with 'browse speed <n>' … 'browse speed
 off' is instead fast-forwarded at n× — badged "n×" top-right — so a
 visibly-progressing wait still shows. Time spent on a popup is cut too (only the
@@ -1571,7 +1579,10 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_CURSOR_SCALE      draw the pointer N× macOS size for a video (1, max 4)
   BROWSE_IDLE_MODE         auto-detected dead air: cut (default) | speed | keep
   BROWSE_IDLE_SPEED        fast-forward factor for =speed, and default N for 'browse speed' (10)
-  BROWSE_FPS               output frame rate of the finalized mp4 (30)
+  BROWSE_FPS               capture encoder and output frame rate (30, range 1..60)
+                           use Chromium for fresh 30 fps motion; Camoufox supplies about 25 fps
+  BROWSE_REALTIME=1        preserve the full timeline: no trims, cuts or speed changes
+  BROWSE_CURSOR_MS         cursor glide duration in ms (120, range 0..2000)
   BROWSE_KEEP_WEBM=1       keep the raw .webm after the mp4 lands (= 'close --keep-raw')
   BROWSE_NET_BODIES=0      don't capture request/response bodies
   BROWSE_NET_BODY_MAX      max bytes kept per body (32768)
@@ -3641,7 +3652,7 @@ function finalizeRecording(webmPath, marks = {}) {
   const outPath = join(OUT, "recording.mp4");
   const win = analyzeVideo(webmPath);
   const forced = win ? forcedIntervals(speedMarks || []) : [];
-  const segs = win ? planSegments(win, forced, IDLE.mode, IDLE.speed, keepMarks || [], cutMarks || []) : null;
+  const segs = win && !REALTIME ? planSegments(win, forced, IDLE.mode, IDLE.speed, keepMarks || [], cutMarks || []) : null;
 
   /** One ffmpeg run, remembering HOW it failed. The distinction is the whole
    *  point: a non-zero status is ffmpeg refusing the arguments, `status === null`
@@ -3817,7 +3828,7 @@ function finalizeRecording(webmPath, marks = {}) {
     const leadCut = win.start;
     const tailCut = Math.max(0, win.total - win.end);
     const keep = win.end - win.start;
-    if ((leadCut >= TRIM.minLeadCut || tailCut >= TRIM.minTailCut) && keep >= TRIM.minKeep) {
+    if (!REALTIME && (leadCut >= TRIM.minLeadCut || tailCut >= TRIM.minTailCut) && keep >= TRIM.minKeep) {
       // -ss AFTER -i: accurate decode-seek — Playwright's .webm has no seek
       // cues, so a fast pre-input seek can land wide of the cut point.
       middle.push("-ss", win.start.toFixed(3), "-t", keep.toFixed(3));
@@ -3999,7 +4010,8 @@ async function daemon() {
   // wherever BROWSE_PW_BASE points. ESM import doesn't honour NODE_PATH, so we
   // use a CJS require anchored there.
   const require = createRequire(process.env.BROWSE_PW_BASE || SELF);
-  const { chromium } = require("playwright");
+  const loadPW = (req, pkg) => VIDEO_ON ? loadRecordingPlaywright(req, pkg, OUTPUT_FPS) : req(pkg);
+  const { chromium } = loadPW(require, "playwright");
   // camoufox is BUILT AGAINST a specific Playwright (0.5.4 → 1.60.0) and its
   // Firefox speaks that exact juggernaut protocol. Driving it with a newer one
   // fails at launch — 1.61 sends `viewport.isMobile`, which the build rejects
@@ -4013,7 +4025,7 @@ async function daemon() {
   const firefoxFor = () => {
     const pinned = join(BROWSE_HOME, "camoufox-pw", "package.json");
     if (existsSync(pinned)) {
-      try { return createRequire(pinned)("playwright-core").firefox; }
+      try { return loadPW(createRequire(pinned), "playwright-core").firefox; }
       catch (e) { logDaemon(`pinned camoufox playwright unusable: ${e.message}`); }
     }
     pinnedMissing = true;
@@ -5170,8 +5182,8 @@ async function daemon() {
         return { x: parseFloat(s.borderLeftWidth) || 0, y: parseFloat(s.borderTopWidth) || 0 };
       }) : { x: 0, y: 0 };
       await page.evaluate(
-        ([x, y]) => window.__browseCursor && window.__browseCursor.moveTo(x, y, 340),
-        [b.x + (position ? position.x + border.x : b.width / 2), b.y + (position ? position.y + border.y : b.height / 2)],
+        ([x, y, ms]) => window.__browseCursor && window.__browseCursor.moveTo(x, y, ms),
+        [b.x + (position ? position.x + border.x : b.width / 2), b.y + (position ? position.y + border.y : b.height / 2), CURSOR_MS],
       );
     } catch { /* best-effort */ }
   }
@@ -6267,6 +6279,7 @@ async function daemon() {
         return clear ? "toast cleared" : `toast (${sticky ? "sticky" : "auto-dismiss"}): ${text}`;
       }
       case "speed": {
+        if (REALTIME) throw new Error("speed: this session preserves the full real-time recording; speed changes are disabled");
         // Bracket a region to fast-forward in the final mp4 (badged), for a long
         // but visibly-progressing wait. Pure timeline annotation: it does NOT
         // wait, act on the page, or screenshot — just records a mark against the

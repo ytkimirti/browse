@@ -26,6 +26,12 @@ Dead time while you think is cut automatically. For a long but visibly-active wa
 the actions you want shown, and keep captions OUTSIDE a speed region, since a
 `toast` inside one is fast-forwarded along with it.
 
+For continuous real-time evidence, enable full-timeline recording before launch
+(see `browse help --env`). It preserves startup, idle time and the ending, ignores
+cut marks, and rejects speed edits. Use Chromium when fresh 30 fps motion matters;
+Camoufox still supplies frames at its upstream cadence. Keep the raw video when
+you need to verify the capture independently of the MP4 export.
+
 ## Toasts are for what the screen cannot show
 
 `browse toast "<one sentence>"` shows a NOTE chip on the video. Use it SPARINGLY,
