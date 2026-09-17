@@ -64,12 +64,15 @@ function collect(root, action) {
   };
   const describe = (el) => {
     const labelIds = (el.getAttribute('aria-labelledby') || '').split(/\s+/);
-    const label = labelIds.map(id => el.getRootNode().getElementById?.(id)).filter(Boolean).map(e => text(e)).join(' ');
+    const label = labelIds.map(id => el.getRootNode().getElementById?.(id)).filter(Boolean).map(e => e.getAttribute('aria-label') || text(e)).join(' ');
+    // Custom calendar buttons often label a child (the day number), not
+    // the clickable parent. Preserve that semantic date beside visible fares.
+    const childLabels = [...el.querySelectorAll('[aria-label]')].filter(e => !e.closest('[hidden],[aria-hidden="true"]')).map(e => e.getAttribute('aria-label')).join(' ');
     const region = el.closest('tr,li,fieldset,article,section,[role="row"],[role="dialog"],form') || el.parentElement;
     return {
       tag: el.localName, role: el.getAttribute('role') || '', type: el.getAttribute('type') || '',
-      name: (label || el.getAttribute('aria-label') || [...(el.labels || [])].map(e => text(e)).join(' ') || text(el) || el.getAttribute('title') || el.getAttribute('placeholder') || '').slice(0, 240),
-      context: region ? text(region, 500) : '',
+      name: (label || el.getAttribute('aria-label') || [...(el.labels || [])].map(e => text(e)).join(' ') || [childLabels, text(el)].filter(Boolean).join(' ') || el.getAttribute('title') || el.getAttribute('placeholder') || '').slice(0, 240),
+      context: el.closest('[role=gridcell]') ? '' : region?.matches('[role=dialog]') ? region.getAttribute('aria-label') || text(region,120) : region ? [region.getAttribute('aria-label'), text(region, 500)].filter(Boolean).join(': ').slice(0,500) : '',
       // Exclude URL query/hash credentials. Exact href stays in the local fingerprint.
       destination: el.localName === 'a' ? (() => { try { const u = new URL(el.href); return u.origin + u.pathname; } catch { return ''; } })() : '',
     };
@@ -82,7 +85,7 @@ function collect(root, action) {
   }
   const selector = action === 'fill'
     ? 'input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=file]),textarea,[contenteditable="true"]'
-    : 'a[href],button,input:not([type=hidden]),textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="switch"],[role="combobox"],[tabindex]';
+    : 'a[href],button,input:not([type=hidden]),textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="switch"],[role="combobox"],[role="option"],[role="gridcell"],[tabindex]';
   const nodes = [];
   let visited = 0;
   const visit = (el) => {
@@ -90,7 +93,8 @@ function collect(root, action) {
     const style = getComputedStyle(el);
     const box = el.getBoundingClientRect();
     const inViewport = action !== 'task' || (box.bottom > 0 && box.right > 0 && box.top < innerHeight && box.left < innerWidth);
-    if (inViewport && el.matches(selector) && el.getClientRects().length && style.visibility !== 'hidden' && style.display !== 'none' &&
+    const duplicateCell = el.matches('[role=gridcell]') && el.querySelector('button,[role=button]');
+    if (inViewport && !duplicateCell && !el.matches('[role=dialog],[role=listbox],[role=grid],[role=tabpanel]') && el.matches(selector) && el.getClientRects().length && style.visibility !== 'hidden' && style.display !== 'none' &&
       !el.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"]') && !el.matches(':disabled,[aria-disabled="true"]') && !(action === 'fill' && el.readOnly)) {
       nodes.push(el);
       if (nodes.length > 200) throw new Error('ai: more than 200 candidates; narrow with --scope');

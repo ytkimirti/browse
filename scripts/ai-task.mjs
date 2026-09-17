@@ -6,7 +6,7 @@ export function parseTask(args) {
   const o = { action: 'task', goal, scope: 'body', timeout: 10000, taskTimeout: 120000, maxSteps: 12, values: [] };
   // Quoted text can be typed verbatim. No model-generated strings or code.
   for (const match of goal.matchAll(/"(?:[^"\\]|\\.)*"/g)) {
-    try { o.values.push({ name: `quoted text ${o.values.length + 1}`, value: JSON.parse(match[0]) }); }
+    try { o.values.push({ name: `quoted text ${o.values.length + 1}: ${match[0]}`, value: JSON.parse(match[0]) }); }
     catch { throw new Error('ai task: quoted text must use JSON string escaping'); }
   }
   const seen = new Set();
@@ -54,7 +54,7 @@ async function observe(captured, values) {
       const el = s.nodes[i];
       const editable = !el.readOnly && (el.isContentEditable || el.localName === 'textarea' || (el.localName === 'input' && ['text','search','email','url','tel','password','number'].includes(el.type)));
       const matched = editable ? values.map((v,j) => (el.isContentEditable ? el.textContent : el.value) === v.value ? `v${j}` : null).filter(Boolean) : [];
-      return { ...c, editable, filledWith: matched, checked: el.matches('input[type=checkbox],input[type=radio]') ? el.checked : undefined,
+      return { ...c, editable, focused: el === document.activeElement, expanded: el.getAttribute('aria-expanded'), selected: el.getAttribute('aria-selected'), pressed: el.getAttribute('aria-pressed'), filledWith: matched, checked: el.matches('input[type=checkbox],input[type=radio]') ? el.checked : undefined,
         options: el.localName === 'select' ? [...el.options].map((opt,j) => ({ index:j, label:opt.label.slice(0,120), disabled:opt.disabled || !!opt.closest('optgroup[disabled]'), selected:opt.selected })) : undefined };
     }),
   }), values);
@@ -67,6 +67,7 @@ function actionsFor(state, values) {
     if (c.options) {
       for (const opt of c.options) if (!opt.disabled && !opt.selected) add(`select_${c.id}_${opt.index}`, { action:'select', index, optionIndex:opt.index, name:c.name }, `Select ${JSON.stringify(opt.label)} in ${JSON.stringify(c.name)}`);
     } else if (c.editable) {
+      if (!c.focused) add(`click_${c.id}`, { action:'click', index, name:c.name }, `Click ${JSON.stringify(c.name)} to focus or open its picker`);
       if (values.length) add(`fill_${c.id}`, { action:'fill', index, name:c.name }, `Replace text in ${JSON.stringify(c.name)} using one supplied value`);
       add(`enter_${c.id}`, { action:'enter', index, name:c.name }, `Press Enter in ${JSON.stringify(c.name)} to submit its current text`);
     } else add(`click_${c.id}`, { action:'click', index, name:c.name }, `Click ${JSON.stringify(c.name)} (${c.tag}, ${c.role || 'native control'})`);
@@ -103,7 +104,9 @@ export async function runTask(runtime, options, config, signal) {
         const state = await observe(captured, options.values);
         truncated ||= state.textTruncated;
         const actions = actionsFor(state, options.values);
-        const criteria = Object.fromEntries([...actions].map(([id,a]) => [id,a.description]));
+        // Names and context already live in page.controls. Repeating every
+        // calendar date in the criteria wastes tokens and can exceed the budget.
+        const criteria = Object.fromEntries([...actions].map(([id,a]) => [id, a.index === undefined ? a.description : `${a.action} control ${state.controls[a.index].id}${a.optionIndex === undefined ? '' : `, option ${a.optionIndex}`}`]));
         const valueCriteria = Object.fromEntries(options.values.map((v,i) => [`v${i}`, v.name]));
         valueCriteria.none = 'No supplied text value is needed or suitable';
         const questions = {
@@ -124,6 +127,9 @@ export async function runTask(runtime, options, config, signal) {
         const decision = actions.get(next.id);
         check();
         if (runtime.target() !== target) throw new Error('active tab or frame changed during inference');
+        // A transition can finish while inference is in flight. The explicit
+        // completion selector is authoritative even if the old picker vanished.
+        if (options.until && await target.locator(options.until).isVisible()) return [...output, summary('completed (--until visible)')].join('\n');
         if (next.p < .8) throw new Error(`uncertain next action (${next.id}, p=${next.p.toFixed(3)})`);
         if (next.id === 'blocked') throw new Error('blocked: inspect the page or supply the missing text value');
         if (next.id === 'done') {
@@ -140,7 +146,9 @@ export async function runTask(runtime, options, config, signal) {
           if (v.p < .8 || v.id === 'none') throw new Error('no confident supplied text value for the selected input');
           valueIndex = Number(v.id.slice(1));
         }
-        const signature = JSON.stringify([state, next.id, valueIndex]);
+        // Focus is useful to choose an input action, but a focus change alone
+        // must not permit a second click on an otherwise unchanged page.
+        const signature = JSON.stringify([{...state, controls:state.controls.map(({focused,...c})=>c)}, next.id, valueIndex]);
         const repeats = (attempted.get(signature) || 0) + 1;
         if (repeats > (next.id === 'wait' ? 3 : 1)) throw new Error('stalled: repeated action on unchanged page');
         attempted.set(signature, repeats);

@@ -40,6 +40,10 @@ try{
   b('reload');await mode('wait');r=task();check('wait loop is bounded',r.code===1&&/stalled/.test(r.err)&&/actions=3/.test(r.err),r.err);
   b('reload');await mode('slow');r=task('--task-timeout','150');check('total deadline cancels inference',r.code===1&&/cancelled|budget/.test(r.err)&&b('eval','JSON.parse(document.documentElement.dataset.events).length').out.trim()==='0',r.err);
   b('reload');await mode('slow');
+  b('eval', "setTimeout(()=>{const el=document.createElement('div');el.id='arrived';el.textContent='Ready';document.body.append(el)},400);'scheduled'");
+  r=task('--until','#arrived');
+  check('completion during inference prevents an obsolete action',r.code===0&&/actions=0, queries=1/.test(r.out)&&b('eval','document.documentElement.dataset.events').out.trim()==='[]',r.out+r.err);
+  b('reload');await mode('slow');
   const run=JSON.parse(readFileSync(join(STORE,'run/task-test.json'),'utf8'));
   const endpoint=`http://127.0.0.1:${run.port}`;
   const controller=new AbortController();
@@ -60,6 +64,22 @@ try{
   b('reload');b('click','#catalog');b('click','#lamp');b('selectOption','#delivery','Express');await mode('bad-value');
   r=task();check('uncertain supplied value prevents filling',r.code===1&&/no confident supplied/.test(r.err)&&b('eval',"document.querySelector('#email').value").out.trim()==='old@example.invalid',r.err);
   await mode('ok');b('reload');r=task();check('session remains usable after cancellation',r.code===0,r.out+r.err);
+  await mode('loop');
+  r=b('eval', `document.body.innerHTML='<input aria-label="Departure"><div id="picker" role="dialog" aria-label="Choose dates" tabindex="-1" hidden><div role="gridcell" tabindex="0"><button aria-labelledby="date-label"><span id="date-label" aria-label="Monday, October 12, 2026">12</span></button></div></div>'; document.querySelector('input').onclick=()=>document.querySelector('#picker').hidden=false;document.querySelector('button').onclick=()=>{document.body.dataset.picked='1';document.querySelector('button').id='picked'}; 'ready'`);
+  check('picker fixture is ready',r.code===0,r.err);
+  r=b('ai','task','Open the Departure calendar','--until','#picker');
+  check('editable input can be clicked to open a picker without a fill value',r.code===0&&/actions=1/.test(r.out),r.out+r.err);
+  await mode('loop');
+  r=b('ai','task','Choose October 12','--scope','#picker','--until','#picked');
+  check('calendar task clicks the day button',r.code===0&&b('eval','document.body.dataset.picked').out.trim()==='1',r.out+r.err);
+  const calendarCalls=await(await fetch(base+'/calls')).json();
+  const calendarControls=calendarCalls[0]?.state.page.controls||[];
+  check('referenced accessible date label is preserved',calendarControls.some(c=>c.name==='Monday, October 12, 2026'));
+  check('container and nested gridcell do not become duplicate actions',calendarControls.length===1&&calendarControls[0].tag==='button',JSON.stringify(calendarControls));
+  b('eval', "document.querySelector('#picked').id='';document.querySelector('button').removeAttribute('aria-labelledby');delete document.body.dataset.picked; 'ready'");
+  await mode('loop');r=b('ai','task','Choose October 12','--scope','#picker','--until','#picked');
+  const childCalls=await(await fetch(base+'/calls')).json();
+  check('custom day button inherits the child date label',r.code===0&&childCalls[0].state.page.controls[0].name.includes('Monday, October 12, 2026'),r.out+r.err);
   r=b('close');check('close succeeds after task',r.code===0,r.err);
   const transcript=readFileSync(join(ENV.BROWSE_OUT,'transcript.md'),'utf8');check('task transcript retains goal without named value',transcript.includes(goal)&&!transcript.includes('buyer@example.invalid')&&!transcript.includes('fake-task-key'));
 }finally{b('close');fixture.kill();rmSync(STORE,{recursive:true,force:true})}
