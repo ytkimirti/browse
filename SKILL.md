@@ -3,7 +3,7 @@ name: browse
 description: Drive a real, recorded browser step by step with the local `browse` CLI, capturing every session as a video plus transcript, per-step screenshots and a network log. Use when the user wants a video/demo/walkthrough of a web app, wants a UI change verified or a frontend bug reproduced in a real browser, wants a local dev server driven end to end, wants the run recorded on a remote machine or a throwaway box instead of this one, or says "browse".
 ---
 
-# browse — recorded agentic browsing
+# browse: recorded agentic browsing
 
 `browse` (on PATH; source `browse.mjs` in this repo) drives a persistent headless
 browser via a localhost daemon, one browser per session name. The first command
@@ -21,8 +21,9 @@ script runner.
 
 1. **Act**, then read the output closely. New console/page errors, answered
    dialogs and saved downloads are appended inline to the next command's result.
-2. **Observe often.** `snapshot` is your check step. `wait` doubles as your
-   assertion: it exits non-zero if the thing never happens. Hold for what the UI
+2. **Observe often.** `snapshot` is your check step. Scope it to the relevant
+   region when a long feed or unrelated content crowds out the controls. `wait`
+   doubles as your assertion: it exits non-zero if the thing never happens. Hold for what the UI
    says or shows, never for a guessed duration — a fixed pause asserts nothing,
    slows the run and paces the video worse (`browse help` for the ways to wait).
 3. **Diagnose** from what the session already recorded: `errors` (the alarm),
@@ -40,6 +41,15 @@ script runner.
    A tool returning a running process handle is still working. Preserve the
    full tool result and wait on that handle; printing only its output loses the
    handle. An empty live-session list does not prove finalization finished.
+
+## Fast semantic decisions
+
+Use exact selectors when already known. When choosing among unfamiliar controls
+would require another large snapshot and a reasoning turn, use TypeSafe through
+`ai` for one semantic action or a visible-text assertion. Read [AI decisions](skill/ai.md)
+before the first use; help defines its command surface. Observe the result before
+the next action. A successful action says the browser acted; verify the expected
+page state separately.
 
 ## Start the app before the first command
 

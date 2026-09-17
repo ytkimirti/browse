@@ -101,6 +101,8 @@
  */
 
 import http from "node:http";
+import { parseAI, aiConfig, runAI } from "./scripts/ai.mjs";
+import { runtimeBuild } from "./scripts/build.mjs";
 import net from "node:net";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -136,7 +138,7 @@ function pkgVersion() {
   try { return JSON.parse(readFileSync(join(SELF, "..", "package.json"), "utf8")).version || "unknown"; }
   catch { return "unknown"; }
 }
-/** Which BUILD this is: 8 hex of the sha of browse.mjs itself.
+/** Which BUILD this is: 8 hex of the runtime modules.
  *
  *  The package version is a constant that nobody bumps, so it cannot tell two
  *  builds apart, and the machine that matters is usually not this one. A
@@ -152,7 +154,7 @@ function pkgVersion() {
 let BUILD = null;
 function buildId() {
   if (BUILD) return BUILD;
-  try { BUILD = createHash("sha256").update(readFileSync(SELF)).digest("hex").slice(0, 8); }
+  try { BUILD = runtimeBuild(join(SELF, "..")); }
   catch { BUILD = "unknown"; }
   return BUILD;
 }
@@ -744,6 +746,13 @@ function logLabel(cmd, args) {
   // An init script is arbitrary page code the same way a middleware handler is
   // (seeding a token into localStorage is a normal use), so its source stays out
   // of the transcript too - the flags are enough to follow what happened.
+  if (cmd === "ai") {
+    try {
+      const o = parseAI(args);
+      return `ai ${o.action} ${JSON.stringify(o.description)}${o.action === "fill" ? " <value>" : ""}` +
+        `${o.scope !== "body" ? ` --scope ${JSON.stringify(o.scope)}` : ""}${o.dryRun ? " --dry-run" : ""}`;
+    } catch { return "ai <invalid arguments>"; }
+  }
   if (cmd === "init") {
     const flag = args.find((a) => a === "--clear" || a === "--remove" || a === "--file");
     if (flag === "--remove") return `init --remove ${args[args.indexOf("--remove") + 1] ?? ""}`.trim();
@@ -1270,7 +1279,19 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     fast-forwarded with it, so show captions OUTSIDE it.
 
 Observe (do these often — this is your "check" step):
-  browse snapshot                   accessibility tree of the page (what a user/AT sees)
+  browse ai click|hover <description>   choose a real element with TypeSafe, then act once
+  browse ai fill <description> <value>  choose an input; value is not sent to TypeSafe or transcript
+  browse ai assert <condition>          probabilistic check of visible text; exits 1 below p=0.8
+    --scope <selector>                 limit DOM context (default body, exactly one match)
+    --timeout <ms>                     API and action timeout each (default 10000, max 60000)
+    --dry-run                          report chosen target without acting
+    One API call; no retries. Requires p>=0.8; refuses ambiguous or changed targets.
+    Sends element labels/context or assertion text to TypeSafe. Max 200 elements or
+    12000 assertion characters; requests capped at 24000 bytes. Narrow scope on overflow.
+    Input values and cookies are excluded; text rendered elsewhere on the page may contain them.
+    Open a page first. Known selectors are faster and free. API timing/tokens in output.
+    Key comes from TYPESAFE_API_KEY or the caller's .env; help --env for configuration.
+  browse snapshot [selector]        accessibility tree of the page or one region (what a user/AT sees)
   browse text [selector]            visible text (whole page if no selector)
   browse title | url                page title / current URL
   browse content                    raw HTML (truncated)
@@ -1525,6 +1546,10 @@ Env-only (set once in a shell profile — no flag):
                            mirror dir, which 'close' and 'dir' print)
   BROWSE_PORT              pin the control port (default: any free port — but with --remote it is
                            derived from the session name, and this overrides that)
+  TYPESAFE_API_KEY         TypeSafe key, used only by 'ai'; sent over the existing SSH tunnel
+                          for remote sessions, never saved in browse artifacts
+  TYPESAFE_ENV_FILE        read only TYPESAFE_API_KEY from this file (default caller's .env)
+  TYPESAFE_API_URL         loopback HTTP test server override; production endpoint is fixed
   BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
   BROWSE_WIDTH / _HEIGHT   viewport one dimension at a time (BROWSE_VIEWPORT sets both)
   BROWSE_LOCALE            locale chromium reports in navigator.language and Accept-Language
@@ -2486,6 +2511,7 @@ const MAX_TIMER_MS = 2_147_483_647;
  *  i.e. the flag help offers for a slow first compile could not actually be used
  *  past two minutes. Plus a margin for the browser to answer afterwards. */
 function postTimeout(cmd, args) {
+  if (cmd === "ai") return 2 * parseAI(args).timeout + 30000;
   const i = args.indexOf("--timeout");
   // `browse wait 130000` carries its duration as a bare argument, with no flag to
   // find - and it was the one form that still died client-side at 120s while the
@@ -2619,7 +2645,7 @@ const RETIRED = Object.assign(Object.create(null), {
  *  next to RETIRED because both exist for the same reason; `browse help` is the
  *  user-facing list and this is the machine one. */
 const DAEMON_COMMANDS = new Set([
-  ...MUTATING, ...PAGE_METHODS, "open", "snapshot", "text", "title", "url",
+  ...MUTATING, ...PAGE_METHODS, "ai", "open", "snapshot", "text", "title", "url",
   "content", "errors", "console", "rect", "screenshot", "wait", "scroll", "eval", "toast", "speed", "init",
   "target", "emulate", "state", "middleware", "dir", "close",
 ]);
@@ -3037,13 +3063,20 @@ async function client(argv) {
   }
   if ((cmd === "console" || cmd === "errors") && !(await findDaemon()))
     throw new Error(`no live session '${SESSION}'; read saved evidence with '${cmd} --dir <session-dir>'`);
+  let ai;
+  if (cmd === "ai") {
+    parseAI(argv.slice(1));
+    ai = aiConfig();
+    if (!(await findDaemon())) throw new Error("ai: open a page in this session first");
+  }
+  if (cmd === "snapshot" && (argv.length > 2 || argv[1]?.startsWith("--"))) throw new Error("snapshot: takes one optional selector");
   const d = await ensureDaemon();
   // `init --file <path>` is read by the DAEMON, which sits in whatever directory
   // the session was first opened from - a relative path would resolve against a
   // directory the caller never chose. Resolve it here, where the cwd is theirs.
   const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
   if (CLOSERS.has(cmd)) writeFileSync(runFile(SESSION), JSON.stringify({ ...d, phase: "closing" }));
-  const res = await post(d.port, { cmd, args, hold: !!REMOTE }, postTimeout(cmd, args));
+  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}) }, postTimeout(cmd, args));
   if (res.ok) {
     let text = res.result == null ? "" : String(res.result);
     if (REMOTE) text = await landArtifacts(d, cmd, text);
@@ -5462,11 +5495,11 @@ async function daemon() {
       `${REMOTE_SIDE ? "; a box's disk is what 'browse box up --size' picks" : ""}.`);
   }
 
-  async function dispatch(cmd, args) {
+  async function dispatch(cmd, args, ai) {
     const stripped = takeDialogFlag(args);
     const armed = stripped !== args;
     try {
-      return await dispatchCmd(cmd, stripped);
+      return await dispatchCmd(cmd, stripped, ai);
     } catch (e) {
       throw withCrashCause(e);
     } finally {
@@ -5474,7 +5507,16 @@ async function daemon() {
     }
   }
 
-  async function dispatchCmd(cmd, args) {
+  async function dispatchCmd(cmd, args, ai) {
+    if (cmd === "ai") {
+      const options = { ...parseAI(args), clearWithKeys: USING_CAMOUFOX };
+      if (!ai?.key) throw new Error("ai: missing TypeSafe credentials; update the client");
+      const config = aiConfig({ TYPESAFE_API_KEY: ai.key, TYPESAFE_API_URL: ai.endpoint });
+      return runAI(activeFrame ?? page, options, config, async (element, action) => {
+        await cursorGlideTo(element);
+        if (action !== "hover") await cursorClickFx();
+      });
+    }
     if (cmd === "close") {
       // Both flags are about a video. Accepting them on a --no-video session and
       // doing nothing is the silent drop every other flag check here rejects.
@@ -5802,6 +5844,7 @@ async function daemon() {
     }
     switch (cmd) {
       case "snapshot": {
+        if (args.length > 1 || args[0]?.startsWith("--")) throw new Error("snapshot: takes one optional selector");
         // No fallback: `page.accessibility` is gone from the pinned Playwright
         // (1.61 — `typeof page.accessibility === "undefined"`), so the old
         // `catch` turned every real ariaSnapshot failure (mid-navigation, a
@@ -5809,7 +5852,7 @@ async function daemon() {
         // "Cannot read properties of undefined (reading 'snapshot')" — a browse
         // crash, as far as the caller could tell. Let the real reason through.
         const read = async () => {
-          try { return await L("body").ariaSnapshot(); }
+          try { return await L(args[0] || "body").ariaSnapshot(); }
           catch (e) {
             if (/execution context|destroyed|detached|has been closed/i.test(e.message))
               throw new Error(`${e.message}\nnote: the page navigated while it was being read - run 'browse snapshot' again`);
@@ -5817,7 +5860,7 @@ async function daemon() {
           }
         };
         const { out, note: settle } = await readSettled(read);
-        return `${await brief()}\n\n${clipForRead(out, "snapshot", "run 'browse snapshot' again scoped by 'browse target <iframe>', or read a region with 'browse text <selector>'", 6000)}${settle}`;
+        return `${await brief()}\n\n${clipForRead(out, "snapshot", "narrow with 'browse snapshot <selector>', or select an iframe with 'browse target <iframe>'", 6000)}${settle}`;
       }
       case "text": {
         const sel = args[0] || "body";
@@ -6771,8 +6814,8 @@ async function daemon() {
     req.setEncoding("utf8");
     req.on("data", (c) => (body += c));
     req.on("end", async () => {
-      let cmd = "?", args = [], hold = false;
-      try { ({ cmd, args = [], hold = false } = JSON.parse(body)); } catch { /* ignore */ }
+      let cmd = "?", args = [], hold = false, ai;
+      try { ({ cmd, args = [], hold = false, ai } = JSON.parse(body)); } catch { /* ignore */ }
       const send = (obj) => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obj)); };
       try {
         // Timestamped BEFORE the command so the chapter lands on the moment the
@@ -6781,8 +6824,9 @@ async function daemon() {
         if (closeReply && CLOSERS.has(cmd)) { send(closeReply); return; }
         if (closing && !CLOSERS.has(cmd)) throw new Error("session is finalizing; wait for close to finish before issuing browser commands");
         const stepAt = now();
-        const out = await dispatch(cmd, args);
-        if (!CHAPTERLESS.has(cmd)) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
+        const out = await dispatch(cmd, args, ai);
+        const aiReadOnly = cmd === "ai" && (args[0] === "assert" || parseAI(args).dryRun);
+        if (!CHAPTERLESS.has(cmd) && !aiReadOnly) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
         // Collapse any middleware faults raised since the last command into the
         // notes queue, so they ride out on this reply like every other note.
         mwFlushThrows();
@@ -6828,7 +6872,7 @@ async function daemon() {
           return;
         }
         let shot = null;
-        if (MUTATING.has(cmd) || cmd === "open" || cmd === "scroll") shot = await autoShot(cmd, args);
+        if (MUTATING.has(cmd) || cmd === "open" || cmd === "scroll" || (cmd === "ai" && !aiReadOnly)) shot = await autoShot(cmd, cmd === "ai" ? [args[0]] : args);
         let result = shot ? `${out}\n[${shot}]` : out;
         // Surface any NEW console/page errors inline so a runtime fault (e.g. a
         // Next.js error overlay) can't slip by just because the caller didn't run

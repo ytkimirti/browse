@@ -1,3 +1,8 @@
 node_modules/
 .DS_Store
 .claude/worktrees/
+
+# Local provider credentials
+.env
+.env.*
+!.env.example

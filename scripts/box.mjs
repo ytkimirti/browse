@@ -37,7 +37,7 @@ import { readFile, writeFile, mkdir, readdir, stat, chmod, rename } from "node:f
 import { createWriteStream, createReadStream } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { createHash } from "node:crypto";
+import { runtimeBuild } from "./build.mjs";
 import { fileURLToPath } from "node:url";
 import { join, basename, dirname, resolve as resolvePath } from "node:path";
 
@@ -66,7 +66,7 @@ const die = (msg) => { throw new BoxError(msg); };
 async function localBuild() {
   try {
     const self = join(dirname(fileURLToPath(import.meta.url)), "..", "browse.mjs");
-    return createHash("sha256").update(await readFile(self)).digest("hex").slice(0, 8);
+    return runtimeBuild(dirname(self));
   } catch { return ""; }
 }
 const say = (msg) => process.stderr.write(`${msg}\n`); // stdout stays machine-readable
