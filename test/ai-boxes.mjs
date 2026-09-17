@@ -8,9 +8,10 @@ import { fileURLToPath } from 'node:url';
 import { writeFileSync, statSync, readFileSync, readdirSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { aiConfig } from '../scripts/ai.mjs';
-const args = process.argv.slice(2);
+const taskMode = process.argv.includes('--task');
+const args = process.argv.slice(2).filter(a => a !== '--task');
 if (args.length !== 4 || args[0] !== '--live-boxes' || args[1] !== '--delete-boxes') {
-  console.log('Usage: TYPESAFE_ENV_FILE=/path/to/.env node test/ai-boxes.mjs --live-boxes --delete-boxes <box-host-a> <box-host-b>\nUploads this checkout, calls real TypeSafe, records both Boxes, retrieves artifacts, then deletes the supplied disposable Boxes.');
+  console.log('Usage: TYPESAFE_ENV_FILE=/path/to/.env node test/ai-boxes.mjs --live-boxes --delete-boxes [--task] <box-host-a> <box-host-b>\nUploads this checkout, calls real TypeSafe, records both Boxes, retrieves artifacts, then deletes the supplied disposable Boxes.');
   process.exit(0);
 }
 if (args[2] === args[3] || !args.slice(2).every(h => /^[\w-]+@(?:[\w-]+\.)?box\.upstash\.com$/.test(h))) throw new Error('Supply two distinct disposable Box SSH hosts');
@@ -28,6 +29,7 @@ async function test(host, index) {
   const record = { host, cases: [], artifacts: null, deleted: false };
   results.push(record);
   const remote = '/workspace/home/browse-ai';
+  const fixtureName = taskMode ? 'ai-task-fixture.mjs' : 'ai-fixture.mjs';
   const browse = async (...args) => {
     const start = performance.now();
     try {
@@ -45,13 +47,26 @@ async function test(host, index) {
   try {
     // Upload only this checkout and a private file containing this provider's key.
     // This HTTPS-only test path works when the provider SSH gateway is unavailable.
-    await box('push', host, 'browse.mjs', 'package.json', 'scripts', 'bin', 'test/ai-fixture.mjs', '--to', '/workspace/home/browse-ai');
+    await box('push', host, 'browse.mjs', 'package.json', 'scripts', 'bin', 'test/ai-fixture.mjs', 'test/ai-task-fixture.mjs', '--to', '/workspace/home/browse-ai');
     await box('push', host, keyFile, '--to', remote);
-    await box('exec', host, 'chmod 600 /workspace/home/browse-ai/typesafe.env && chmod +x /workspace/home/browse-ai/bin/browse && setsid nohup node /workspace/home/browse-ai/ai-fixture.mjs >/tmp/browse-ai-fixture.log 2>&1 </dev/null &');
+    await box('exec', host, `chmod 600 /workspace/home/browse-ai/typesafe.env && chmod +x /workspace/home/browse-ai/bin/browse && setsid nohup node /workspace/home/browse-ai/${fixtureName} >/tmp/browse-ai-fixture.log 2>&1 </dev/null &`);
     const port = await box('exec', host, "for i in 1 2 3 4 5; do if test -s /tmp/browse-ai-fixture.log; then cat /tmp/browse-ai-fixture.log; exit 0; fi; sleep 1; done; exit 1");
     const match = /PORT (\d+)/.exec(port); if (!match) throw new Error('fixture did not start');
     expect('open fixture', await browse('--chromium','--viewport','1280x800','open',`http://127.0.0.1:${match[1]}`), r=>r.code === 0);
     expect('matching runtime build', await browse('version'), r=>r.code === 0 && r.out.includes(localVersion));
+    if (taskMode) {
+      const goal = 'Open the catalog, open Desk lamp details, choose Express delivery, enter the supplied email, then submit the request.';
+      expect('five-action task', await browse('ai','task',goal,'--value','email=buyer@example.invalid'), r=>r.code===0 && /completed; actions=5, queries=6/.test(r.out));
+      expect('real task outcome', await browse('text','#confirmed'), r=>r.code===0 && r.out.includes('Request confirmed'));
+      expect('submitted exactly once', await browse('eval','document.documentElement.dataset.sends'), r=>r.code===0 && r.out==='1');
+      expect('reset fixture', await browse('reload'), r=>r.code===0);
+      expect('task with completion selector', await browse('ai','task',goal,'--value','email=buyer@example.invalid','--until','#confirmed'), r=>r.code===0 && /completed \(.*until visible\); actions=5, queries=5/.test(r.out));
+      expect('reset for limit', await browse('reload'), r=>r.code===0);
+      expect('task step limit', await browse('ai','task',goal,'--value','email=buyer@example.invalid','--max-steps','1'), r=>r.code===1 && /step limit reached/.test(r.err) && /actions=1/.test(r.err));
+      expect('public page', await browse('goto','https://example.com'), r=>r.code===0);
+      expect('public navigation task', await browse('ai','task','Click Learn more and stop once the Example Domains page is loaded.'), r=>r.code===0 && /completed; actions=1/.test(r.out));
+      expect('public navigation outcome', await browse('title'), r=>r.code===0 && /Example Domains/.test(r.out));
+    } else {
     expect('scoped snapshot', await browse('snapshot','#blob'), r=>r.code === 0 && /Blob storage/.test(r.out) && !/Redis cache/.test(r.out));
     for (let i=0;i<3;i++) {
       expect(`AI duplicate-label click ${i+1}`, await browse('ai','click','Settings for Blob storage'), r=>r.code === 0);
@@ -68,6 +83,7 @@ async function test(host, index) {
     expect('public page',await browse('goto','https://example.com'),r=>r.code === 0);
     expect('public page assertion',await browse('ai','assert','This domain is intended for documentation examples'),r=>r.code === 0);
     expect('public link preview',await browse('ai','click','Learn more','--dry-run'),r=>r.code === 0 && /preview: \"Learn more\"/.test(r.out));
+    }
   } catch (e) { record.error = e.message; console.error(`${host}: ${e.message}`); }
   finally {
     try {
@@ -86,7 +102,7 @@ async function test(host, index) {
       const files = readdirSync(path);
       record.artifactsVerified = ['recording.mp4','transcript.md','network.jsonl','shots'].every(f=>files.includes(f)) && statSync(join(path,'recording.mp4')).size>1000;
       const transcript = readFileSync(join(path,'transcript.md'),'utf8');
-      record.transcriptHasAI = transcript.includes('ai click');
+      record.transcriptHasAI = transcript.includes(taskMode ? 'ai task' : 'ai click');
       console.log(`${host.split('@')[0]} artifacts: ${path} verified=${record.artifactsVerified}`);
     }
     } catch (e) { record.artifactError=e.message; }
@@ -102,7 +118,7 @@ async function test(host, index) {
 const settled = await Promise.allSettled(args.slice(2).map(test));
 for (const r of settled) if (r.status === 'rejected') console.error(r.reason);
 rmSync(scratch,{recursive:true,force:true});
-writeFileSync('/tmp/browse-ai-box-results.json',JSON.stringify(results,null,2)+'\n');
+writeFileSync(taskMode ? '/tmp/browse-task-box-results.json' : '/tmp/browse-ai-box-results.json',JSON.stringify(results,null,2)+'\n');
 const failed=results.some(r=>r.error || !r.artifactsVerified || !r.deleted) || settled.some(r=>r.status==='rejected');
-console.log(`Results: /tmp/browse-ai-box-results.json; ${failed ? 'FAILED' : 'PASSED'}`);
+console.log(`Results: ${taskMode ? '/tmp/browse-task-box-results.json' : '/tmp/browse-ai-box-results.json'}; ${failed ? 'FAILED' : 'PASSED'}`);
 process.exitCode=failed ? 1:0;

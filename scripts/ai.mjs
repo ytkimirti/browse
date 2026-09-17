@@ -74,7 +74,7 @@ function collect(root, action) {
       destination: el.localName === 'a' ? (() => { try { const u = new URL(el.href); return u.origin + u.pathname; } catch { return ''; } })() : '',
     };
   };
-  const fingerprint = (el) => JSON.stringify([describe(el), el.getAttribute('href'), el.getAttribute('disabled'), el.getAttribute('aria-disabled'), el.getAttribute('readonly')]);
+  const fingerprint = (el) => JSON.stringify([describe(el), el.getAttribute('href'), el.getAttribute('disabled'), el.getAttribute('aria-disabled'), el.getAttribute('readonly'), 'value' in el ? el.value : null, el.localName === 'select' ? [...el.options].map(o => [o.value, o.label, o.disabled, o.parentElement.disabled]) : null]);
   if (action === 'assert') {
     const content = text(root, 12001);
     if (content.length > 12000) throw new Error('ai: page text exceeds 12000 characters; narrow with --scope');
@@ -88,7 +88,9 @@ function collect(root, action) {
   const visit = (el) => {
     if (++visited > 20000) throw new Error('ai: scope exceeds 20000 DOM nodes; narrow with --scope');
     const style = getComputedStyle(el);
-    if (el.matches(selector) && el.getClientRects().length && style.visibility !== 'hidden' && style.display !== 'none' &&
+    const box = el.getBoundingClientRect();
+    const inViewport = action !== 'task' || (box.bottom > 0 && box.right > 0 && box.top < innerHeight && box.left < innerWidth);
+    if (inViewport && el.matches(selector) && el.getClientRects().length && style.visibility !== 'hidden' && style.display !== 'none' &&
       !el.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"]') && !el.matches(':disabled,[aria-disabled="true"]') && !(action === 'fill' && el.readOnly)) {
       nodes.push(el);
       if (nodes.length > 200) throw new Error('ai: more than 200 candidates; narrow with --scope');
@@ -98,14 +100,19 @@ function collect(root, action) {
   };
   visit(root);
   const candidates = nodes.map((el, i) => ({ id: `e${i}`, ...describe(el) }));
-  return { nodes, candidates, title: document.title.slice(0, 240), headings: [...root.querySelectorAll('h1,h2,[role=heading]')].slice(0, 12).map(e => text(e, 120)), describe, fingerprint, fingerprints: nodes.map(fingerprint) };
+  const taskVersion = () => JSON.stringify([text(root,6001), document.title, nodes.map(fingerprint)]);
+  return { root, nodes, candidates, taskVersion, version: action === 'task' ? taskVersion() : undefined, taskText: action === 'task' ? text(root, 6001) : undefined,
+    title: document.title.slice(0, 240), headings: [...root.querySelectorAll('h1,h2,[role=heading]')].slice(0, 12).map(e => text(e, 120)), describe, fingerprint, fingerprints: nodes.map(fingerprint) };
 }
 
-async function query(config, payload, timeout) {
+async function query(config, payload, timeout, signal) {
   const body = JSON.stringify(payload);
   if (Buffer.byteLength(body) > 24000) throw new Error('ai: request exceeds 24000 bytes; narrow with --scope; no API call made');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  const cancel = () => controller.abort();
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (signal?.aborted) cancel();
+  const timer = setTimeout(cancel, timeout);
   const start = performance.now();
   try {
     const response = await fetch(config.endpoint, {
@@ -119,10 +126,11 @@ async function query(config, payload, timeout) {
     try { data = await response.json(); } catch { throw new Error('ai: invalid TypeSafe JSON; no action taken'); }
     return { data, apiMs: Math.round(performance.now() - start) };
   } catch (e) {
+    if (signal?.aborted) throw new Error('ai task: cancelled or time budget exhausted');
     if (controller.signal.aborted) throw new Error(`ai: TypeSafe timed out after ${timeout}ms; no action taken`);
     if (e.message.startsWith('ai:')) throw e;
     throw new Error('ai: TypeSafe request failed; no action taken');
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
 }
 
 export async function runAI(target, options, config, beforeAction = async () => {}) {
@@ -131,7 +139,6 @@ export async function runAI(target, options, config, beforeAction = async () => 
   const root = target.locator(scope);
   if (await root.count() !== 1) throw new Error('ai: --scope must match exactly one element');
   const captured = await root.evaluateHandle(collect, action, { timeout });
-  let element;
   try {
     const state = await captured.evaluate(s => ({ candidates: s.candidates, content: s.content, title: s.title, headings: s.headings }));
     if (action !== 'assert' && !state.candidates.length) throw new Error('ai: no eligible elements; inspect snapshot or narrow --scope');
@@ -160,12 +167,25 @@ export async function runAI(target, options, config, beforeAction = async () => 
     if (action === 'assert') return `ai assert: condition supported (${metrics}, total=${Math.round(performance.now() - started)}ms)`;
     const index = state.candidates.findIndex(c => c.id === answer.choice);
     if (index < 0) throw new Error('ai: unknown target; no action taken');
-    element = (await captured.evaluateHandle((s, i) => s.nodes[i], index)).asElement();
-    const unchanged = () => captured.evaluate((s, i) => s.nodes[i].isConnected && s.fingerprint(s.nodes[i]) === s.fingerprints[i], index);
+    await actOnCapture(captured, index, options, beforeAction);
+    return `ai ${action}${dryRun ? ' preview' : ''}: ${JSON.stringify(state.candidates[index].name)} (${metrics}, total=${Math.round(performance.now() - started)}ms)`;
+  } finally {
+    await captured.dispose().catch(() => {});
+  }
+}
+
+export { collect as collectAI, query as queryAI };
+
+export async function actOnCapture(captured, index, options, beforeAction = async () => {}) {
+  const { action, timeout, dryRun } = options;
+  const element = (await captured.evaluateHandle((s, i) => s.nodes[i], index)).asElement();
+  const unchanged = () => captured.evaluate((s, i) => s.nodes[i].isConnected && s.fingerprint(s.nodes[i]) === s.fingerprints[i], index);
+  try {
     if (!await unchanged()) throw new Error('ai: target changed during inference; inspect again; no action taken');
     if (!dryRun) {
       const deadline = performance.now() + timeout;
       const remaining = () => {
+        if (options.signal?.aborted) throw new Error('ai task: cancelled');
         const ms = Math.ceil(deadline - performance.now());
         if (ms <= 0) throw new Error('ai: action timeout; inspect the page before continuing');
         return ms;
@@ -184,15 +204,13 @@ export async function runAI(target, options, config, beforeAction = async () => 
           const actual = await element.evaluate(el => el.isContentEditable ? el.textContent : el.value);
           if (actual !== options.value) throw new Error('ai: field did not retain the requested value; inspect it before continuing');
         }
+        else if (action === 'enter') await element.press('Enter', { timeout: remaining() });
+        else if (action === 'select') await element.selectOption({ index: options.optionIndex }, { timeout: remaining() });
         else await element[action]({ timeout: remaining() });
       } catch (e) {
         const message = action === 'fill' && options.value ? e.message.split(options.value).join('<value>') : e.message;
         throw new Error(message);
       }
     }
-    return `ai ${action}${dryRun ? ' preview' : ''}: ${JSON.stringify(state.candidates[index].name)} (${metrics}, total=${Math.round(performance.now() - started)}ms)`;
-  } finally {
-    await element?.dispose().catch(() => {});
-    await captured.dispose().catch(() => {});
-  }
+  } finally { await element.dispose().catch(() => {}); }
 }

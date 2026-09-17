@@ -59,27 +59,29 @@ browse box up       # first run bakes a reusable image (~6 min); every one after
 session end to end. `browse box down` deletes it. Nothing is billed once the box
 is gone, and the image that makes `up` fast costs cents a month.
 
-## TypeSafe for unfamiliar controls
+## Delegate a task to TypeSafe
 
-Choose a real element by description with one TypeSafe request:
+Give browse a goal. It observes the DOM, chooses and records an action, then
+repeats until the goal is complete or a step/time limit is reached:
 
 ```sh
 browse -s demo open https://example.com
-browse -s demo ai click 'Learn more' --dry-run
-browse -s demo ai assert 'This domain is intended for documentation examples'
+browse -s demo ai task 'Click Learn more and stop once the Example Domains page is loaded.'
 browse -s demo close
 ```
 
 Set `TYPESAFE_API_KEY` or keep it in the caller's `.env`. `browse help` documents
-semantic click, hover, fill, assertions, scopes and limits. AI commands report
+task mode, individual semantic actions, assertions, scopes and limits. AI commands report
 latency and tokens, decline uncertain matches and retain normal session evidence.
-They send DOM labels/context or visible assertion text to TypeSafe. Exact selectors
+Tasks send the goal, visible controls, page text and action history to TypeSafe.
+Text entry uses quoted strings from the goal or supplied named values. Exact selectors
 remain the fastest, free option when you already know the target.
 
-Run `node test/ai.test.mjs` for isolated browser integration checks with a fake
-provider; set `BROWSE_ENGINE=camoufox` to verify that engine separately.
+Run `node test/ai.test.mjs` and `node test/ai-task.test.mjs` for isolated browser
+integration checks with a fake provider; set `BROWSE_ENGINE=camoufox` to verify that engine separately.
 `node test/ai-boxes.mjs` prints the explicit opt-in for live tests on two disposable
-Boxes, including real API calls, recordings, timings and teardown.
+Boxes, including real API calls, recordings, timings and teardown. Add `--task`
+to exercise complete multistep goals.
 
 ## Beyond the basics
 

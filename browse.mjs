@@ -102,6 +102,7 @@
 
 import http from "node:http";
 import { parseAI, aiConfig, runAI } from "./scripts/ai.mjs";
+import { parseTask, runTask } from "./scripts/ai-task.mjs";
 import { runtimeBuild } from "./scripts/build.mjs";
 import net from "node:net";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
@@ -748,8 +749,8 @@ function logLabel(cmd, args) {
   // of the transcript too - the flags are enough to follow what happened.
   if (cmd === "ai") {
     try {
-      const o = parseAI(args);
-      return `ai ${o.action} ${JSON.stringify(o.description)}${o.action === "fill" ? " <value>" : ""}` +
+      const o = args[0] === "task" ? parseTask(args) : parseAI(args);
+      return `ai ${o.action} ${JSON.stringify(o.description ?? o.goal)}${o.action === "fill" ? " <value>" : ""}` +
         `${o.scope !== "body" ? ` --scope ${JSON.stringify(o.scope)}` : ""}${o.dryRun ? " --dry-run" : ""}`;
     } catch { return "ai <invalid arguments>"; }
   }
@@ -1279,6 +1280,18 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     fast-forwarded with it, so show captions OUTSIDE it.
 
 Observe (do these often — this is your "check" step):
+  browse ai task <goal>                execute a multistep goal from fresh DOM observations
+    --max-steps <n>                    at most n actions (default 12, max 50)
+    --task-timeout <ms>                total budget (default 120000, max 600000)
+    --timeout <ms>                     per API/action budget (default 10000, max 60000)
+    --value <name=text>                supply literal input text; repeatable, values stay local
+    --until <selector>                 finish when this selector is visible (completion condition)
+    --scope <selector>                observe/act inside one region (default body)
+    Double-quoted strings in the goal are also available as literal input values.
+    Chooses click, fill, Enter, native select, scroll, wait, done, or blocked.
+    Stops on uncertainty, stale targets, repeated actions, limits, or caller cancellation.
+    Each action is recorded. Completion without --until is a model judgment (p>=0.8).
+    Page text, goal, controls and history go to TypeSafe; supplied --value contents do not.
   browse ai click|hover <description>   choose a real element with TypeSafe, then act once
   browse ai fill <description> <value>  choose an input; value is not sent to TypeSafe or transcript
   browse ai assert <condition>          probabilistic check of visible text; exits 1 below p=0.8
@@ -2511,7 +2524,7 @@ const MAX_TIMER_MS = 2_147_483_647;
  *  i.e. the flag help offers for a slow first compile could not actually be used
  *  past two minutes. Plus a margin for the browser to answer afterwards. */
 function postTimeout(cmd, args) {
-  if (cmd === "ai") return 2 * parseAI(args).timeout + 30000;
+  if (cmd === "ai") return args[0] === "task" ? parseTask(args).taskTimeout + 30000 : 2 * parseAI(args).timeout + 30000;
   const i = args.indexOf("--timeout");
   // `browse wait 130000` carries its duration as a bare argument, with no flag to
   // find - and it was the one form that still died client-side at 120s while the
@@ -3065,7 +3078,7 @@ async function client(argv) {
     throw new Error(`no live session '${SESSION}'; read saved evidence with '${cmd} --dir <session-dir>'`);
   let ai;
   if (cmd === "ai") {
-    parseAI(argv.slice(1));
+    (argv[1] === "task" ? parseTask : parseAI)(argv.slice(1));
     ai = aiConfig();
     if (!(await findDaemon())) throw new Error("ai: open a page in this session first");
   }
@@ -4679,8 +4692,9 @@ async function daemon() {
   });
 
   let idleT = null;
+  let activeTask = null, commandCount = 0;
   function armIdle() {
-    if (!IDLE_MS) return;
+    if (!IDLE_MS || activeTask) return;
     clearTimeout(idleT);
     idleT = setTimeout(async () => {
       // A client-initiated close may already be running: closeSession() would
@@ -5495,11 +5509,11 @@ async function daemon() {
       `${REMOTE_SIDE ? "; a box's disk is what 'browse box up --size' picks" : ""}.`);
   }
 
-  async function dispatch(cmd, args, ai) {
+  async function dispatch(cmd, args, ai, signal) {
     const stripped = takeDialogFlag(args);
     const armed = stripped !== args;
     try {
-      return await dispatchCmd(cmd, stripped, ai);
+      return await dispatchCmd(cmd, stripped, ai, signal);
     } catch (e) {
       throw withCrashCause(e);
     } finally {
@@ -5507,11 +5521,24 @@ async function daemon() {
     }
   }
 
-  async function dispatchCmd(cmd, args, ai) {
+  async function dispatchCmd(cmd, args, ai, signal) {
     if (cmd === "ai") {
-      const options = { ...parseAI(args), clearWithKeys: USING_CAMOUFOX };
+      const options = { ...(args[0] === "task" ? parseTask(args) : parseAI(args)), clearWithKeys: USING_CAMOUFOX };
       if (!ai?.key) throw new Error("ai: missing TypeSafe credentials; update the client");
       const config = aiConfig({ TYPESAFE_API_KEY: ai.key, TYPESAFE_API_URL: ai.endpoint });
+      if (options.action === "task") return runTask({
+        target: () => activeFrame ?? page, now,
+        beforeAction: async (element, action) => {
+          await cursorGlideTo(element);
+          if (action !== "hover") await cursorClickFx();
+        },
+        record: async (line, at, action) => {
+          if (action !== "wait") stepMarks.push({ t: at, cmd: `ai task ${action}` });
+          const shot = await autoShot("ai-task", [action]);
+          logTranscript(`### ${step} · ai task\n${transcriptBody(line)}${shot ? `\n[${shot}]` : ""}\n\n`);
+          return shot;
+        },
+      }, options, config, signal);
       return runAI(activeFrame ?? page, options, config, async (element, action) => {
         await cursorGlideTo(element);
         if (action !== "hover") await cursorClickFx();
@@ -6817,15 +6844,28 @@ async function daemon() {
       let cmd = "?", args = [], hold = false, ai;
       try { ({ cmd, args = [], hold = false, ai } = JSON.parse(body)); } catch { /* ignore */ }
       const send = (obj) => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obj)); };
+      let ownsTask = false, ownsCommand = false, taskTimer;
       try {
+        if (activeTask) throw new Error("an AI task is running; cancel its invoking command before issuing another browser command");
         // Timestamped BEFORE the command so the chapter lands on the moment the
         // viewer sees it start, but only PUSHED after it succeeds - a chapter
         // pointing at a command that threw points at nothing on screen.
         if (closeReply && CLOSERS.has(cmd)) { send(closeReply); return; }
         if (closing && !CLOSERS.has(cmd)) throw new Error("session is finalizing; wait for close to finish before issuing browser commands");
+        const task = cmd === "ai" && args[0] === "task";
+        if (task && commandCount) throw new Error("another browser command is still running; wait before starting an AI task");
+        commandCount++; ownsCommand = true;
+        if (task) {
+          const options = parseTask(args);
+          activeTask = new AbortController(); ownsTask = true;
+          const controller = activeTask;
+          clearTimeout(idleT);
+          taskTimer = setTimeout(() => controller.abort(), options.taskTimeout);
+          res.on("close", () => { if (!res.writableEnded) controller.abort(); });
+        }
         const stepAt = now();
-        const out = await dispatch(cmd, args, ai);
-        const aiReadOnly = cmd === "ai" && (args[0] === "assert" || parseAI(args).dryRun);
+        const out = await dispatch(cmd, args, ai, activeTask?.signal);
+        const aiReadOnly = cmd === "ai" && (task || args[0] === "assert" || parseAI(args).dryRun);
         if (!CHAPTERLESS.has(cmd) && !aiReadOnly) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
         // Collapse any middleware faults raised since the last command into the
         // notes queue, so they ride out on this reply like every other note.
@@ -6911,6 +6951,9 @@ async function daemon() {
         if (notes.length) msg = `${msg}\n${notes.splice(0).map((n) => "  " + n).join("\n")}`;
         logTranscript(`### · \`${logLabel(cmd, args)}\`\n- ❌ ${msg.split("\n")[0]}\n\n`);
         send({ ok: false, error: msg });
+      } finally {
+        if (ownsCommand) commandCount--;
+        if (ownsTask) { clearTimeout(taskTimer); activeTask = null; armIdle(); }
       }
     });
   });

@@ -8,12 +8,12 @@ Read `SKILL.md`, run `browse help`, and read `browse.mjs`. Verify Playwright API
 
 ## Product boundaries
 
-- Preserve the agent loop: act once, observe the result, decide the next action. `browse` is a browser primitive, not a test runner or autonomous agent.
+- Ordinary commands act once and return. Explicit `ai task` owns a bounded observe-act loop over a user goal, choosing only concrete DOM actions and supplied text values. Keep generated code and arbitrary tool execution outside that loop.
 - Recording is a core capability. Every change must account for video, cursor/key overlays, step screenshots, transcripts, chapters, dead-air processing, tabs, and teardown.
 - Redaction of network logs stays on by default. Credentials never surface without an explicit flag.
 - Add a command only when it beats existing commands or `eval` as a primitive. Not every Playwright method needs a wrapper.
-- Composition happens in the shell. Batching, branching, loops, scripting, and workflow orchestration stay out of the CLI.
-- Out of scope unless the user explicitly widens it: natural-language planning, autonomous task execution, AI extraction, scheduling, CAPTCHA services, managed credentials, cloud fleets.
+- General scripting and workflow orchestration stay in the shell. The bounded DOM loop in `ai task` is the explicit exception.
+- Beyond bounded DOM tasks, keep AI extraction, scheduling, CAPTCHA services, managed credentials and cloud fleets out of scope unless the user explicitly widens it.
 - Connect to remote browsers over provider-neutral CDP.
 - Output stays concise and agent-readable. Machine-readable output is a separate explicit mode.
 

@@ -16,8 +16,9 @@ session, rather than recalling Playwright from memory.
 
 ## The loop
 
-Run one command, read the result, decide the next action, repeat. It is not a
-script runner.
+For individual commands, act, read the result and decide the next action. For a
+delegated multistep goal, use task mode as described below; browse owns that loop
+and returns the recorded steps and outcome.
 
 1. **Act**, then read the output closely. New console/page errors, answered
    dialogs and saved downloads are appended inline to the next command's result.
@@ -44,12 +45,16 @@ script runner.
 
 ## Fast semantic decisions
 
-Use exact selectors when already known. When choosing among unfamiliar controls
-would require another large snapshot and a reasoning turn, use TypeSafe through
-`ai` for one semantic action or a visible-text assertion. Read [AI decisions](skill/ai.md)
-before the first use; help defines its command surface. Observe the result before
-the next action. A successful action says the browser acted; verify the expected
-page state separately.
+Use `ai task` to delegate a browser goal that requires several interactions. It
+observes the current controls and page text after each action, then decides the
+next action without another turn from the calling agent. Read [AI decisions](skill/ai.md)
+before the first use; help defines its command surface. A stopped task is partial
+progress, not success. Inspect its recorded steps before resuming so submissions
+and other completed actions are not repeated.
+
+Use exact selectors when already known, or the single-action AI commands when
+the surrounding agent needs to decide each step. Verify the expected page state
+after an action; a successful click only establishes that the browser acted.
 
 ## Start the app before the first command
 
