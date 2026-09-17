@@ -38,9 +38,15 @@ next action.
 
 ## Tabs
 
-Only tab 0 is recorded: a popup's time is cut from the video and a `target new`
-tab is not in it at all. Park tab 0 on a STATIC page before working in another one
-(motionless time there is cut; a spinner or live log is not).
+A deliberate secondary tab contributes footage while active. Switching back
+continues the earlier tab's footage, and closing a secondary tab retains what
+was already recorded. Popups begin excluded: inspect a consent or login screen
+before choosing to include it. Recording selection applies from that moment,
+so choose before the interaction that needs proof; see `browse help`.
+
+If finalization fails, retained raw files can contain excluded popup footage.
+Treat them as editing sources, not deliverables. Review the finished MP4 before
+sharing; retaining raw sources deliberately also retains those excluded screens.
 
 ## Comparable stills
 
