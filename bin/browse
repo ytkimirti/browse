@@ -54,11 +54,12 @@ fi
 # `browse --remote <host> setup`, which runs over THERE, and so downloaded a
 # browser here first. An unrecognised flag ends the walk with no command, which
 # only falls through to the install below — never wrong, just unhelpful.
-CMD=""; REMOTE_SEEN=""; CMD_AT=""
+CMD=""; REMOTE_SEEN=""; CMD_AT=""; CDP_SEEN="${BROWSE_CDP:-}"
 if (( $# )); then
   _argv=("$@"); _i=0
   while (( _i < ${#_argv[@]} )); do
     case "${_argv[$_i]}" in
+      --cdp) CDP_SEEN=1; _i=$((_i + 2)) ;;
       --remote) REMOTE_SEEN=1; _i=$((_i + 2)) ;;
       -s|--session|-p|--profile|--viewport|--type-delay|--idle) _i=$((_i + 2)) ;;
       --headful|--headless|--camoufox|--chromium|--cursor|--no-cursor|\
@@ -303,6 +304,25 @@ if [[ "$CMD" == "setup" ]]; then
     || echo "browse: • no system ffmpeg — mp4 finalize uses playwright's bundled copy (brew install ffmpeg for speed badges)"
   echo "browse: ready — try 'browse open https://example.com'"
   exit 0
+fi
+
+# Reject malformed launch arguments before any runtime bootstrap.
+BROWSE_PREFLIGHT=1 node "$REPO_ROOT/browse.mjs" "$@"
+
+# An existing local daemon already owns its runtime. In particular a CDP session
+# can have only the driver installed, and later commands omit its launch flags.
+if [[ -z "$REMOTE_SEEN" && -z "${BROWSE_REMOTE:-}" ]] && \
+    BROWSE_LIVE_ONLY=1 node "$REPO_ROOT/browse.mjs" "$@" >/dev/null 2>&1; then
+  BROWSE_PW_BASE="$PW_DIR/package.json" exec node "$REPO_ROOT/browse.mjs" "$@"
+fi
+
+# CDP borrows a remote browser. Validate before installing anything, then fetch
+# only its JavaScript driver. No Chromium binary, ffmpeg or Camoufox is needed.
+if [[ -n "$CDP_SEEN" ]]; then
+  if [[ "$(installed_version "$PW_DIR" playwright)" != "$PW_VERSION" ]]; then
+    pkg_install "$PW_DIR" "playwright@$PW_VERSION" >&2
+  fi
+  BROWSE_PW_BASE="$PW_DIR/package.json" exec node "$REPO_ROOT/browse.mjs" "$@"
 fi
 
 if ! main_installed; then

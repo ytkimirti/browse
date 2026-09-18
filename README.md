@@ -16,7 +16,7 @@ start on the first command and stay alive between them.
 
 ## Install
 
-Not on npm yet, so clone it:
+Clone and install directly:
 
 ```sh
 git clone https://github.com/ytkimirti/browse.git ~/browse
@@ -30,8 +30,23 @@ link somewhere else instead, a project's own `./.agents/skills` say. Needs Node
 18+, and re-running it is safe.
 
 One clone is both the CLI and the skill, so `git pull` updates them together.
-The npm package lands in `~/.browse`; the browser binaries go to Playwright's
+Playwright dependencies land in `~/.browse`; browser binaries go to Playwright's
 shared cache, so one you already downloaded for another project is reused.
+
+The repository also builds an installable npm package for macOS and Linux.
+No registry publication is needed to install a local build:
+
+```sh
+npm pack --ignore-scripts --pack-destination /tmp
+npm install -g /tmp/ytkimirti-browse-0.1.0.tgz
+browse install
+```
+
+The package includes the CLI and agent skill. Installation runs no lifecycle
+scripts and downloads no browser automatically; `browse install` links the skill
+and performs setup. `browse help` and `browse version` work before setup.
+Use `npm run test:package` to verify the packed file list and a fresh local install.
+This package has not been published to the npm registry.
 
 ## Every session leaves
 
@@ -87,6 +102,11 @@ to exercise complete multistep goals.
 
 Stay logged in across sessions with a profile. Force an error path or an empty
 list with request middleware. Freeze the clock before the app's JS runs.
+Scope accessibility snapshots to a region, keep controls with compact output,
+and use snapshot element references directly in actions. Deliberately opened
+tabs join the recording while active; popup footage stays excluded until selected.
+Existing Chromium browsers can be attached over CDP with explicit video opt-out,
+keeping their tabs open when browse disconnects. See help for flags and limitations.
 
 `browse help` lists every command and flag, `browse help --env` every env var.
 

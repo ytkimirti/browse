@@ -26,7 +26,7 @@
  *       `browse click "text=Sign up"` … : connects to the daemon (spawning it if
  *       needed), forwards the command, prints the result, exits.
  *   • daemon (`browse __serve`) — holds ONE persistent Chromium context created
- *       with `recordVideo` (so the whole session becomes a .webm) + one page,
+ *       with per-page video, composing selected active tabs at close,
  *       exposes a tiny localhost HTTP control port, and appends every action to a
  *       markdown transcript + a per-step screenshot.
  *
@@ -535,11 +535,9 @@ const KEEP_WEBM = process.env.BROWSE_KEEP_WEBM === "1";
 // finalize buy a file nobody will watch. Screenshots, the transcript and the
 // network log are unaffected; only the video is.
 const VIDEO_ON = process.env.BROWSE_VIDEO !== "0";
-// Real popups break the recording: recordVideo is per CONTEXT, but Playwright
-// writes one .webm per PAGE and only the first page's file is finalized - so a
-// popup records to a file nobody reads while the main clip freezes. By default we
-// rewrite the common "open in a new tab" cases into same-tab navigation
-// (popupSameTabInitScript); BROWSE_POPUPS=1 keeps the real popup behaviour.
+const CDP_ENDPOINT = process.env.BROWSE_CDP || "";
+// Chromium rewrites common new-tab links to stay in the current video flow.
+// Real popups remain opt-in footage; deliberate tabs are composed at close.
 // Under camoufox, default to REAL popups — i.e. skip the same-tab rewrite —
 // because that rewrite is another init script injected into every page, and
 // under camoufox the point is to look like an untouched browser. Set
@@ -1322,7 +1320,12 @@ AI tasks (preferred for multistep goals):
     Key comes from TYPESAFE_API_KEY, a credential file or .env; help --env for precedence.
 
 Observe / diagnose (for individual actions or a stopped task):
-  browse snapshot [selector]        accessibility tree of the page or one region (what a user/AT sees)
+  browse snapshot [selector] [--compact] [--refs] [--timeout <ms>]
+                                    accessibility tree of one region, or the page. --compact keeps
+                                    controls and their ancestor context. --refs labels elements @eN
+                                    for later selector arguments. References belong to this snapshot,
+                                    tab and frame; refresh after navigation, replacement or a new snapshot.
+                                    --timeout defaults to 4000ms. Truncated output suggests a narrower scope.
   browse text [selector]            visible text (whole page if no selector)
   browse title | url                page title / current URL
   browse content                    raw HTML (truncated)
@@ -1361,7 +1364,11 @@ Observe / diagnose (for individual actions or a stopped task):
 Tabs, frames, emulation, saved logins:
   browse target                     list tabs (index, title, url, * = active)
   browse target <n>                 switch to a tab · popups are switched to AUTOMATICALLY
-  browse target new [url]           open a tab · browse target close   close the active one
+  browse target new [url]           open a deliberate tab, recorded while active
+  browse target record on|off       include/exclude the active tab from now. Popups start excluded.
+                                    Selected tabs are stitched in active-tab order at close, before
+                                    dead-air cuts, speed regions and chapters. Raw sources survive failures.
+  browse target close               close the active secondary tab; recorded footage is retained
   browse target "iframe#checkout"   scope later element commands into that iframe
   browse target top                 leave the iframe scope
   browse emulate <k=v …>            viewport=390x844 dark=1 geo=41.0,29.0 tz=Europe/Istanbul
@@ -1500,6 +1507,12 @@ this one — see 'browse help --env' for the auth + install knobs):
 
 Launch flags (how the browser STARTS — put them before the command that opens the
 session; on an already-live session browse refuses rather than ignoring them):
+  --cdp <endpoint>                  attach to an existing Chromium browser over http(s)/ws(s).
+                                    Requires --no-video; existing contexts cannot start video capture.
+                                    No profile or browser-setting launch overrides. Bare open keeps
+                                    the current page. close disconnects, retaining browser and tabs.
+                                    Overlays are off; init, middleware, emulate and state --load are
+                                    unavailable on a borrowed context. Screenshots and logs still work.
   --headful / --headless            show the browser window while driving it (still records)
   --camoufox / --chromium           pick the engine (default camoufox — see below)
   --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
@@ -1550,8 +1563,8 @@ change) out of the clip (BROWSE_REALTIME=1 preserves the entire unedited timelin
 BROWSE_IDLE_MODE=speed keeps+fast-forwards static stretches instead,
 =keep leaves it). A region you bracket with 'browse speed <n>' … 'browse speed
 off' is instead fast-forwarded at n× — badged "n×" top-right — so a
-visibly-progressing wait still shows. Time spent on a popup is cut too (only the
-main tab is recorded). It writes a shareable recording.mp4 with a chapter per
+visibly-progressing wait still shows. Time spent on an excluded popup is cut too.
+Deliberate tabs and tabs selected with target record on are recorded while active. It writes a shareable recording.mp4 with a chapter per
 acting command (reads don't get one, and neighbours closer than a quarter second
 merge into 'first (+N more)') plus a poster.jpg; the temp raw .webm is then deleted (kept only if
 ffmpeg is missing/fails, or with --keep-raw / BROWSE_KEEP_WEBM=1).`;
@@ -1562,6 +1575,7 @@ ffmpeg is missing/fails, or with --keep-raw / BROWSE_KEEP_WEBM=1).`;
 const ENV_HELP = `browse — environment variables
 
 Every launch flag is also an env var (a flag on the command WINS over the env):
+  BROWSE_CDP=<endpoint>    --cdp (requires BROWSE_VIDEO=0; Chromium only)
   BROWSE_HEADFUL=1         --headful            BROWSE_ENGINE=camoufox|chromium  --camoufox/--chromium
   BROWSE_VIEWPORT=WxH      --viewport           BROWSE_CURSOR=0|1                --no-cursor/--cursor
   BROWSE_KEYLOG=0|1        --no-keylog/--keylog BROWSE_POPUPS=0|1                --no-popups/--popups
@@ -2723,6 +2737,7 @@ const LAUNCH_FLAGS = Object.assign(Object.create(null), {
  *  silently falling back to the default is how you record 40 minutes at the
  *  wrong viewport and only find out watching the mp4. */
 const LAUNCH_OPTS = Object.assign(Object.create(null), {
+  "--cdp": { env: "BROWSE_CDP", check: (v) => { try { return ["http:", "https:", "ws:", "wss:"].includes(new URL(v).protocol); } catch { return false; } }, want: "an http(s) or ws(s) browser endpoint" },
   "--viewport": { env: "BROWSE_VIEWPORT", check: (v) => /^\d+\s*[x×,]\s*\d+$/.test(v), want: "WxH, e.g. 390x844" },
   "--type-delay": { env: "BROWSE_TYPE_DELAY", check: (v) => /^\d+$/.test(v), want: "milliseconds, e.g. 0 (paste) or 45" },
   "--idle": { env: "BROWSE_IDLE_MS", check: (v) => /^\d+$/.test(v), want: "milliseconds, e.g. 600000 (0 = never auto-close)" },
@@ -2751,6 +2766,16 @@ const POST_FLAGS = new Set([
   "--last", "-n", "--all", "--all-types", "--failed", "--errors", "--json", "--stats",
   "--body", "--bodies", "--level", "--dir", "--path",
 ]);
+
+function validateCdpLaunch(env, profile) {
+  if (!env.BROWSE_CDP) return;
+  if (!LAUNCH_OPTS["--cdp"].check(env.BROWSE_CDP)) throw new Error("--cdp wants an http(s) or ws(s) browser endpoint (endpoint hidden)");
+  if (env.BROWSE_VIDEO !== "0") throw new Error("--cdp requires explicit --no-video: an existing context cannot start Playwright video recording");
+  if (profile) throw new Error("--cdp cannot use a local persistent profile");
+  if (env.BROWSE_ENGINE && env.BROWSE_ENGINE !== "chromium") throw new Error("--cdp requires Chromium; remove --camoufox");
+  if (["BROWSE_HEADFUL", "BROWSE_VIEWPORT", "BROWSE_CURSOR", "BROWSE_KEYLOG", "BROWSE_POPUPS"].some((key) => env[key] !== undefined))
+    throw new Error("--cdp borrows the existing browser settings; omit headful, viewport, cursor, keylog and popup launch overrides");
+}
 
 async function client(argv) {
   // Leading flags (any order): `-s <name>` selects a named parallel session,
@@ -2783,7 +2808,7 @@ async function client(argv) {
       const { env, check, want } = LAUNCH_OPTS[a];
       const val = String(argv[1] ?? "");
       if (!check(val)) {
-        process.stderr.write(`browse: ${a} wants ${want}${val ? ` — got '${val}'` : " — got nothing"}\n`);
+        process.stderr.write(`browse: ${a} wants ${want}${a === "--cdp" ? "" : val ? ` - got '${val}'` : " - got nothing"}\n`);
         return 1;
       }
       LAUNCH_ENV[env] = val.replace(/\s/g, "");
@@ -2822,6 +2847,11 @@ async function client(argv) {
     process.stdout.write((envOnly ? ENV_HELP : HELP) + "\n");
     return 0;
   }
+  if (process.env.BROWSE_PREFLIGHT === "1") {
+    validateCdpLaunch({ ...process.env, ...LAUNCH_ENV }, PROFILE);
+    return 0;
+  }
+  if (process.env.BROWSE_LIVE_ONLY === "1") return (await findDaemon()) ? 0 : 3;
   // Before ANY command handler runs: a retired flag is knowably wrong whether
   // the command is answered here (net) or by the daemon, and answering it here
   // is what keeps it from launching a browser to be refused.
@@ -3108,7 +3138,6 @@ async function client(argv) {
     ai = aiConfig();
     if (!(await findDaemon())) throw new Error("ai: open a page in this session first");
   }
-  if (cmd === "snapshot" && (argv.length > 2 || argv[1]?.startsWith("--"))) throw new Error("snapshot: takes one optional selector");
   const d = await ensureDaemon();
   // `init --file <path>` is read by the DAEMON, which sits in whatever directory
   // the session was first opened from - a relative path would resolve against a
@@ -3340,6 +3369,7 @@ let FFMPEG_FAIL = null;
 function ffmpegFailNote() {
   const f = FFMPEG_FAIL;
   if (!f) return "ffmpeg missing/failed - mp4 not written";
+  if (f.kind === "exclusions") return "no shareable recording: excluded footage could not be safely removed; raw sources contain excluded footage";
   if (f.kind === "missing") return "no ffmpeg on this machine - mp4 not written ('browse setup' installs one)";
   if (f.kind === "signal") {
     const mb = (n) => `${Math.round(n / 1e6)}MB`;
@@ -3482,8 +3512,10 @@ function planSegments(win, forced, mode, autoFactor, keeps = [], cuts = []) {
   // → static (resolved by `mode` after we know how long each static run is).
   const cls = [];
   const inAny = (ivs, f) => ivs.some((iv) => {
-    const s = Math.round(iv.start * fps);
-    const e = iv.end === Infinity ? hi + 1 : Math.round(iv.end * fps);
+    // Exclude every sample interval that overlaps the cut. Rounding inward can
+    // retain the first or last fraction of an intentionally excluded screen.
+    const s = Math.floor(iv.start * fps);
+    const e = iv.end === Infinity ? hi + 1 : Math.ceil(iv.end * fps);
     return f >= s && f < e;
   });
   for (let f = lo; f <= hi; f++) {
@@ -3659,6 +3691,38 @@ function makeGif(mp4Path) {
  * null (no ffmpeg / any failure) — on null the caller keeps the .webm as the
  * only recording.
  */
+/** Keep the wall-clock timeline intact so existing cuts, speed and chapters map
+ * onto the selected tabs. Per-page streams start when each page is created. */
+function composeTabRecording(segments, sources) {
+  const ff = ffmpegBin();
+  if (!ff) throw new Error("ffmpeg is required to compose multiple tabs");
+  const partDir = join(VIDEO_DIR, "composition");
+  mkdirSync(partDir, { recursive: true });
+  const parts = [];
+  const run = (args) => {
+    const result = spawnSync(ff, ["-y", "-loglevel", "error", ...args], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+    if (result.error || result.status !== 0) throw new Error(`ffmpeg could not compose tab footage (${result.error?.code || result.status}); raw videos preserved`);
+  };
+  for (const segment of segments) {
+    const duration = segment.end - segment.start;
+    if (duration < 1 / OUTPUT_FPS / 2) continue;
+    const source = sources.get(segment.page);
+    if (!source || !existsSync(source.path)) throw new Error("a selected tab has no recorded video; raw videos preserved");
+    const part = join(partDir, `part-${parts.length}.mp4`);
+    const start = Math.max(0, segment.start - source.origin);
+    run(["-i", source.path, "-t", duration.toFixed(6),
+      "-vf", `trim=start=${start.toFixed(6)}:end=${(start + duration).toFixed(6)},setpts=PTS-STARTPTS,fps=${OUTPUT_FPS},tpad=stop_mode=clone:stop_duration=${duration.toFixed(6)}`,
+      "-an", "-pix_fmt", "yuv420p", part]);
+    if (!existsSync(part) || statSync(part).size < 100) throw new Error("a selected tab segment is empty; raw videos preserved");
+    parts.push(part);
+  }
+  const list = join(partDir, "parts.txt");
+  writeFileSync(list, parts.map((part) => `file '${basename(part)}'`).join("\n") + "\n");
+  const output = join(VIDEO_DIR, "composed.mp4");
+  run(["-f", "concat", "-safe", "1", "-i", list, "-c", "copy", output]);
+  return output;
+}
+
 function finalizeRecording(webmPath, marks = {}) {
   const { speedMarks = [], keepMarks = [], cutMarks = [], stepMarks = [] } = marks;
   const ff = ffmpegBin();
@@ -3837,6 +3901,11 @@ function finalizeRecording(webmPath, marks = {}) {
   // No cut/speed plan — just trim dead lead-in/out if worthwhile, and retime to
   // the constant output rate. The whole clip is then one real-time segment, which
   // is all `finish` needs to map step marks onto the output timeline.
+  if (cutMarks.length) {
+    FFMPEG_FAIL = { kind: "exclusions" };
+    try { rmSync(outPath, { force: true }); } catch { /* no output */ }
+    return null;
+  }
   const middle = [];
   let plain = null;
   if (win) {
@@ -4061,7 +4130,8 @@ async function daemon() {
   // Playwright's launch errors are a multi-KB protocol dump — useless inline,
   // so the note stays one actionable line and the full text goes to browsed.log.
   const fallback = (note, detail) => { engineNote = note; logDaemon(detail ? `${note} :: ${detail}` : note); };
-  let engine = ENGINE, camouOpts = null;
+  validateCdpLaunch(process.env, PROFILE);
+  let engine = CDP_ENDPOINT ? "chromium" : ENGINE, camouOpts = null;
   const requireEngine = !!PROFILE || !!process.env.BROWSE_ENGINE;
   if (engine === "camoufox") {
     camouOpts = camoufoxLaunchOptions();
@@ -4148,7 +4218,13 @@ async function daemon() {
   };
 
   try {
-    ({ browser, context } = await launchWith(engine));
+    if (CDP_ENDPOINT) {
+      try { browser = await chromium.connectOverCDP(CDP_ENDPOINT, { noDefaults: true, timeout: 15000 }); }
+      catch { throw new Error("CDP connection failed; verify the endpoint, credentials and browser availability (endpoint hidden)"); }
+      context = browser.contexts()[0];
+      if (!context) { await browser.close(); throw new Error("CDP browser has no existing context to attach to"); }
+      engineNote = "attached to an existing Chromium context; close disconnects and leaves its browser and tabs open. Video and overlays are off";
+    } else ({ browser, context } = await launchWith(engine));
   } catch (e) {
     if (engine !== "camoufox" || requireEngine) throw e;
     fallback("camoufox failed to launch — using chromium. " + (pinnedMissing
@@ -4165,11 +4241,11 @@ async function daemon() {
   // Draw the animated cursor + keystroke overlay into every page (before the
   // page's own scripts run, and re-run on each navigation) so the recording shows
   // the pointer moving and the keys being pressed, like screen-recording software.
-  if (CURSOR) await context.addInitScript(cursorInitScript, CURSOR_SCALE);
-  if (KEYLOG) await context.addInitScript(keylogInitScript);
+  if (!CDP_ENDPOINT && CURSOR) await context.addInitScript(cursorInitScript, CURSOR_SCALE);
+  if (!CDP_ENDPOINT && KEYLOG) await context.addInitScript(keylogInitScript);
   // Keep "open in a new tab" in THIS tab, so the demo never splits across two
   // video files (see popupSameTabInitScript). BROWSE_POPUPS=1 opts out.
-  if (!POPUPS) await context.addInitScript(popupSameTabInitScript);
+  if (!CDP_ENDPOINT && !POPUPS) await context.addInitScript(popupSameTabInitScript);
 
   // Anchor for `browse speed` marks. Playwright's video timeline runs in real
   // time from ~page creation, so (Date.now()-recStartMs)/1000 is the raw-video
@@ -4182,14 +4258,8 @@ async function daemon() {
   // on-screen life of each toast, so viewers get to read it. end=Infinity is an
   // open sticky toast, closed by the next toast / --clear.
   const keepMarks = []; // { start, end } in secondsSinceRecStart
-  // Raw-video intervals the finalizer must CUT no matter what: the stretches
-  // spent on an UNINTENDED popup - a page the site opened at us, which we
-  // auto-switched to. Its frames went into its own .webm, so the clip we finalize
-  // only shows a frozen main tab there, and skipping it is usually right anyway
-  // (an OAuth consent screen with the user's email doesn't belong in a shared
-  // demo). A tab the agent asked for with `browse target new` is NOT cut: it is
-  // deliberate footage, and silently deleting a demo the agent just recorded is
-  // far worse than leaving a stretch the dead-air pass will handle on its own.
+  // Forced cuts track time on excluded tabs. Popups begin excluded so consent
+  // screens are not accidentally shared; deliberate tabs begin included.
   const cutMarks = []; // { start, end } - end=Infinity while still on that popup
   // One chapter marker per command the agent ran, mapped onto the finalized
   // timeline at close (see writeChapters).
@@ -4296,6 +4366,21 @@ async function daemon() {
   // either cutting a demo the agent deliberately recorded or keeping a consent
   // screen nobody wanted to publish.
   const wantedPages = new WeakSet();
+  const videoSources = new Map();
+  const tabSegments = [];
+  let primaryPage;
+  const videoTime = () => Math.round(now() * OUTPUT_FPS) / OUTPUT_FPS;
+  function markRecordedTab() {
+    if (!VIDEO_ON) return;
+    const source = wantedPages.has(page) ? page : primaryPage;
+    const previous = tabSegments.at(-1);
+    if (previous?.page === source) return;
+    const t = videoTime();
+    if (previous) previous.end = t;
+    tabSegments.push({ page: source, start: t, end: Infinity });
+  }
+  let referenceSeq = 0;
+  const references = new Map();
 
   /** Bring the active tab to the front. A backgrounded tab throttles
    *  requestAnimationFrame, which stalls the cursor glide and smooth scroll, so
@@ -4311,9 +4396,10 @@ async function daemon() {
     page = pages[activeIdx];
     activeFrame = null; activeFrameSel = null; // a frame scope belongs to its tab
     const open = cutMarks.find((c) => c.end === Infinity);
-    const cuttable = page !== primaryPage && !wantedPages.has(page);
+    const cuttable = !wantedPages.has(page);
     if (!cuttable) { if (open) open.end = now(); }
     else if (!open) cutMarks.push({ start: now(), end: Infinity });
+    markRecordedTab();
     focusActive(); // fire and forget: nothing downstream should wait on a raise
     return page;
   }
@@ -4322,6 +4408,7 @@ async function daemon() {
    *  popup): console errors, dialogs and downloads all fire on the page that
    *  produced them, not on the context, so a popup would otherwise be silent. */
   function wirePage(p) {
+    if (VIDEO_ON) videoSources.set(p, { video: p.video(), origin: now() });
     p.on("console", (m) => {
       const type = m.type();
       const errEntry = type === "error" ? noteErr("console: " + m.text()) : null;
@@ -4333,6 +4420,9 @@ async function daemon() {
       // format string and its CSS args rather than DevTools' rendering.
       noteConsole(type, m, errEntry);
     });
+    p.on("framedetached", () => {
+      for (const [key, ref] of references) if (ref.page === p) references.delete(key);
+    });
     p.on("pageerror", (e) => {
       const text = String(e?.message || e);
       noteErr("pageerror: " + text);
@@ -4340,6 +4430,7 @@ async function daemon() {
     });
     let navigations = [], warnedAt = 0;
     p.on("framenavigated", (frame) => {
+      for (const [key, ref] of references) if (ref.page === p) references.delete(key);
       if (frame !== p.mainFrame()) return;
       const at = Date.now();
       navigations = navigations.filter((t) => at - t < 10000);
@@ -4389,13 +4480,15 @@ async function daemon() {
   page = context.pages()[0] ?? (await context.newPage());
   pages.push(page);
   wirePage(page);
-  // The PRIMARY page owns the recording: recordVideo is per context, but
-  // Playwright writes one .webm per PAGE and this is the one we finalize.
-  const primaryPage = page;
-  // The recording handle for this page. recordVideo is on the CONTEXT, so the
-  // whole session lands in ONE .webm; we surface its EXACT path on `close`
-  // so the caller gets the file it just recorded — never a guessed glob or a
-  // stale/leftover .webm sitting in the artifacts dir.
+  // The primary stream is the single-tab fast path. When selected secondary
+  // tabs are visited, close composes their active intervals on this timeline.
+  primaryPage = page;
+  wantedPages.add(page);
+  if (VIDEO_ON) { videoSources.get(page).origin = 0; tabSegments.push({ page, start: 0, end: Infinity }); }
+  if (CDP_ENDPOINT) for (const existing of context.pages()) {
+    if (existing === page) continue;
+    pages.push(existing); wirePage(existing);
+  }
   const video = VIDEO_ON ? page.video() : null;
 
   // A popup or a tab the page opened itself: wire it and SWITCH to it, because
@@ -4407,7 +4500,7 @@ async function daemon() {
     wirePage(p);
     pages.push(p);
     activate(pages.length - 1);
-    if (!openingTab) note(`↗ switched to popup tab ${activeIdx}: ${p.url() || "about:blank"} · 'browse target' lists tabs · this popup's time is CUT from the video (only the first tab is recorded)`);
+    if (!openingTab) note(`↗ switched to popup tab ${activeIdx}: ${p.url() || "about:blank"} · 'browse target' lists tabs · this popup's time is CUT from the video; 'browse target record on' includes it from now`);
   });
 
   /** Resolve a selector against whatever is in scope right now: the active tab,
@@ -4415,7 +4508,15 @@ async function daemon() {
    *  we use exists on Locator, so this is the ONLY place tabs and frames have to
    *  be thought about - including the cursor glide, since a Locator's
    *  boundingBox() is already in main-frame (i.e. video) coordinates. */
-  const L = (sel) => (activeFrame ?? page).locator(sel);
+  const L = (sel) => {
+    if (typeof sel === "string" && sel.startsWith("@")) {
+      const ref = references.get(sel);
+      if (!ref || ref.page !== page || ref.frame !== activeFrameSel)
+        throw new Error(`reference ${sel} is stale or belongs to another scope; run 'browse snapshot --refs' here`);
+      sel = `aria-ref=${ref.native}`;
+    }
+    return (activeFrame ?? page).locator(sel);
+  };
 
   /** The same scope as L(), but as a Frame — `eval` needs a real execution
    *  context and a FrameLocator has none. Resolved per call: the iframe element
@@ -4673,12 +4774,12 @@ async function daemon() {
     if (closePromise) return closePromise;
     closing = true;
     closePromise = (async () => {
-      // Close any still-open interval so the finalizer sees a bounded one: a
-      // session that ends on a popup would otherwise carry end=Infinity.
-      const openCut = cutMarks.find((c) => c.end === Infinity);
-      if (openCut) openCut.end = now();
+      // An exclusion still open at close covers the entire media tail. Engines
+      // can flush frames beyond this wall-clock instant, so retain Infinity;
+      // planSegments clamps it to the actual final frame after recording flush.
+      if (tabSegments.length) tabSegments.at(-1).end = videoTime();
       logTranscript(`\n_Session closed ${new Date().toISOString()} (${reason})._\n`);
-      try { await context.close(); } catch { /* already gone */ } // flushes the .webm
+      try { if (!CDP_ENDPOINT) await context.close(); } catch { /* already gone */ } // flushes the .webm
       try { if (browser) await browser.close(); } catch { /* already gone */ } // no-op for persistent profiles
       await settleConsoleArgs();
       // Report the EXACT saved path so the caller gets the file it just recorded.
@@ -4694,7 +4795,18 @@ async function daemon() {
         logDaemon(`engine '${engine}' recorded no video (expected ${webm})`);
         webm = null;
       }
-      const mp4 = webm ? finalizeRecording(webm, { speedMarks, keepMarks, cutMarks, stepMarks }) : null;
+      let compositionError = null;
+      if (webm && tabSegments.some((segment) => segment.page !== primaryPage)) {
+        try {
+          const sources = new Map();
+          for (const [p, source] of videoSources) sources.set(p, { path: await source.video.path(), origin: source.origin });
+          webm = composeTabRecording(tabSegments, sources);
+        } catch (error) {
+          compositionError = error.message;
+          note(`recording composition failed: ${compositionError}; all raw tab videos retained in ${VIDEO_DIR}`);
+        }
+      }
+      const mp4 = webm && !compositionError ? finalizeRecording(webm, { speedMarks, keepMarks, cutMarks, stepMarks }) : null;
       if (mp4 && !keepRaw) {
         // The mp4 is the deliverable — the raw .webm is just its temp source.
         // Keep it only when the mp4 could not be written (it's the sole recording),
@@ -4706,7 +4818,7 @@ async function daemon() {
       if (webm || mp4) logTranscript(`_Recording saved: ${mp4 || webm}_\n`);
       // Carried out with the paths: only the finalizer knows WHY there is no mp4,
       // and `close` is the one place anybody reads that.
-      const mp4Fail = !mp4 && webm ? ffmpegFailNote() : null;
+      const mp4Fail = compositionError || (!mp4 && webm ? ffmpegFailNote() : null);
       return { webm, mp4, mp4Fail };
     })();
     return closePromise;
@@ -5401,6 +5513,8 @@ async function daemon() {
 
   async function withSelectorHint(e, selector, hiddenOnly = false) {
     if (!selector) return e;
+    if (selector.startsWith("@") && /aria-ref|stale|not found|No element/i.test(e?.message || ""))
+      return new Error(`reference ${selector} is no longer available; run 'browse snapshot --refs' again`);
     let n = -1;
     // Bad syntax: nothing can be counted, so there is no "did you mean" to give -
     // except for the one malformed selector we can name exactly.
@@ -5536,11 +5650,13 @@ async function daemon() {
       `${REMOTE_SIDE ? "; a box's disk is what 'browse box up --size' picks" : ""}.`);
   }
 
+  let dispatchedCommands = 0;
   async function dispatch(cmd, args, ai, signal) {
+    const firstCommand = dispatchedCommands++ === 0;
     const stripped = takeDialogFlag(args);
     const armed = stripped !== args;
     try {
-      return await dispatchCmd(cmd, stripped, ai, signal);
+      return await dispatchCmd(cmd, stripped, ai, signal, firstCommand);
     } catch (e) {
       throw withCrashCause(e);
     } finally {
@@ -5548,7 +5664,9 @@ async function daemon() {
     }
   }
 
-  async function dispatchCmd(cmd, args, ai, signal) {
+  async function dispatchCmd(cmd, args, ai, signal, firstCommand = false) {
+    if (CDP_ENDPOINT && (["init", "middleware", "emulate"].includes(cmd) || (cmd === "state" && args.includes("--load"))))
+      throw new Error(`${cmd}: unavailable on a borrowed CDP context; launch a browse-owned session for persistent scripts, interception or emulation`);
     if (cmd === "ai") {
       const options = { ...(args[0] === "task" ? parseTask(args) : parseAI(args)), clearWithKeys: USING_CAMOUFOX };
       if (!ai?.key) throw new Error("ai: missing TypeSafe credentials; update the client");
@@ -5623,7 +5741,7 @@ async function daemon() {
         return `ok - ${await brief()}${authWallNote(page.url())}`;
       }
       if (cmd === "goto" && !url) throw new Error(`goto: needs a url, e.g. browse goto ${APP_DEFAULT}/settings`);
-      await page.goto(url || APP_DEFAULT, { waitUntil: "domcontentloaded", timeout: timeout || 20000 });
+      if (!(CDP_ENDPOINT && cmd === "open" && !url)) await page.goto(url || APP_DEFAULT, { waitUntil: "domcontentloaded", timeout: timeout || 20000 });
       const wall = authWallNote(url || APP_DEFAULT);
       if (cmd === "goto") return `ok - ${await brief()}${wall}`;
       // Report the engine we ACTUALLY got, once. A camoufox→chromium fallback
@@ -5898,23 +6016,45 @@ async function daemon() {
     }
     switch (cmd) {
       case "snapshot": {
-        if (args.length > 1 || args[0]?.startsWith("--")) throw new Error("snapshot: takes one optional selector");
-        // No fallback: `page.accessibility` is gone from the pinned Playwright
-        // (1.61 — `typeof page.accessibility === "undefined"`), so the old
-        // `catch` turned every real ariaSnapshot failure (mid-navigation, a
-        // detached frame, a destroyed execution context) into
-        // "Cannot read properties of undefined (reading 'snapshot')" — a browse
-        // crash, as far as the caller could tell. Let the real reason through.
-        const read = async () => {
-          try { return await L(args[0] || "body").ariaSnapshot(); }
-          catch (e) {
-            if (/execution context|destroyed|detached|has been closed/i.test(e.message))
-              throw new Error(`${e.message}\nnote: the page navigated while it was being read - run 'browse snapshot' again`);
-            throw e;
-          }
-        };
-        const { out, note: settle } = await readSettled(read);
-        return `${await brief()}\n\n${clipForRead(out, "snapshot", "narrow with 'browse snapshot <selector>', or select an iframe with 'browse target <iframe>'", 6000)}${settle}`;
+        let selector = "body", scoped = false, compact = false, refs = false, timeout = 4000;
+        for (let i = 0; i < args.length; i++) {
+          const arg = args[i];
+          if (arg === "--compact") compact = true;
+          else if (arg === "--refs") refs = true;
+          else if (arg === "--timeout") {
+            const value = args[++i];
+            if (!/^\d+$/.test(value || "") || Number(value) < 1) throw new Error("snapshot: --timeout wants positive milliseconds");
+            timeout = Number(value);
+          } else if (arg.startsWith("-")) throw new Error(`snapshot: unknown flag '${arg}'`);
+          else if (scoped) throw new Error(`snapshot: unexpected argument '${arg}'`);
+          else { selector = arg; scoped = true; }
+        }
+        const locator = L(selector);
+        references.clear();
+        await locator.waitFor({ state: "attached", timeout });
+        const { out: raw, note: settle } = await readSettled(() => locator.ariaSnapshot({ mode: refs ? "ai" : "default", timeout }));
+        let lines = raw.split("\n");
+        if (compact) {
+          const keep = new Set();
+          const parents = [];
+          const interactive = /^\s*- (?:button|link|textbox|searchbox|checkbox|radio|combobox|listbox|option|slider|spinbutton|switch|tab|menuitem(?:checkbox|radio)?|treeitem)\b/;
+          lines.forEach((line, i) => {
+            const indent = line.length - line.trimStart().length;
+            while (parents.length && parents.at(-1).indent >= indent) parents.pop();
+            if (interactive.test(line)) { keep.add(i); for (const parent of parents) keep.add(parent.i); }
+            if (/^\s*- /.test(line)) parents.push({ i, indent });
+          });
+          lines = lines.filter((_, i) => keep.has(i));
+        }
+        let out = lines.join("\n") || "(no accessible controls in this scope)";
+        // Assign aliases only to references actually visible in the bounded result.
+        out = clipForRead(out, "snapshot", "pass a narrower selector to 'browse snapshot <selector>' or use --compact", 6000);
+        if (refs) out = out.replace(/\[ref=([^\]]+)\]/g, (_, native) => {
+          const key = `@e${++referenceSeq}`;
+          references.set(key, { native, page, frame: activeFrameSel });
+          return `[${key}]`;
+        });
+        return `${await brief()}\n\n${out}${settle}`;
       }
       case "text": {
         const sel = args[0] || "body";
@@ -6348,13 +6488,22 @@ async function daemon() {
             // Every tab says where it stands with the recording, on every listing -
             // the `target new` warning is easy to miss twenty commands later, and
             // that is exactly the tab whose work is happening off camera.
-            const tag = pages[i] === primaryPage ? " [recorded]"
-              : wantedPages.has(pages[i]) ? " [not in the video]"
-                : " [popup, cut from video]";
+            const tag = !VIDEO_ON ? " [video off]" : wantedPages.has(pages[i])
+              ? " [recorded when active]" : " [excluded, cut from video]";
             rows.push(`${i === activeIdx ? "*" : " "} ${i}  ${t ? t + " - " : ""}${pages[i].url()}${tag}`);
           }
           if (activeFrameSel) rows.push(`  frame scope: ${activeFrameSel} ('browse target top' to leave)`);
           return rows.join("\n");
+        }
+        if (a === "record") {
+          if (!VIDEO_ON) throw new Error("target record: video is off for this session");
+          if (args.length !== 2 || !["on", "off"].includes(args[1])) throw new Error("target record: use on or off for the active tab");
+          if (args[1] === "on") wantedPages.add(page); else wantedPages.delete(page);
+          activate(activeIdx);
+          // Startup can encode its first visible frame later than the daemon's
+          // clock starts. An explicit first-command opt-out excludes that lead-in.
+          if (firstCommand && args[1] === "off") cutMarks.find((cut) => cut.end === Infinity).start = 0;
+          return `tab ${activeIdx}: recording ${args[1]} from now; ${args[1] === "on" ? "included while active" : "time on this tab is cut"}`;
         }
         if (a === "top") {
           activeFrame = null; activeFrameSel = null;
@@ -6369,9 +6518,7 @@ async function daemon() {
           try { p = await context.newPage(); } // context.on("page") wires + activates it
           finally { openingTab = false; }
           if (args[1]) await p.goto(args[1], { waitUntil: "domcontentloaded", timeout: 20000 });
-          // The video follows tab 0 only. Say so, because a demo driven here
-          // looks perfect on screen and shows up as a frozen tab 0 in the mp4.
-          return `tab ${pages.indexOf(p)} - ${await brief()}\nnote: the recording follows tab 0, so what you do here is NOT in the video - go back with 'browse target 0' for anything that must be seen. Leave tab 0 on a STATIC page first: motionless time there is cut automatically, but a spinner or live log keeps it in the clip at real time`;
+          return `tab ${pages.indexOf(p)} - ${await brief()}\nnote: ${VIDEO_ON ? "this deliberate tab is recorded while active" : "video is off for this session"}`;
         }
         if (a === "close") {
           // Two ways this ends a session by accident: the last page tears the
