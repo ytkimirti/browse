@@ -1230,10 +1230,17 @@ function popupSameTabInitScript() {
   }, true);
 }
 
-const HELP = `browse — drive a real Chromium browser step by step (records the whole session automatically).
+const HELP = `browse: drive a real browser with automatic session recording.
 
-Run one command, read the result, then run the next — this is agentic browsing,
-not a script. The browser + recording start on your first command.
+Prefer 'ai task' for multistep browser goals: open the starting URL, give the full
+goal in one task, then close to save the recording. Browse observes the page,
+asks TypeSafe for the next action, executes it and repeats without caller turns.
+Describe the outcome and supply text to type; no page inspection or scripted
+click sequence is needed from the calling agent. Read the returned outcome:
+a stopped task is partial progress. Inspect its recorded steps before resuming.
+Use individual commands for a known selector, an exact assertion, debugging,
+or an interaction outside the task action set. The browser + recording start
+on your first command. TypeSafe credentials: see 'browse help --env'.
 
 Navigate / act (selectors are Playwright strings: text=, role=button[name="…"], css, xpath=…):
   browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser + recording
@@ -1286,8 +1293,8 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     nothing open is an error. A 'toast' inside the region is
                                     fast-forwarded with it, so show captions OUTSIDE it.
 
-Observe (do these often — this is your "check" step):
-  browse ai task <goal>                execute a multistep goal from fresh DOM observations
+AI tasks (preferred for multistep goals):
+  browse ai task <goal>                delegate the whole goal using fresh DOM observations
     --max-steps <n>                    at most n actions (default 12, max 50)
     --task-timeout <ms>                total budget (default 120000, max 600000)
     --timeout <ms>                     per API/action budget (default 10000, max 60000)
@@ -1296,7 +1303,8 @@ Observe (do these often — this is your "check" step):
     --scope <selector>                observe/act inside one region (default body)
     Double-quoted strings in the goal are also available as literal input values.
     Chooses click, fill, Enter, native select, scroll, wait, done, or blocked.
-    Stops on uncertainty, stale targets, repeated actions, limits, or caller cancellation.
+    Reconsiders rejected proposals and stale decisions before execution; never retries
+    an action with an unknown outcome. Stops when blocked, uncertain or over budget.
     Each action is recorded. Completion without --until is a model judgment (p>=0.8).
     Page text, goal, controls and history go to TypeSafe; supplied --value contents do not.
   browse ai click|hover <description>   choose a real element with TypeSafe, then act once
@@ -1309,8 +1317,11 @@ Observe (do these often — this is your "check" step):
     Sends element labels/context or assertion text to TypeSafe. Max 200 elements or
     12000 assertion characters; requests capped at 24000 bytes. Narrow scope on overflow.
     Input values and cookies are excluded; text rendered elsewhere on the page may contain them.
-    Open a page first. Known selectors are faster and free. API timing/tokens in output.
-    Key comes from TYPESAFE_API_KEY or the caller's .env; help --env for configuration.
+    Open a page first. For a single known target, a selector avoids an API call.
+    API timing/tokens are reported in output.
+    Key comes from TYPESAFE_API_KEY, a credential file or .env; help --env for precedence.
+
+Observe / diagnose (for individual actions or a stopped task):
   browse snapshot [selector]        accessibility tree of the page or one region (what a user/AT sees)
   browse text [selector]            visible text (whole page if no selector)
   browse title | url                page title / current URL
@@ -1569,7 +1580,11 @@ Env-only (set once in a shell profile — no flag):
                            derived from the session name, and this overrides that)
   TYPESAFE_API_KEY         TypeSafe key, used only by 'ai'; sent over the existing SSH tunnel
                           for remote sessions, never saved in browse artifacts
-  TYPESAFE_ENV_FILE        read only TYPESAFE_API_KEY from this file (default caller's .env)
+  TYPESAFE_ENV_FILE        explicitly select a credential file; no other files tried when set
+                           Otherwise read the caller's .env, then ~/.browse/typesafe.env
+                           (under BROWSE_HOME when set). TYPESAFE_API_KEY always wins.
+                           Store the user-wide key in typesafe.env with owner-only mode 0600:
+                           TYPESAFE_API_KEY=<your-key>. Only this named key is read.
   TYPESAFE_API_URL         loopback HTTP test server override; production endpoint is fixed
   BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
   BROWSE_WIDTH / _HEIGHT   viewport one dimension at a time (BROWSE_VIEWPORT sets both)

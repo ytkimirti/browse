@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { homedir } from 'node:os';
 
 const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 const USAGE = 'ai: use click|hover <description>, fill <description> <value>, or assert <condition>; options: --scope <selector>, --timeout <ms>, --dry-run';
@@ -33,14 +34,22 @@ export function parseAI(args) {
 export function aiConfig(env = process.env, cwd = process.cwd()) {
   let key = env.TYPESAFE_API_KEY;
   if (!key) {
-    const file = resolve(cwd, env.TYPESAFE_ENV_FILE || '.env');
-    let source = '';
-    try { source = readFileSync(file, 'utf8'); }
-    catch (e) { if (env.TYPESAFE_ENV_FILE || e.code !== 'ENOENT') throw new Error('ai: cannot read TYPESAFE_ENV_FILE'); }
-    const match = source.match(/^\s*(?:export\s+)?TYPESAFE_API_KEY\s*=\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s#]*))\s*(?:#.*)?$/m);
-    key = match && (match[1] ?? match[2] ?? match[3]);
+    const files = env.TYPESAFE_ENV_FILE
+      ? [resolve(cwd, env.TYPESAFE_ENV_FILE)]
+      : [resolve(cwd, '.env'), resolve(env.BROWSE_HOME || resolve(homedir(), '.browse'), 'typesafe.env')];
+    for (const file of files) {
+      let source;
+      try { source = readFileSync(file, 'utf8'); }
+      catch (e) {
+        if (!env.TYPESAFE_ENV_FILE && e.code === 'ENOENT') continue;
+        throw new Error('ai: cannot read TypeSafe credential file');
+      }
+      const match = source.match(/^\s*(?:export\s+)?TYPESAFE_API_KEY\s*=\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s#]*))\s*(?:#.*)?$/m);
+      key = match && (match[1] ?? match[2] ?? match[3]);
+      if (key?.trim()) break;
+    }
   }
-  if (!key?.trim()) throw new Error('ai: set TYPESAFE_API_KEY or put it in .env (TYPESAFE_ENV_FILE selects another file)');
+  if (!key?.trim()) throw new Error('ai: set TYPESAFE_API_KEY or put it in ~/.browse/typesafe.env or .env (TYPESAFE_ENV_FILE selects another file)');
   const endpoint = env.TYPESAFE_API_URL || ENDPOINT;
   const url = new URL(endpoint);
   if (endpoint !== ENDPOINT && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)))
