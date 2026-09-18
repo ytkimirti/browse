@@ -6,6 +6,11 @@ model chooses one concrete action, browse executes and records it, then observes
 the changed page before deciding again. The calling agent resumes when the task
 finishes or stops. Help defines the commands, limits and configuration.
 
+For an autonomous demonstration, open the starting URL, give one outcome-oriented
+task, then close the recording. Let the task choose the interactions. Do not
+replace the goal with caller-authored clicks, selectors or page scripts. The loop
+follows visible dialogs, waits for UI transitions and remembers visited views.
+
 Describe the intended outcome and any required order. Supply text to type as
 quoted literals in the goal, or named values when the content should stay out of
 the model request. TypeSafe chooses among those strings; it cannot compose new
@@ -32,10 +37,13 @@ commands when the flow needs a capability outside the task action set.
 Use exact selectors when already known. The single-action AI commands remain
 useful when the calling agent needs to decide each step itself.
 
-TypeSafe chooses only among actual enabled elements. Missing, uncertain, changed
-or detached targets fail without an action. Narrow the region or inspect a
-snapshot after a refusal. Rephrase with the visible label when a description is
-too vague. Repeating the same request does not fix ambiguity.
+TypeSafe chooses only among actual enabled elements. Task mode pairs the input
+target and supplied value in one decision. An uncertain task choice can receive
+a separate progress check; rejected proposals are reconsidered without clicking.
+These model scores are heuristics, not independent evidence of correctness.
+Missing or detached targets are never acted on. Narrow the region or inspect the
+recorded evidence after a refusal. Rephrase with the visible label when a
+description is too vague. Repeating the same request does not fix ambiguity.
 Preview the selection when the intended target needs inspection before acting.
 The probability threshold measures model certainty; it does not establish user
 authorization or guarantee that a click has the intended business effect.
@@ -48,17 +56,21 @@ include it. The usual screenshots and recording show the resulting page.
 
 Prefer deterministic assertions for exact copy, counts, network responses and
 UI state. AI assertions judge visible text probabilistically; they do not inspect
-pixels or establish backend success. Canvas-only controls and closed shadow DOM
-need another browser primitive. Select an iframe explicitly before operating
+pixels or establish backend success. Task mode can click accessible grid cells
+drawn by a canvas when the DOM supplies their labels and positions. Opaque
+canvas controls and closed shadow DOM need another browser primitive. Select an iframe explicitly before operating
 inside it. AI fill replaces the value immediately; use regular typing commands
 when paced typing is part of the recording.
 
 Answers include API latency and input tokens; tasks also report action and query counts. Compare full CLI duration,
 including recording and remote artifact transfer, when judging runtime savings.
-Known selectors make no model request and remain cheaper. There is no automatic
-retry of a failed action or cached selection: each decision observes the current page.
+Known selectors make no model request and remain cheaper. Task mode can refresh
+a stale decision rejected before execution and choose another action after a
+rejected proposal. It never retries an action with an unknown outcome. Each
+decision observes the current page; unchanged-page repetition is bounded.
 
-For remote runs, the calling client reads the credential and sends it through the
+Through the remote client, the calling client reads the credential and sends it through the
 existing SSH tunnel for that request. The Box needs this checkout's runtime
-modules, but no dotenv upload. An image or git refresh cannot include local
+modules, but no dotenv upload. Launching the CLI inside a Box instead uses the
+Box's own credential configuration. An image or git refresh cannot include local
 uncommitted code; check the build before measuring.

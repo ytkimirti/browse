@@ -51,12 +51,27 @@ export function aiConfig(env = process.env, cwd = process.cwd()) {
 // Runs in the browser. Keep the handles, so a rerender cannot redirect an index
 // to a different element between inference and execution. No DOM attributes added.
 function collect(root, action) {
-  const text = (el, limit = 500) => {
+  // Automatically follow modal pickers. Hidden background controls must not
+  // compete with the active dialog when the caller supplies only a goal.
+  if (action === 'task' && root === document.body) {
+    const dialogs = [...root.querySelectorAll('[role=dialog],dialog[open],[aria-modal=true]')].filter(el => {
+      const b = el.getBoundingClientRect(), style = getComputedStyle(el);
+      return b.width > 0 && b.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' &&
+        !el.closest('[hidden],[inert],[aria-hidden="true"]');
+    });
+    const focused = document.activeElement?.closest('[role=dialog],dialog[open],[aria-modal=true]');
+    root = dialogs.includes(focused) ? focused : dialogs.at(-1) || root;
+  }
+  const text = (el, limit = 500, viewportOnly = false) => {
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
     let out = '', node;
     while ((node = walker.nextNode())) {
       const parent = node.parentElement;
-      if (!parent || parent.closest('script,style,noscript,textarea,input,[contenteditable],[aria-hidden="true"]') || !parent.getClientRects().length || getComputedStyle(parent).visibility === 'hidden') continue;
+      if (!parent || parent.closest(`script,style,noscript,textarea,input,[contenteditable]${viewportOnly ? '' : ',[aria-hidden="true"]'}`) || !parent.getClientRects().length || getComputedStyle(parent).visibility === 'hidden') continue;
+      if (viewportOnly) {
+        const b=parent.getBoundingClientRect(),style=getComputedStyle(parent);
+        if ((b.width<=1&&b.height<=1)||b.bottom<=0||b.right<=0||b.top>=innerHeight||b.left>=innerWidth||style.clipPath==='inset(50%)') continue;
+      }
       out += ' ' + node.textContent.replace(/\s+/g, ' ').trim();
       if (out.length > limit) break;
     }
@@ -103,9 +118,27 @@ function collect(root, action) {
     if (el.shadowRoot) for (const child of el.shadowRoot.children) visit(child);
   };
   visit(root);
-  const candidates = nodes.map((el, i) => ({ id: `e${i}`, ...describe(el) }));
+  const candidates = nodes.map((el, i) => {
+    const description=describe(el), displayed=action==='task' ? text(el,160,true) : '';
+    return {id:`e${i}`,...description,...(displayed && !description.name.includes(displayed) ? {displayed} : {})};
+  });
+  // Some accessible grids expose semantic cells behind the canvas that draws
+  // them. Only accept that representation when the cell center hits the same
+  // grid canvas in its semantic region. Arbitrary covering elements stay blocked.
+  const canvasFor = el => {
+    if (!el.matches('[role=button],[role=gridcell]')) return null;
+    const b=el.getBoundingClientRect(), x=b.x+b.width/2, y=b.y+b.height/2;
+    const hit=document.elementFromPoint(x,y);
+    if (!hit?.matches('canvas[role=grid]')) return null;
+    const c=hit.getBoundingClientRect();
+    const region='[role=dialog],[role=tabpanel],[role=region],section,main';
+    if (b.width<=0 || b.height<=0 || x<c.left || x>c.right || y<c.top || y>c.bottom ||
+        !el.closest(region) || el.closest(region)!==hit.closest(region)) return null;
+    return hit;
+  };
+  const canvases = nodes.map(canvasFor);
   const taskVersion = () => JSON.stringify([text(root,6001), document.title, nodes.map(fingerprint)]);
-  return { root, nodes, candidates, taskVersion, version: action === 'task' ? taskVersion() : undefined, taskText: action === 'task' ? text(root, 6001) : undefined,
+  return { root, nodes, candidates, canvases, canvasFor, taskVersion, version: action === 'task' ? taskVersion() : undefined, taskText: action === 'task' ? text(root, 6001, true) : undefined,
     title: document.title.slice(0, 240), headings: [...root.querySelectorAll('h1,h2,[role=heading]')].slice(0, 12).map(e => text(e, 120)), describe, fingerprint, fingerprints: nodes.map(fingerprint) };
 }
 
@@ -185,7 +218,7 @@ export async function actOnCapture(captured, index, options, beforeAction = asyn
   const element = (await captured.evaluateHandle((s, i) => s.nodes[i], index)).asElement();
   const unchanged = () => captured.evaluate((s, i) => s.nodes[i].isConnected && s.fingerprint(s.nodes[i]) === s.fingerprints[i], index);
   try {
-    if (!await unchanged()) throw new Error('ai: target changed during inference; inspect again; no action taken');
+    if (!await unchanged()) throw Object.assign(new Error('ai: target changed during inference; no action taken'), {code:'AI_STALE'});
     if (!dryRun) {
       const deadline = performance.now() + timeout;
       const remaining = () => {
@@ -195,7 +228,7 @@ export async function actOnCapture(captured, index, options, beforeAction = asyn
         return ms;
       };
       await beforeAction(element, action);
-      if (!await unchanged()) throw new Error('ai: target changed before execution; no action taken');
+      if (!await unchanged()) throw Object.assign(new Error('ai: target changed before execution; no action taken'), {code:'AI_STALE'});
       try {
         if (action === 'fill') {
           // Camoufox's native fill can append to an existing value. Explicit
@@ -207,6 +240,18 @@ export async function actOnCapture(captured, index, options, beforeAction = asyn
           await element.fill(options.value, { timeout: remaining() });
           const actual = await element.evaluate(el => el.isContentEditable ? el.textContent : el.value);
           if (actual !== options.value) throw new Error('ai: field did not retain the requested value; inspect it before continuing');
+        }
+        else if (action === 'click' && await captured.evaluate((s,i)=>!!s.canvases?.[i],index)) {
+          const handle=await captured.evaluateHandle((s,i)=>s.canvases[i],index);
+          try {
+            const point=await captured.evaluate((s,i)=>{
+              const el=s.nodes[i],canvas=s.canvases[i];
+              if (!canvas.isConnected || s.canvasFor(el)!==canvas) throw new Error('ai: canvas target changed; no action taken');
+              const b=el.getBoundingClientRect(),c=canvas.getBoundingClientRect(),style=getComputedStyle(canvas);
+              return {x:b.x+b.width/2-c.x-(parseFloat(style.borderLeftWidth)||0),y:b.y+b.height/2-c.y-(parseFloat(style.borderTopWidth)||0)};
+            },index);
+            await handle.asElement().click({position:point,timeout:remaining()});
+          } finally { await handle.dispose(); }
         }
         else if (action === 'enter') await element.press('Enter', { timeout: remaining() });
         else if (action === 'select') await element.selectOption({ index: options.optionIndex }, { timeout: remaining() });
