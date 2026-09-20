@@ -37,7 +37,7 @@ try {
   fails(['--camoufox', '--device-scale', '2', 'open', 'about:blank'], /requires --chromium/);
   fails(['--cdp', 'http://localhost:1', '--no-video', '--device-scale', '2', 'open'], /borrows the existing browser settings/);
   assert.match(ok(['whoami']), /not running/);
-  ok(['--chromium', '--device-scale', '2', '--viewport', '360x240', 'open', `file://${page}`]);
+  ok(['--chromium', '--viewport', '360x240', 'open', `file://${page}`]);
   assert.deepEqual(JSON.parse(ok(['eval', 'JSON.stringify([innerWidth,innerHeight,devicePixelRatio])'])), [360,240,2]);
   ok(['screenshot', 'page.png']); assert.deepEqual(dimensions('page.png'), [720,480]);
   ok(['screenshot', 'card.png', '--sel', '#card']); assert.deepEqual(dimensions('card.png'), [200,160]);
@@ -52,13 +52,14 @@ try {
   assert.equal(corner.status, 0, corner.stderr.toString());
   assert.ok(corner.stdout.length >= 3);
   assert.ok(corner.stdout[0] > 150 && corner.stdout[1] < 80 && corner.stdout[2] < 80, 'Bottom-right marker survives video downscaling');
-  ok(['--no-video', '--viewport', '360x240', 'open', `file://${page}`]);
+  ok(['--device-scale', '1', '--no-video', '--viewport', '360x240', 'open', `file://${page}`]);
   assert.equal(ok(['eval', 'devicePixelRatio']), '1');
+  ok(['screenshot', 'one-x.png']); assert.deepEqual(dimensions('one-x.png'), [360,240]);
   ok(['close']);
   ok(['--no-video', '--viewport', '360x240', 'open', `file://${page}`], { BROWSE_DEVICE_SCALE:'1.5' });
   assert.equal(ok(['eval', 'devicePixelRatio']), '1.5');
   ok(['close']);
-  ok(['--chromium', '--device-scale', '2', '-p', session, '--no-video', '--viewport', '360x240', 'open', `file://${page}`]);
+  ok(['--chromium', '-p', session, '--no-video', '--viewport', '360x240', 'open', `file://${page}`]);
   assert.equal(ok(['eval', 'devicePixelRatio']), '2');
   ok(['screenshot', 'persistent.png']); assert.deepEqual(dimensions('persistent.png'), [720,480]);
   ok(['close']);

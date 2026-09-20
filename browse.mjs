@@ -450,7 +450,7 @@ const VIEWPORT = (() => {
 // locale=` from ours with "Another locale override is already in effect".
 const LOCALE = process.env.BROWSE_LOCALE || "en-US";
 const HEADFUL = process.env.BROWSE_HEADFUL === "1";
-const DEVICE_SCALE = Number(process.env.BROWSE_DEVICE_SCALE ?? 1);
+const DEVICE_SCALE = Number(process.env.BROWSE_DEVICE_SCALE ?? 2);
 // Which browser the daemon drives. `camoufox` is a Firefox build with
 // fingerprint patches applied in C++ — it clears Cloudflare's JS managed
 // challenge *headlessly*, which Chromium cannot do at all (its new-headless
@@ -1519,8 +1519,8 @@ session; on an already-live session browse refuses rather than ignoring them):
   --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
                                     use to RECORD phone-shaped; 'browse emulate viewport=' only
                                     resizes the page inside an already-fixed frame
-  --device-scale <number>           Chromium pixel density (1..3, default 1). Use 2 for native
-                                    Retina screenshots: twice the pixels, same CSS layout. Video
+  --device-scale <number>           Chromium pixel density (1..3, default 2). Native Retina
+                                    screenshots: twice the pixels, same CSS layout. Video
                                     keeps the viewport dimensions. Does not emulate macOS fonts.
   --cursor / --no-cursor            animated on-page cursor overlay — the real macOS pointer,
                                     at its real size (BROWSE_CURSOR_SCALE to enlarge it)
@@ -1582,7 +1582,7 @@ Every launch flag is also an env var (a flag on the command WINS over the env):
   BROWSE_CDP=<endpoint>    --cdp (requires BROWSE_VIDEO=0; Chromium only)
   BROWSE_HEADFUL=1         --headful            BROWSE_ENGINE=camoufox|chromium  --camoufox/--chromium
   BROWSE_VIEWPORT=WxH      --viewport           BROWSE_CURSOR=0|1                --no-cursor/--cursor
-  BROWSE_DEVICE_SCALE=1..3 --device-scale (Chromium; default 1)
+  BROWSE_DEVICE_SCALE=1..3 --device-scale (Chromium; default 2, Camoufox stays at 1)
   BROWSE_KEYLOG=0|1        --no-keylog/--keylog BROWSE_POPUPS=0|1                --no-popups/--popups
   BROWSE_NET=0|1           --no-net/--net       BROWSE_TYPE_DELAY=<ms>           --type-delay
   BROWSE_VIDEO=0|1         --no-video/--video
