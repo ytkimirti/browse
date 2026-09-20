@@ -450,6 +450,7 @@ const VIEWPORT = (() => {
 // locale=` from ours with "Another locale override is already in effect".
 const LOCALE = process.env.BROWSE_LOCALE || "en-US";
 const HEADFUL = process.env.BROWSE_HEADFUL === "1";
+const DEVICE_SCALE = Number(process.env.BROWSE_DEVICE_SCALE ?? 1);
 // Which browser the daemon drives. `camoufox` is a Firefox build with
 // fingerprint patches applied in C++ — it clears Cloudflare's JS managed
 // challenge *headlessly*, which Chromium cannot do at all (its new-headless
@@ -1518,6 +1519,9 @@ session; on an already-live session browse refuses rather than ignoring them):
   --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
                                     use to RECORD phone-shaped; 'browse emulate viewport=' only
                                     resizes the page inside an already-fixed frame
+  --device-scale <number>           Chromium pixel density (1..3, default 1). Use 2 for native
+                                    Retina screenshots: twice the pixels, same CSS layout. Video
+                                    keeps the viewport dimensions. Does not emulate macOS fonts.
   --cursor / --no-cursor            animated on-page cursor overlay — the real macOS pointer,
                                     at its real size (BROWSE_CURSOR_SCALE to enlarge it)
   --keylog / --no-keylog            keystroke overlay — both default ON on both engines. Each is
@@ -1578,6 +1582,7 @@ Every launch flag is also an env var (a flag on the command WINS over the env):
   BROWSE_CDP=<endpoint>    --cdp (requires BROWSE_VIDEO=0; Chromium only)
   BROWSE_HEADFUL=1         --headful            BROWSE_ENGINE=camoufox|chromium  --camoufox/--chromium
   BROWSE_VIEWPORT=WxH      --viewport           BROWSE_CURSOR=0|1                --no-cursor/--cursor
+  BROWSE_DEVICE_SCALE=1..3 --device-scale (Chromium; default 1)
   BROWSE_KEYLOG=0|1        --no-keylog/--keylog BROWSE_POPUPS=0|1                --no-popups/--popups
   BROWSE_NET=0|1           --no-net/--net       BROWSE_TYPE_DELAY=<ms>           --type-delay
   BROWSE_VIDEO=0|1         --no-video/--video
@@ -2739,6 +2744,7 @@ const LAUNCH_FLAGS = Object.assign(Object.create(null), {
 const LAUNCH_OPTS = Object.assign(Object.create(null), {
   "--cdp": { env: "BROWSE_CDP", check: (v) => { try { return ["http:", "https:", "ws:", "wss:"].includes(new URL(v).protocol); } catch { return false; } }, want: "an http(s) or ws(s) browser endpoint" },
   "--viewport": { env: "BROWSE_VIEWPORT", check: (v) => /^\d+\s*[x×,]\s*\d+$/.test(v), want: "WxH, e.g. 390x844" },
+  "--device-scale": { env: "BROWSE_DEVICE_SCALE", check: (v) => /^\d+(?:\.\d+)?$/.test(v) && Number(v) >= 1 && Number(v) <= 3, want: "a number from 1 to 3, e.g. 2 for Retina (Chromium)" },
   "--type-delay": { env: "BROWSE_TYPE_DELAY", check: (v) => /^\d+$/.test(v), want: "milliseconds, e.g. 0 (paste) or 45" },
   "--idle": { env: "BROWSE_IDLE_MS", check: (v) => /^\d+$/.test(v), want: "milliseconds, e.g. 600000 (0 = never auto-close)" },
 });
@@ -2767,14 +2773,22 @@ const POST_FLAGS = new Set([
   "--body", "--bodies", "--level", "--dir", "--path",
 ]);
 
+function validateDeviceScale(env) {
+  if (env.BROWSE_DEVICE_SCALE === undefined) return;
+  if (!LAUNCH_OPTS["--device-scale"].check(String(env.BROWSE_DEVICE_SCALE)))
+    throw new Error("BROWSE_DEVICE_SCALE wants a number from 1 to 3");
+  if (Number(env.BROWSE_DEVICE_SCALE) !== 1 && env.BROWSE_ENGINE !== "chromium")
+    throw new Error("--device-scale above 1 requires --chromium; Camoufox recording uses a fixed 1x paint scale");
+}
+
 function validateCdpLaunch(env, profile) {
   if (!env.BROWSE_CDP) return;
   if (!LAUNCH_OPTS["--cdp"].check(env.BROWSE_CDP)) throw new Error("--cdp wants an http(s) or ws(s) browser endpoint (endpoint hidden)");
   if (env.BROWSE_VIDEO !== "0") throw new Error("--cdp requires explicit --no-video: an existing context cannot start Playwright video recording");
   if (profile) throw new Error("--cdp cannot use a local persistent profile");
   if (env.BROWSE_ENGINE && env.BROWSE_ENGINE !== "chromium") throw new Error("--cdp requires Chromium; remove --camoufox");
-  if (["BROWSE_HEADFUL", "BROWSE_VIEWPORT", "BROWSE_CURSOR", "BROWSE_KEYLOG", "BROWSE_POPUPS"].some((key) => env[key] !== undefined))
-    throw new Error("--cdp borrows the existing browser settings; omit headful, viewport, cursor, keylog and popup launch overrides");
+  if (["BROWSE_HEADFUL", "BROWSE_VIEWPORT", "BROWSE_DEVICE_SCALE", "BROWSE_CURSOR", "BROWSE_KEYLOG", "BROWSE_POPUPS"].some((key) => env[key] !== undefined))
+    throw new Error("--cdp borrows the existing browser settings; omit headful, viewport, device-scale, cursor, keylog and popup launch overrides");
 }
 
 async function client(argv) {
@@ -2849,6 +2863,7 @@ async function client(argv) {
   }
   if (process.env.BROWSE_PREFLIGHT === "1") {
     validateCdpLaunch({ ...process.env, ...LAUNCH_ENV }, PROFILE);
+    validateDeviceScale({ ...process.env, ...LAUNCH_ENV });
     return 0;
   }
   if (process.env.BROWSE_LIVE_ONLY === "1") return (await findDaemon()) ? 0 : 3;
@@ -4131,6 +4146,7 @@ async function daemon() {
   // so the note stays one actionable line and the full text goes to browsed.log.
   const fallback = (note, detail) => { engineNote = note; logDaemon(detail ? `${note} :: ${detail}` : note); };
   validateCdpLaunch(process.env, PROFILE);
+  validateDeviceScale(process.env);
   let engine = CDP_ENDPOINT ? "chromium" : ENGINE, camouOpts = null;
   const requireEngine = !!PROFILE || !!process.env.BROWSE_ENGINE;
   if (engine === "camoufox") {
@@ -4208,12 +4224,14 @@ async function daemon() {
         // human login session showed. Headless keeps the fixed viewport because
         // recording dimensions and deterministic layout depend on it.
         ...(camou && HEADFUL ? { noViewport: true } : { viewport: VIEWPORT }),
+        ...(camou ? {} : { deviceScaleFactor: DEVICE_SCALE }),
         recordVideo, args, ...extra,
       }) };
     }
     const b = await launcher.launch({ headless: !HEADFUL, args, ...extra });
     return { browser: b, context: await b.newContext({
       ...(camou && HEADFUL ? { noViewport: true } : { viewport: VIEWPORT }), recordVideo,
+      ...(camou ? {} : { deviceScaleFactor: DEVICE_SCALE }),
     }) };
   };
 

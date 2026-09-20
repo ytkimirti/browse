@@ -56,6 +56,15 @@ sharing; retaining raw sources deliberately also retains those excluded screens.
 
 ## Comparable stills
 
+For typography reviews, capture on the target OS. A Linux Box resolves system
+fonts differently from macOS; changing its user agent or pixel density does not
+reproduce Mac fonts or rasterization. Use Chromium's device-scale launch option
+from help for native Retina pixels, and report the host OS and density.
+
+Keep screenshot pixels intact when composing comparison sheets. Display a Retina
+image at its CSS dimensions with the image's display width; enlarging a low-density
+bitmap with an image editor blurs glyphs and can make the text look heavier.
+
 Match viewport, theme, data, scroll and hover state across an A/B pair. Keep the
 normal viewport when capturing popups: shrinking it to crop a tooltip can flip
 the tooltip's placement. Inspect the saved images, especially tall elements under

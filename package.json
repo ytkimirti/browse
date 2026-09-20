@@ -13,7 +13,7 @@
   "engines": { "node": ">=18" },
   "os": ["darwin", "linux"],
   "scripts": {
-    "test:features": "node test/browser-features.test.mjs && node test/cdp.test.mjs",
+    "test:features": "node test/browser-features.test.mjs && node test/cdp.test.mjs && node test/device-scale.test.mjs",
     "test:package": "node test/packaging.test.mjs"
   },
   "private": false
