@@ -519,6 +519,66 @@ const INIT_STUBS = {
 })()`,
 };
 
+const INIT_TRY = "try init <js> | --stub <name> | --file <path> | --label <name> | --remove <#> | --clear";
+/** `init`'s arguments, checked on BOTH sides: the client refuses a malformed
+ *  one before it starts a browser for it, and the daemon parses the same way. A
+ *  stub comes back as its source; a --file does not, since only the client can
+ *  read it (see initFileSource). */
+function parseInit(args) {
+  let src = null, file = null, clear = false, remove = null, label = null, stub = null;
+  const need = (flag, i) => {
+    const v = args[i];
+    // Without this, `init --remove` (no #) fell through to the LISTING and
+    // exited 0, so "nothing was removed" read as "removed".
+    if (v == null || String(v).startsWith("--")) throw new Error(`init: ${flag} needs a value - ${INIT_TRY}`);
+    return v;
+  };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--clear") clear = true;
+    else if (a === "--remove") remove = need(a, ++i);
+    else if (a === "--file") file = need(a, ++i);
+    else if (a === "--label") label = need(a, ++i);
+    else if (a === "--stub") stub = need(a, ++i);
+    else if (a.startsWith("--")) throw new Error(`init: unknown flag '${a}' - ${INIT_TRY}`);
+    else if (src == null) src = a;
+    else src += " " + a; // an unquoted multi-word snippet
+  }
+  if (clear && (remove != null || file != null || src != null || stub != null)) throw new Error("init: --clear takes nothing else - it removes every registered script");
+  if (remove != null && (file != null || src != null || stub != null)) throw new Error("init: --remove <#> takes nothing else");
+  if (label != null && src == null && file == null && stub == null) throw new Error("init: --label names a script, so it needs one - init '<js>' --label <name>");
+  if (file != null && src) throw new Error("init: pass a snippet OR --file <path>, not both");
+  if (stub != null) {
+    if (src || file != null) throw new Error("init: --stub is a ready-made script, so it takes no snippet and no --file");
+    const body = INIT_STUBS[String(stub).toLowerCase()];
+    if (!body) throw new Error(`init: no stub '${stub}' - available: ${Object.keys(INIT_STUBS).join(", ")}`);
+    src = body;
+    // Labelled by default, and the label is the point: a "Copied!" badge
+    // photographed with a faked clipboard is indistinguishable from a real
+    // one, so the transcript has to say which it was.
+    label = label || `stub:${String(stub).toLowerCase()}`;
+  }
+  return { src, file, clear, remove, label };
+}
+/** A script about to be registered. A syntax error would otherwise fail
+ *  silently INSIDE the page on the next navigation, which reads as "the init
+ *  script did nothing". */
+function checkInitSource(src, what = "that snippet") {
+  if (!String(src).trim()) throw new Error(`init: ${what === "that snippet" ? "needs a js snippet" : `${what} is empty`}, e.g. browse init 'window.gtag = (...a) => (window.__ga ||= []).push(a)'`);
+  try { new Function(src); }
+  catch (e) { throw new Error(`init: ${what} does not parse - ${e.message}`); }
+}
+/** Read `init --file` HERE, on the client: the path is the caller's, and the
+ *  daemon may be on another machine (--remote) or in another directory. What it
+ *  gets is the source. Throws before any browser is started for it. */
+function initFileSource(file) {
+  let src;
+  try { src = readFileSync(resolve(file), "utf8"); }
+  catch (e) { throw new Error(`init: cannot read '${file}' (${e.code || e.message}; paths are resolved from the directory browse runs in, on this machine)`); }
+  checkInitSource(src, `'${file}'`);
+  return src;
+}
+
 // Capture and output use the same cadence. The pinned recorder is adapted
 // in this daemon before Playwright loads; the shared install is unchanged.
 const OUTPUT_FPS = (() => {
@@ -3188,13 +3248,21 @@ async function client(argv) {
     ai = aiConfig();
     if (!(await findDaemon())) throw new Error("ai: open a page in this session first");
   }
+  // `init` is checked, and its --file read, BEFORE a browser starts: as the first
+  // command it would otherwise launch the session and then fail, leaving a live
+  // session that refuses the launch flags of the retry.
+  let initSource;
+  if (cmd === "init") {
+    const p = parseInit(argv.slice(1));
+    if (p.file != null) initSource = initFileSource(p.file);
+    else if (p.src != null) checkInitSource(p.src);
+  }
   const d = await ensureDaemon();
-  // `init --file <path>` is read by the DAEMON, which sits in whatever directory
-  // the session was first opened from - a relative path would resolve against a
-  // directory the caller never chose. Resolve it here, where the cwd is theirs.
+  // The path only labels the script in the transcript; its source travels as
+  // initSource. Absolute, so the label names the file the caller meant.
   const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
   if (CLOSERS.has(cmd)) writeFileSync(runFile(SESSION), JSON.stringify({ ...d, phase: "closing" }));
-  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}) }, postTimeout(cmd, args));
+  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}), ...(initSource != null ? { initSource } : {}) }, postTimeout(cmd, args));
   if (res.ok) {
     let text = res.result == null ? "" : String(res.result);
     if (REMOTE) text = await landArtifacts(d, cmd, text);
@@ -5704,12 +5772,12 @@ async function daemon() {
   }
 
   let dispatchedCommands = 0;
-  async function dispatch(cmd, args, ai, signal) {
+  async function dispatch(cmd, args, ai, signal, initSource) {
     const firstCommand = dispatchedCommands++ === 0;
     const stripped = takeDialogFlag(args);
     const armed = stripped !== args;
     try {
-      return await dispatchCmd(cmd, stripped, ai, signal, firstCommand);
+      return await dispatchCmd(cmd, stripped, ai, signal, firstCommand, initSource);
     } catch (e) {
       throw withCrashCause(e);
     } finally {
@@ -5717,7 +5785,7 @@ async function daemon() {
     }
   }
 
-  async function dispatchCmd(cmd, args, ai, signal, firstCommand = false) {
+  async function dispatchCmd(cmd, args, ai, signal, firstCommand = false, initSource) {
     if (CDP_ENDPOINT && (["init", "middleware", "emulate"].includes(cmd) || (cmd === "state" && args.includes("--load"))))
       throw new Error(`${cmd}: unavailable on a borrowed CDP context; launch a browse-owned session for persistent scripts, interception or emulation`);
     if (cmd === "ai") {
@@ -6939,31 +7007,10 @@ async function daemon() {
         // Date.now" actually need - a post-load `eval` loses the race, and a
         // reload wipes it. addInitScript returns a Disposable, so a rule can be
         // taken back off without restarting the browser.
-        let src = null, file = null, clear = false, remove = null, label = null, stub = null;
-        for (let i = 0; i < args.length; i++) {
-          const a = args[i];
-          const initNeed = (flag, i) => {
-            const v = args[i];
-            // Without this, `init --remove` (no #) fell through to the LISTING and
-            // exited 0, so "nothing was removed" read as "removed".
-            if (v == null || String(v).startsWith("--")) throw new Error(`init: ${flag} needs a value - try init <js> | --stub <name> | --file <path> | --label <name> | --remove <#> | --clear`);
-            return v;
-          };
-          if (a === "--clear") clear = true;
-          else if (a === "--remove") remove = initNeed(a, ++i);
-          else if (a === "--file") file = initNeed(a, ++i);
-          else if (a === "--label") label = initNeed(a, ++i);
-          else if (a === "--stub") stub = initNeed(a, ++i);
-          else if (a.startsWith("--")) throw new Error(`init: unknown flag '${a}' - try init <js> | --stub <name> | --file <path> | --label <name> | --remove <#> | --clear`);
-          else if (src == null) src = a;
-          else src += " " + a; // an unquoted multi-word snippet
-        }
+        let { src, file, clear, remove, label } = parseInit(args);
         const list = () => initScripts.length
           ? initScripts.map((r) => `  #${r.i}  ${r.label ? r.label + "  " : ""}${r.src.length} chars`).join("\n")
           : "  (none)";
-        if (clear && (remove != null || file != null || src != null || stub != null)) throw new Error("init: --clear takes nothing else - it removes every registered script");
-        if (remove != null && (file != null || src != null || stub != null)) throw new Error("init: --remove <#> takes nothing else");
-        if (label != null && src == null && file == null && stub == null) throw new Error("init: --label names a script, so it needs one - init '<js>' --label <name>");
         if (clear) {
           const n = initScripts.length;
           for (const r of initScripts) await r.disposable.dispose().catch(() => { /* context going away */ });
@@ -6977,27 +7024,14 @@ async function daemon() {
           initScripts.splice(idx, 1);
           return `removed init script #${remove} - it stops running from the next navigation`;
         }
+        // The client read the file (it may be on another machine); this side
+        // never opens the path, which only labels the script.
         if (file != null) {
-          if (src) throw new Error("init: pass a snippet OR --file <path>, not both");
-          try { src = readFileSync(file, "utf8"); }
-          catch { throw new Error(`init: cannot read '${file}' (paths are resolved from the directory browse runs in)`); }
-        }
-        if (stub != null) {
-          if (src || file != null) throw new Error("init: --stub is a ready-made script, so it takes no snippet and no --file");
-          const body = INIT_STUBS[String(stub).toLowerCase()];
-          if (!body) throw new Error(`init: no stub '${stub}' - available: ${Object.keys(INIT_STUBS).join(", ")}`);
-          src = body;
-          // Labelled by default, and the label is the point: a "Copied!" badge
-          // photographed with a faked clipboard is indistinguishable from a real
-          // one, so the transcript has to say which it was.
-          label = label || `stub:${String(stub).toLowerCase()}`;
+          if (typeof initSource !== "string") throw new Error("init: --file arrived without its contents - the client reads the file, so update the client");
+          src = initSource;
         }
         if (src == null) return `${initScripts.length} init script${initScripts.length === 1 ? "" : "s"} registered\n${list()}`;
-        if (!String(src).trim()) throw new Error("init: needs a js snippet, e.g. browse init 'window.gtag = (...a) => (window.__ga ||= []).push(a)'");
-        // A syntax error would otherwise fail silently INSIDE the page on the
-        // next navigation, which reads as "the init script did nothing".
-        try { new Function(src); }
-        catch (e) { throw new Error(`init: that snippet does not parse - ${e.message}`); }
+        checkInitSource(src);
         const disposable = await context.addInitScript({ content: src });
         if (!disposable || typeof disposable.dispose !== "function") throw new Error("init: this Playwright build does not return a Disposable from addInitScript, so a script could never be removed - upgrade it (browse setup)");
         initScripts.push({ i: ++initSeq, src, label: label || null, disposable });
@@ -7069,8 +7103,8 @@ async function daemon() {
     req.setEncoding("utf8");
     req.on("data", (c) => (body += c));
     req.on("end", async () => {
-      let cmd = "?", args = [], hold = false, ai;
-      try { ({ cmd, args = [], hold = false, ai } = JSON.parse(body)); } catch { /* ignore */ }
+      let cmd = "?", args = [], hold = false, ai, initSource;
+      try { ({ cmd, args = [], hold = false, ai, initSource } = JSON.parse(body)); } catch { /* ignore */ }
       const send = (obj) => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obj)); };
       let ownsTask = false, ownsCommand = false, taskTimer;
       try {
@@ -7092,7 +7126,7 @@ async function daemon() {
           res.on("close", () => { if (!res.writableEnded) controller.abort(); });
         }
         const stepAt = now();
-        const out = await dispatch(cmd, args, ai, activeTask?.signal);
+        const out = await dispatch(cmd, args, ai, activeTask?.signal, initSource);
         const aiReadOnly = cmd === "ai" && (task || args[0] === "assert" || parseAI(args).dryRun);
         if (!CHAPTERLESS.has(cmd) && !aiReadOnly) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
         // Collapse any middleware faults raised since the last command into the
