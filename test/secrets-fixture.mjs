@@ -60,7 +60,11 @@ http.createServer((req, res) => {
   if (url === "/api/profile") {
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     return res.end('{"session":{"user":"KEEP-carol","avatar":"https://cdn.test/a.png?s=64"},' +
-      '"php":"https:\\/\\/x.test\\/cb?a=KEEP-php&token=RSECRET-php","go":"https://x.test/cb?a=KEEP-go\\u0026token=RSECRET-go"}');
+      '"php":"https:\\/\\/x.test\\/cb?a=KEEP-php&token=RSECRET-php","go":"https://x.test/cb?a=KEEP-go\\u0026token=RSECRET-go",' +
+      // A secret whose value holds a hashable shape AND plain text; a matrix
+      // param; a secret name that starts like a count; a decimal "pin".
+      `"cookie":"_s=${JWT}; csrf_token=RSECRET-mixed","matrix":"https://x.test/p;jsessionid=RSECRET-matrix?page=KEEP-matrix",` +
+      '"minioSecretKey":"RSECRET-minio","pin":12.5}');
   }
   // A bundle that starts with a slash and is full of `;`, `&` and `=`.
   if (url === "/lib.js") {

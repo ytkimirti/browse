@@ -88,7 +88,7 @@ try {
   const leaks = log.match(/[QHBFR]SECRET-[\w-]+/g) || [];
   check("no secret marker reaches network.jsonl", leaks.length === 0, [...new Set(leaks)].join(", "));
   check("no JWT reaches network.jsonl", !log.includes(JWT), "JWT found verbatim");
-  const keeps = ["KEEP-carol", "KEEP-php", "KEEP-go", "KEEP-step", "KEEP-lib", "KEEP-page", "KEEP-reqid", "KEEP-alice", "KEEP-bearer", "KEEP-bob", "KEEP-trace", "KEEP-next", "KEEP-q"];
+  const keeps = ["KEEP-matrix", "KEEP-carol", "KEEP-php", "KEEP-go", "KEEP-step", "KEEP-lib", "KEEP-page", "KEEP-reqid", "KEEP-alice", "KEEP-bearer", "KEEP-bob", "KEEP-trace", "KEEP-next", "KEEP-q"];
   const lost = keeps.filter((k) => !log.includes(k));
   check("harmless values survive", lost.length === 0, `lost: ${lost.join(", ")}`);
   check("a harmless number named like a secret survives", log.includes('\\"maxTokens\\":500'), "maxTokens missing");
@@ -125,6 +125,7 @@ try {
   try { profile = JSON.parse(p.resBody); } catch { /* checked below */ }
   check("compact JSON holding an '=' still parses, harmless url intact",
     profile?.session?.user === "KEEP-carol" && profile?.session?.avatar === "https://cdn.test/a.png?s=64", p.resBody);
+  check("a decimal next to a secret-looking name stays valid JSON", profile?.pin === 12.5, p.resBody);
   check("a PHP-escaped url loses its token", /^https:\/\/x\.test\/cb\?a=KEEP-php&token=<sha256:/.test(profile?.php || ""), profile?.php);
   check("a Go-escaped url loses its token", /^https:\/\/x\.test\/cb\?a=KEEP-go&token=<sha256:/.test(profile?.go || ""), profile?.go);
 
@@ -151,7 +152,7 @@ try {
   r = raw("wait", "#done");
   check("the page finished its requests", r.code === 0, `${r.code} ${r.err}`);
   const rawLog = logged(OUT_RAW, 5);
-  const want = ["HSECRET-bypass", "HSECRET-bearer-0123456789", "QSECRET-query", "BSECRET-pw", "FSECRET-pw", "RSECRET-token", "RSECRET-cookie", "RSECRET-csrf", "RSECRET-php", "RSECRET-go", "RSECRET-href", "RSECRET-input", JWT];
+  const want = ["HSECRET-bypass", "HSECRET-bearer-0123456789", "QSECRET-query", "BSECRET-pw", "FSECRET-pw", "RSECRET-token", "RSECRET-cookie", "RSECRET-csrf", "RSECRET-php", "RSECRET-go", "RSECRET-href", "RSECRET-input", "RSECRET-mixed", "RSECRET-matrix", "RSECRET-minio", JWT];
   const missing = want.filter((k) => !rawLog.includes(k));
   check("every secret is kept verbatim", missing.length === 0, `missing: ${missing.join(", ")}`);
   check("…and nothing is hashed", !rawLog.includes("<sha256:"), "found a hash");

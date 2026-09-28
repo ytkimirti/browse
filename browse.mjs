@@ -582,12 +582,16 @@ const NET_SECRET_WORD = /token|secret|passw|passphrase|bypass|signature|credenti
 const NET_SECRET_EXACT = /^(auth|xauth|sig|sid|pwd|pass|pin|otp|hmac)$/;
 /** Credential-flavoured names that carry none: a flag, a list of header NAMES,
  *  or a field ABOUT the secret (token_type, token_endpoint, passwordPolicy). */
-const NET_NOT_SECRET = /^(max|min|num|total|count)|^(accesscontrolallowcredentials|accesscontrolallowheaders|accesscontrolexposeheaders|accesscontrolrequestheaders|wwwauthenticate|proxyauthenticate)$|(type|count|expiresin|expiresat|expires|expiry|ttl|endpoint|url|uri|enabled|required|policy|limit)$/;
+const NET_NOT_SECRET = /^(accesscontrolallowcredentials|accesscontrolallowheaders|accesscontrolexposeheaders|accesscontrolrequestheaders|wwwauthenticate|proxyauthenticate)$|(type|count|expiresin|expiresat|expires|expiry|ttl|endpoint|url|uri|enabled|required|policy|limit)$/;
 /** `key` alone is a credential in a query string (?key=) and a feature-flag or
  *  list key in a JSON body, so only urls treat it as one. */
 function netSecretName(name, url = false) {
   let n = String(name);
   try { n = decodeURIComponent(n); } catch { /* keep it raw */ }
+  // maxTokens, total_tokens: a COUNT of secrets. Judged on the first word, so
+  // minioSecretKey and mintToken still count.
+  const first = n.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[^A-Za-z0-9]+/).filter(Boolean)[0]?.toLowerCase();
+  if (/^(max|min|num|total|count)$/.test(first || "")) return false;
   n = n.toLowerCase().replace(/[^a-z0-9]/g, "");
   return !!n && !NET_NOT_SECRET.test(n) && (NET_SECRET_WORD.test(n) || NET_SECRET_EXACT.test(n) || (url && n === "key"));
 }
@@ -598,7 +602,7 @@ const NET_SECRET_VALUES = [
   /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}/g,
   /\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_\w{30,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\bsk-(?=[\w-]*\d)[\w-]{20,}/g,
+  /\bsk-(?=[\w-]{0,200}?\d)[\w-]{20,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\bAIza[\w-]{35}/g,
 ];
@@ -646,6 +650,8 @@ function netRedact(headers) {
   }
   return out;
 }
+/** A value that is already nothing but a digest (or a scheme plus one). */
+const NET_HASHED = /^(?:Bearer )?<sha256:[0-9a-f]{12} len:\d+>$/;
 /** Hash credential-shaped substrings: bearer tokens, JWTs, vendor key prefixes. */
 function netShapes(value) {
   let s = String(value);
@@ -663,8 +669,8 @@ function netScrubHeader(value) {
 /** Secret-named query/fragment params keep their name, lose their value. `&`
  *  is the `&` Go's JSON encoder writes, `&amp;` the one HTML writes. */
 function netQuery(url) {
-  return url.replace(/([?#&]|\\u0026)([^=&#?\\]+)=([^&#\\]*)/g,
-    (m, sep, k, v) => (v && !v.includes("<sha256:") && netSecretName(k, true) ? `${sep}${k}=${netHash(v)}` : m));
+  return url.replace(/(&amp;|\\u0026|[?#&;])([^=&#?;\\]+)=([^&#?;\\]*)/g,
+    (m, sep, k, v) => (v && !NET_HASHED.test(v) && netSecretName(k, true) ? `${sep}${k}=${netHash(v)}` : m));
 }
 function netRedactUrl(url) {
   return NET.secrets ? url : netScrubHeader(url);
@@ -675,7 +681,7 @@ function netRedactUrl(url) {
  *  bodies, form bodies (by content type), multipart fields and HTML inputs/meta. */
 function netRedactBody(body, mime = "") {
   if (NET.secrets || typeof body !== "string" || !body) return body;
-  const hide = (k, v) => v && netSecretName(k) && !v.includes("<sha256:");
+  const hide = (k, v) => v && netSecretName(k) && !NET_HASHED.test(v);
   // Absolute urls, also with the `\/` slashes PHP's json_encode writes.
   let s = netShapes(body).replace(/\bhttps?:(?:\\?\/){2}[^\s"'<>]*/g, (u) => {
     const tail = /\\*$/.exec(u)[0]; // the `\` of a closing `\"` belongs to the JSON
@@ -689,7 +695,7 @@ function netRedactBody(body, mime = "") {
   s = s.replace(/\\"([^"\\\n]{1,64})\\"(\s*:\s*)\\"([^"\\\n]*)\\"/g,
     (m, k, sep, v) => (hide(k, v) ? `\\"${k}\\"${sep}\\"${netHash(v)}\\"` : m));
   // A numeric PIN or one-time code: only the short names, never maxTokens.
-  s = s.replace(/"(pin|otp|pwd|pass|passcode|password)"(\s*:\s*)(\d+)/gi, (m, k, sep, v) => `"${k}"${sep}"${netHash(v)}"`);
+  s = s.replace(/"(pin|otp|pwd|passcode|password)"(\s*:\s*)(\d+)(?![\d.eE])/gi, (m, k, sep, v) => `"${k}"${sep}"${netHash(v)}"`);
   if (/x-www-form-urlencoded/i.test(mime)) {
     s = s.replace(/(^|&)([^=&]+)=([^&]*)/g, (m, sep, k, v) => (hide(k, v) ? `${sep}${k}=${netHash(v)}` : m));
   }
@@ -701,7 +707,7 @@ function netRedactBody(body, mime = "") {
     if (!named.some((a) => netSecretName(a[2] ?? a[3] ?? a[4]))) return tag;
     return tag.replace(attr, (m, k, d, q, u) => {
       const v = d ?? q ?? u;
-      if (!/^(value|content)$/i.test(k) || !v || v.includes("<sha256:")) return m;
+      if (!/^(value|content)$/i.test(k) || !v || NET_HASHED.test(v)) return m;
       return m.slice(0, m.length - v.length - (u == null ? 1 : 0)) + netHash(v) + (u == null ? m.at(-1) : "");
     });
   });
@@ -711,8 +717,17 @@ function netRedactBody(body, mime = "") {
  *  the cut is still seen whole) is scanned, so a 20MB response costs no more
  *  than a small one; the note still reports the real size. */
 function netBody(raw, mime) {
-  const kept = raw.length > NET.bodyMax ? raw.slice(0, NET.bodyMax + 8192) : raw;
-  return netClip(netRedactBody(kept, mime), raw.length);
+  if (raw.length <= NET.bodyMax) return netRedactBody(raw, mime);
+  // Redaction SHRINKS text, so the margin is measured after it: widen the
+  // slice until the redacted text still reaches past the cut by the margin.
+  const want = NET.bodyMax + 8192;
+  let n = want, s;
+  for (;;) {
+    s = netRedactBody(raw.slice(0, n), mime);
+    if (n >= raw.length || s.length >= want) break;
+    n = Math.min(raw.length, n * 2);
+  }
+  return netClip(s, raw.length);
 }
 function netClip(s, total = s?.length) {
   if (typeof s !== "string") return s;
