@@ -49,7 +49,7 @@
  *   ~/.browse/camoufox-pw/           playwright-core pinned to camoufox's build,
  *                                    patched by the launcher so camoufox can
  *                                    record video (see bin/browse)
- *   ~/.browse/sessions/<stamp>/      transcript.md, recording.mp4, feedback.md,
+ *   ~/.browse/sessions/<stamp>/      transcript.md, recording.mp4,
  *                                    browsed.log, shots/step-*.png (video/*.webm
  *                                    only while live)
  *   ~/.browse/{profiles,state,run}/  persistent logins, saved auth, live daemons
@@ -7079,13 +7079,13 @@ async function daemon() {
           closeReply = {
             ok: true,
             result: (saved && (saved.mp4 || saved.webm)
-              ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (${saved.mp4Fail || "ffmpeg missing/failed - mp4 not written"})`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`
+              ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (${saved.mp4Fail || "ffmpeg missing/failed - mp4 not written"})`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`
               : VIDEO_ON
                 ? "closed - recording flushed (no video captured)"
                 // Not a failure, and it must not read as one: the caller asked
                 // for this with --no-video. Name what IS there instead - and keep
                 // the mock disclosure, which is about the SCREENSHOTS too.
-                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`) + lastNotes,
+                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`) + lastNotes,
           };
           send(closeReply);
           // The gif is a two-pass encode that can outlast the client's 120s

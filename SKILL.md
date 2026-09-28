@@ -111,16 +111,9 @@ Each session gets `~/.browse/sessions/<timestamp>/` with `transcript.md`,
 under `shots/` (Read them as images to see what a step looked like). Give the user
 the bare `~/…` path that `close` printed, pasteable straight into their shell.
 
-## After every recording: write feedback.md
-
-Right after `browse close`, write a short `feedback.md` into that session's dir.
-Cover: what flow you recorded, what worked, any friction (selector misses,
-timing/pacing, missing commands, video quality), and one concrete improvement idea
-for this skill. These get reviewed across sessions to keep improving the skill, so
-be candid and specific; a few bullets is enough.
-Separate the observed command/result from your suspected cause. Check help
-before proposing a missing capability, and keep tool-wrapper failures distinct
-from browser failures.
+When reporting a failure, separate the observed command and result from your
+suspected cause, and keep tool-wrapper failures distinct from browser failures.
+Check help before calling a capability missing.
 
 ## More
 

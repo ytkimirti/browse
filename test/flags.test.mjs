@@ -305,6 +305,7 @@ try {
   check("…and close says the video was off, not that ffmpeg failed",
     r.status === 0 && /video was off/.test(r.stdout || "") && !/ffmpeg/.test(r.stdout || ""),
     `${r.status} ${r.stdout}${r.stderr}`);
+  check("…and close asks for no feedback file", !/feedback/i.test(r.stdout || ""), r.stdout);
   check("…and no video dir was ever made", !existsSync(join(NVOUT, "video")), NVOUT);
   check("…and no mp4 either", !existsSync(join(NVOUT, "recording.mp4")), NVOUT);
   spawnSync("rm", ["-rf", NVOUT]);
