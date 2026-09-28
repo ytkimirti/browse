@@ -1316,16 +1316,7 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     server compiling a route on first hit. goBack/goForward FAIL when
                                     there is nowhere to go. A landing url that looks like a sign-in
                                     wall is called out inline, here and after a click.
-  browse click <selector>           click an element. Every command that takes a SELECTOR (click through
-                                    focus below — not drag or scroll) also takes --timeout <ms>, written
-                                    LAST: raise it for a control that is still rendering, lower it to
-                                    fail fast. A selector spanning controls and non-controls is refused
-                                    (text=Pause must not click prose instead of the Pause button). When
-                                    several controls match and the first is covered, browse gives up after
-                                    ${AMBIGUOUS_MS}ms and lists every match with what is on top of it.
-                                    click/dblclick/rightclick/hover also take --position <x,y> after
-                                    the selector, before --timeout: pixels from the padding-box top-left.
-                                    Out-of-bounds positions fail. Use rect to inspect the element first.
+  browse click <selector>           click an element
   browse dblclick <selector>        double-click an element
   browse rightclick <selector>      right-click it — opens the app's context menu
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
@@ -1359,6 +1350,13 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     opens a region at the default factor (${IDLE.speed}x); 'speed off' with
                                     nothing open is an error. A 'toast' inside the region is
                                     fast-forwarded with it, so show captions OUTSIDE it.
+  Every command in this section that takes a SELECTOR, except drag and scroll, takes --timeout <ms>,
+  written LAST: raise it for a control that is still rendering, lower it to fail fast. A selector
+  spanning controls and non-controls is refused (text=Pause must not click prose instead of the
+  Pause button). When several controls match and the first is covered, browse gives up after
+  ${AMBIGUOUS_MS}ms and lists every match with what is on top of it. click/dblclick/rightclick/hover
+  also take --position <x,y> after the selector, before --timeout: pixels from the padding-box
+  top-left. Out-of-bounds positions fail. Use rect to inspect the element first.
 
 AI tasks (preferred for multistep goals):
   browse ai task <goal>                delegate the whole goal using fresh DOM observations
@@ -1472,7 +1470,9 @@ while the browser is live AND after close; queries never spawn a browser):
     --last <n>                      keep the last n matches (default 30) · --all for everything
     --grep <pat>                    match anywhere in the entry (headers, request/response bodies, url)
     --full                          headers + bodies            --body        just the bodies
-    --json                          raw JSON lines — pipe to jq for anything the flags don't cover
+    --json                          raw JSON lines, pipe to jq for anything the flags don't cover. Fields:
+                                    i (the #), t (s into recording), at, ms, method, url, type, reqHeaders,
+                                    reqBody, status, ok, resHeaders, mime, size, resBody, error, mock, mockVia
     --stats                         counts by status / type / host
     --all-types                     a bare PATTERN hides static assets (script, stylesheet, image,
                                     font, media, manifest, texttrack) so app calls aren't buried in
@@ -1533,7 +1533,7 @@ Misc:
                                     (~reading time); [--for <sec>] [--sticky] [--color yellow|blue|green|red|neutral]
                                     [--pos top|bottom]; --clear removes a sticky one
   browse dir                        print THIS session's artifacts dir
-  browse close [--gif] [--keep-raw] end the session, finalize the recording, print the mp4 path.
+  browse close [--gif] [--keep-raw]  end the session, finalize the recording, print the mp4 path.
                                     --gif also writes a looping recording.gif; --keep-raw keeps the
                                     raw .webm (BROWSE_KEEP_WEBM=1 too) so you can re-cut it yourself
 
@@ -1708,6 +1708,133 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_FFMPEG            path to the ffmpeg used for the mp4 finalize
   BROWSE_PW_BASE           path whose parent dir holds node_modules/playwright
   BROWSE_CAMOUFOX_PYTHON   python that can 'import camoufox' (default python3)`;
+
+/** `browse help` prints an index, `browse help <topic>` one command or section,
+ *  `browse help --all` the whole of HELP. Agents re-read help constantly, and
+ *  30KB per read was most of their context. All three views are cut from HELP
+ *  at runtime, so it stays the single source of truth.
+ *
+ *  HELP's shape is the contract: blank-line separated blocks; a section is a
+ *  header (unindented lines) plus items at two spaces, each continued by lines
+ *  indented deeper. An item is an ENTRY when it starts `browse ` or is a
+ *  `--flag` with a two-space gap before its description; anything else at two
+ *  spaces is a NOTE, printed with every lookup into that section. */
+const HELP_SECTION_TOPICS = [
+  ["Navigate", ["act", "navigate"]], ["AI tasks", ["ai"]], ["Observe", ["observe", "diagnose"]],
+  ["Tabs", ["tabs", "frames", "emulation", "dialogs", "downloads"]], ["Network", ["net", "network"]],
+  ["Intercept", ["middleware", "intercept", "mock"]], ["Run code BEFORE", ["init"]], ["Misc", ["misc"]],
+  ["Parallel", ["parallel", "session"]], ["Run the browser on another", ["remote"]],
+  ["Launch flags", ["launch", "flags"]], ["Persistent profile", ["profile"]],
+  ["Artifacts", ["artifacts", "recording", "video"]],
+];
+const HELP_FLAG_WORDS = { s: "session", p: "profile" };
+function helpModel() {
+  const blocks = HELP.split(/\n\n/);
+  const first = blocks.findIndex((b) => /^  \S/m.test(b));
+  const intro = blocks.slice(0, first).join("\n\n");
+  const sections = blocks.slice(first).map((text) => {
+    const lines = text.split("\n");
+    let h = 0;
+    while (h < lines.length && !/^ /.test(lines[h])) h++;
+    const items = [];
+    for (const line of lines.slice(h)) {
+      if (/^  \S/.test(line) || !items.length) items.push({ lines: [line] });
+      else items.at(-1).lines.push(line);
+    }
+    for (const it of items) {
+      const head = it.lines[0].trim();
+      it.entry = /^browse /.test(head) || /^--\S.*?\S {2,}\S/.test(head);
+      it.usage = head.split(/\s{2,}/)[0];
+      it.names = it.entry ? helpNames(it.usage) : [];
+    }
+    const cmds = new Set(items.filter((it) => /^browse [a-z]/i.test(it.usage)).map((it) => it.names[0]));
+    const topics = HELP_SECTION_TOPICS.find(([prefix]) => lines[0].startsWith(prefix))?.[1]
+      || [lines[0].split(/\W+/)[0].toLowerCase()];
+    return { text, header: lines.slice(0, h).join("\n"), items, topics, single: cmds.size === 1 };
+  });
+  return { intro, sections };
+}
+/** Every name an entry answers to: `check|uncheck`, `reload | goBack | goForward`,
+ *  `ai click|hover` (as `ai click`), `--headful / --headless`, `-p <name> clear`. */
+function helpNames(usage) {
+  const names = [];
+  for (const part of usage.split(/\s+[|·/]\s+/)) {
+    const w = part.replace(/^browse\s+/, "").split(/\s+/);
+    if (/^-/.test(w[0])) {
+      const bare = w[0].replace(/^-+/, "");
+      names.push(w[0], HELP_FLAG_WORDS[bare] || bare);
+      if (/^[a-z]+$/i.test(w[2] || "") && /^browse /.test(part)) names.push(w[2]);
+      continue;
+    }
+    const heads = w[0].split("|").filter((x) => /^[a-z]/i.test(x));
+    names.push(...heads);
+    if (heads[0] === "ai" && w[1]) names.push(...w[1].split("|").map((x) => `ai ${x}`));
+  }
+  return names;
+}
+/** The full text for one topic, or null. A section named by the topic, or one
+ *  that documents a single command, prints whole; otherwise the section header,
+ *  the matching entries and the section's notes, in their original order. */
+function helpTopic(topic) {
+  const q = topic.toLowerCase();
+  const out = [];
+  for (const sec of helpModel().sections) {
+    const hit = (it) => it.names.some((n) => n.toLowerCase() === q);
+    if (sec.topics.includes(q) || (sec.single && sec.items.some(hit))) { out.push(sec.text); continue; }
+    if (!sec.items.some(hit)) continue;
+    out.push([sec.header, ...sec.items.filter((it) => !it.entry || hit(it)).flatMap((it) => it.lines)].join("\n"));
+  }
+  return out.length ? out.join("\n\n") : null;
+}
+function helpIndex() {
+  const { intro, sections } = helpModel();
+  const rows = sections.map((sec) => {
+    const uses = sec.items.filter((it) => it.entry).map((it) => it.usage.replace(/^browse /, "").replace(/ · browse /g, " · "));
+    const body = uses.length ? uses.join(" · ") : sec.header.split("\n")[0];
+    // Wrap at 100 columns, breaking only between entries, under a hanging indent.
+    const lines = [];
+    let cur = sec.topics[0].padEnd(11);
+    for (const [i, piece] of (uses.length ? uses : [body]).entries()) {
+      const add = (i ? " · " : "") + piece;
+      if (i && cur.length + add.length > 100) { lines.push(cur + " ·"); cur = " ".repeat(11) + piece; }
+      else cur += add;
+    }
+    return [...lines, cur].join("\n");
+  });
+  return `${intro}
+
+Commands by topic. 'browse help <command|topic>' prints the full usage, flags and caveats,
+e.g. 'browse help wait' or 'browse help net'; 'browse <command> --help' does the same.
+'browse help --all' prints everything, 'browse help --env' the env vars.
+
+${rows.join("\n")}`;
+}
+/** Unknown topic: the closest names, by prefix, containment, then edit distance. */
+function helpSuggest(topic) {
+  const q = topic.toLowerCase();
+  const all = [...new Set(helpModel().sections.flatMap((sec) => [...sec.topics, ...sec.items.flatMap((it) => it.names)]))]
+    .filter((n) => !n.startsWith("-"));
+  const dist = (a, b) => {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+    return d[a.length][b.length];
+  };
+  const score = (n) => {
+    const l = n.toLowerCase();
+    if (q.length >= 3 && l.startsWith(q)) return 0;
+    if ((q.length >= 4 && l.includes(q)) || (l.length >= 4 && q.includes(l))) return 1;
+    const e = dist(q, l);
+    return e <= Math.max(1, Math.floor(q.length / 3)) ? 1 + e : Infinity;
+  };
+  const ranked = all.map((n) => [n, score(n)]).filter(([, sc]) => sc < Infinity).sort((a, b) => a[1] - b[1] || a[0].length - b[0].length);
+  return ranked.slice(0, 3).map(([n]) => `'${n}'`);
+}
 
 /* ========================================================= network queries */
 
@@ -1908,14 +2035,14 @@ function netCommand(argv) {
       // Empty counts as missing. `--grep "$PAT"` with PAT unset arrives as "", and
       // an empty filter is DROPPED (`grep ? … : null`) — so `net --grep ""` printed
       // every request in the log at exit 0, which reads as "these all matched".
-      if (v == null || v === "" || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value — run \`browse help\``); }
+      if (v == null || v === "" || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value — run \`browse help net\``); }
       return v;
     };
     const netNum = (flag) => {
       const n = Number(netVal(flag));
       // `net --since abc` used to become NaN and answer "no matching requests",
       // which is the same output as a real empty result.
-      if (!Number.isFinite(n) || n < 0) throw new Error(`net: ${flag} wants a number — run \`browse help\``);
+      if (!Number.isFinite(n) || n < 0) throw new Error(`net: ${flag} wants a number — run \`browse help net\``);
       return n;
     };
     // Every value-taking flag goes through netVal. A bare `next()` let
@@ -1938,7 +2065,7 @@ function netCommand(argv) {
     else if (a === "--all-types") allTypes = true;
     else if (a === "--file" || a === "--path") showFile = true;
     else if (a === "--dir") dir = netVal(a);
-    else if (a.startsWith("-")) { process.stderr.write(`browse net: unknown flag '${a}' — run \`browse help\`\n`); return 1; }
+    else if (a.startsWith("-")) { process.stderr.write(`browse net: unknown flag '${a}' — run \`browse help net\`\n`); return 1; }
     else if (pattern == null) pattern = a;
     else pattern += " " + a; // unquoted multi-word pattern
   }
@@ -2926,10 +3053,21 @@ async function client(argv) {
     process.stderr.write(`browse: '${CAMOU_SUFFIX}' is reserved — that dir is profile '${base}' on camoufox. Use \`-p ${base} --camoufox\`.\n`);
     return 1;
   }
-  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
-    const envOnly = argv.slice(1).some((a) => a === "--env" || a === "env");
-    process.stdout.write((envOnly ? ENV_HELP : HELP) + "\n");
-    return 0;
+  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h" || argv.slice(1).includes("--help")) {
+    const rest = argv.slice(1).filter((a) => a !== "--help");
+    // `browse wait --help` asks about `wait`; `browse ai task --help` about `ai task`.
+    const words = cmd && cmd !== "help" && !cmd.startsWith("-")
+      ? [cmd, ...(cmd === "ai" && rest[0] && !rest[0].startsWith("-") ? [rest[0]] : [])]
+      : rest.filter((a) => !a.startsWith("-"));
+    if (rest.includes("--env") || words[0] === "env") { process.stdout.write(ENV_HELP + "\n"); return 0; }
+    if (rest.includes("--all")) { process.stdout.write(HELP + "\n"); return 0; }
+    if (!words.length) { process.stdout.write(helpIndex() + "\n"); return 0; }
+    const topic = words.join(" ");
+    const text = helpTopic(topic);
+    if (text) { process.stdout.write(text + "\n"); return 0; }
+    const near = helpSuggest(topic);
+    process.stderr.write(`browse help: no command or topic '${topic}'.${near.length ? ` Did you mean ${near.join(", ")}?` : ""} Run 'browse help' for the index.\n`);
+    return 1;
   }
   if (process.env.BROWSE_PREFLIGHT === "1") {
     validateCdpLaunch({ ...process.env, ...LAUNCH_ENV }, PROFILE);

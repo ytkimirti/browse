@@ -25,6 +25,7 @@ try {
   let r = run(bin, ['help'], env); check('installed help works without dependencies', r.status === 0 && /--refs/.test(r.stdout) && /--cdp/.test(r.stdout), r.stderr);
   r = run(bin, ['version'], env); check('installed version resolves package manifest', r.status === 0 && /browse 0\.1\.0 \(build [0-9a-f]{8}\)/.test(r.stdout), r.stdout + r.stderr);
   r = run(bin, ['box', 'help'], env); check('packaged Box helper works', r.status === 0 && /browse box/.test(r.stdout), r.stderr);
+  r = run(bin, ['wait', '--help'], env); check('installed <command> --help works without dependencies', r.status === 0 && /browse wait <selector\|ms>/.test(r.stdout), r.stderr);
   check('help/version do not install dependencies', !existsSync(join(env.BROWSE_HOME, 'node_modules')));
   r = run(bin, ['--cdp', 'not-an-endpoint', '--no-video', 'open'], env); check('packaged invalid endpoint fails without browser', r.status === 1 && /--cdp wants/.test(r.stderr) && !existsSync(join(env.BROWSE_HOME, 'node_modules')), r.stderr);
 } finally { rmSync(tmp, { recursive: true, force: true }); }

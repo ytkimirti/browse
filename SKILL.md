@@ -10,9 +10,11 @@ browser via a localhost daemon, one browser per session name. The first command
 spawns the browser with recording already on; every later command drives the same
 live session.
 
-**`browse help` is the command and flag surface** (`browse help --env` for env
-vars). Read it before reaching for a command or flag you have not used this
-session, rather than recalling Playwright from memory.
+**`browse help` is the command and flag surface.** Bare `browse help` is a short
+index; `browse help <command>` (or `browse <command> --help`) prints one command
+in full. Look a command up before its first use this session rather than
+recalling Playwright from memory, and look up only that command: `help --all` is
+the whole reference and rarely worth its size.
 
 ## The loop
 
@@ -94,7 +96,7 @@ recording need not be the deliverable. When the user wants a demo, or the moving
 interaction is the point, read `skill/recording.md` BEFORE the session starts,
 since the frame size is fixed the moment the browser spawns.
 
-A run can also be recorded not at all (`browse help`, launch flags). Reach for
+A run can also be recorded not at all (`browse help launch`). Reach for
 that only when the session is a pure READ nobody will watch — asserting a count,
 minting a token, exporting state. If there is any chance the user will ask "show
 me" afterwards, keep the recording: it cannot be added later.
@@ -117,7 +119,7 @@ Check help before calling a capability missing.
 
 ## More
 
-- `browse help` — every command, flag and default; `browse help --env` for env vars
+- `browse help` - index; `browse help <command>` one command in full; `--all` everything; `--env` env vars
 - `skill/recording.md` — recording craft, when the video is the deliverable
 - `skill/engines.md` — camoufox (default, clears bot walls) vs chromium (needed for
   `emulate`, PDF, and polished demos)

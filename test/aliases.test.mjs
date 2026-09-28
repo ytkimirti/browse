@@ -189,7 +189,7 @@ try {
 
   // --- help must not advertise anything that was just removed.
   console.log("\nhelp");
-  const help = browse("help").out;
+  const help = browse("help", "--all").out;
   for (const s of ["browse video", "browse tap", "--fullpage", "--selector", "--hidden", "--domain"]) {
     check(`help no longer mentions ${s}`, !help.includes(s), s);
   }

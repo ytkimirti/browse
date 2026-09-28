@@ -85,7 +85,7 @@ browse -s demo ai task 'Click Learn more and stop once the Example Domains page 
 browse -s demo close
 ```
 
-Set `TYPESAFE_API_KEY` or keep it in the caller's `.env`. `browse help` documents
+Set `TYPESAFE_API_KEY` or keep it in the caller's `.env`. `browse help ai` documents
 task mode, individual semantic actions, assertions, scopes and limits. AI commands report
 latency and tokens, decline uncertain matches and retain normal session evidence.
 Tasks send the goal, visible controls, page text and action history to TypeSafe.
@@ -108,6 +108,7 @@ tabs join the recording while active; popup footage stays excluded until selecte
 Existing Chromium browsers can be attached over CDP with explicit video opt-out,
 keeping their tabs open when browse disconnects. See help for flags and limitations.
 
-`browse help` lists every command and flag, `browse help --env` every env var.
+`browse help` is an index, `browse help <command>` one command in full, `browse help --all`
+every command and flag, `browse help --env` every env var.
 
 MIT
