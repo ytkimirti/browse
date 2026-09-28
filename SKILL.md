@@ -24,22 +24,28 @@ and returns the recorded steps and outcome.
 
 1. **Act**, then read the output closely. New console/page errors, answered
    dialogs and saved downloads are appended inline to the next command's result.
-2. **Observe often.** `snapshot` is your check step. Scope it to the relevant
-   region when a long feed or unrelated content crowds out the controls. `wait`
-   doubles as your assertion: it exits non-zero if the thing never happens. Hold for what the UI
-   says or shows, never for a guessed duration — a fixed pause asserts nothing,
-   slows the run and paces the video worse (`browse help` for the ways to wait).
-3. **Diagnose** from what the session already recorded: `errors` (the alarm),
+2. **Observe with `snapshot`, not `eval`.** `snapshot` is your check step: it
+   shows what a user can see and act on. Scope it to the relevant region when a
+   long feed or unrelated content crowds out the controls. Keep `eval` for state
+   the page does not render (a global, storage, a computed value); reading
+   visible UI through `eval` checks the DOM, not what the user sees.
+3. **Wait for a condition, never a duration.** Before `wait`, name what proves
+   the step finished (an element, its text, the URL) and wait on that: it
+   doubles as your assertion and exits non-zero if the thing never happens. A
+   fixed `wait <ms>` asserts nothing, is flaky when too short and leaves dead air
+   when too long. If you cannot name the condition, `snapshot` to find one
+   (`browse help wait`).
+4. **Diagnose** from what the session already recorded: `errors` (the alarm),
    `console` (everything the page logged), and `net` (note the last entry `#`,
    act, then `net --since <#> --failed` to see only what that action caused).
-4. **Reach states the UI can't get you to** with `middleware` for a REQUEST (an
+5. **Reach states the UI can't get you to** with `middleware` for a REQUEST (an
    error path, an empty list, a slow endpoint, a paid tier) and `init` for page
    STATE that must exist before the app's own JS runs (an analytics stub, a
    consent flag, a frozen clock). Both only affect what happens after they are
    registered, so set them up before `open`, or `reload` after. Never rewrite a
    dev server's HTML document with `middleware` to inject a script: on Next/Vite
    that produces an endless reload loop that reads exactly like an app bug.
-5. **Finish the recording.** Wait for `close` to finish and verify the reported
+6. **Finish the recording.** Wait for `close` to finish and verify the reported
    artifacts exist locally before handing them off or deleting the remote.
    A tool returning a running process handle is still working. Preserve the
    full tool result and wait on that handle; printing only its output loses the

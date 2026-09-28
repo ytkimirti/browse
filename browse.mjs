@@ -6530,7 +6530,12 @@ async function daemon() {
         }
         if (sel != null && /^\d+$/.test(sel)) {
           await page.waitForTimeout(durable("", Number(sel)));
-          return `waited ${sel}ms`;
+          // Real sessions slept on guessed durations dozens of times a run. A
+          // pause long enough to be a guess gets one line pointing at the waits
+          // that actually assert something; a short settle stays quiet.
+          return Number(sel) >= 1000
+            ? `waited ${sel}ms - a fixed pause asserts nothing; prefer wait <selector> [--text <s>] or wait --url <pattern>`
+            : `waited ${sel}ms`;
         }
         if (!sel) throw new Error("wait: needs a selector, a number of ms, or --url <pattern>");
         try { await L(sel).first().waitFor({ state: gone ? "hidden" : "visible", timeout }); }
