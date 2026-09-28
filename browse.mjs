@@ -2162,8 +2162,12 @@ function freePort() {
 }
 
 const REMOTE_BIN = process.env.BROWSE_REMOTE_BIN || "browse";
-/** Where a remote spawn's own output lands, on the remote. */
-const SPAWN_LOG = "~/.browse/spawn.log";
+/** Where a remote spawn's own output lands, on the remote. Per session, so two
+ *  sessions starting at once do not read each other's failure. */
+const spawnLog = () => `~/.browse/spawn-${SESSION}.log`;
+/** The line the remote spawn's shell appends once `__serve` has exited. A daemon
+ *  that is up never prints it, so seeing it while waiting means start-up failed. */
+const SERVE_EXIT = "browse: __serve exited with status";
 const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 /** An Upstash Box, as `<box-id>@<region>.box.upstash.com`, or null. Its ssh is a
  *  gateway that attaches into the container rather than an sshd, which changes
@@ -2206,9 +2210,11 @@ async function spawnRemoteDaemon(remotePort) {
   // (not on PATH, not executable, no node) leaves no session dir and therefore
   // no browsed.log, and on a host whose ssh swallows output this file is the
   // only place that failure is written down at all.
+  // The exit line is what lets the client stop waiting as soon as the daemon dies.
+  const serve = `env ${assigns} ${REMOTE_BIN} __serve; echo "${SERVE_EXIT} $?"`;
   const remoteCmd =
-    `mkdir -p ~/.browse && nohup setsid env ${assigns} ${REMOTE_BIN} __serve ` +
-    `>${SPAWN_LOG} 2>&1 </dev/null &`;
+    `mkdir -p ~/.browse && nohup setsid sh -c ${shq(serve)} ` +
+    `>${spawnLog()} 2>&1 </dev/null &`;
 
   if (process.env.BROWSE_REMOTE_SPAWN) {
     spawnSync("sh", ["-c", process.env.BROWSE_REMOTE_SPAWN],
@@ -2221,7 +2227,7 @@ async function spawnRemoteDaemon(remotePort) {
     if (check.exit_code !== 0 || !/^browse /m.test(check.output || ""))
       throw new Error(`cannot run '${REMOTE_BIN}' on ${REMOTE}; check BROWSE_REMOTE_BIN or the Box installation before starting a session`);
     const started = await boxExec(box, remoteCmd);
-    if (started.exit_code !== 0) throw new Error(`remote spawn failed on ${REMOTE}; inspect ${SPAWN_LOG}`);
+    if (started.exit_code !== 0) throw new Error(`remote spawn failed on ${REMOTE}; inspect ${spawnLog()}`);
     return;
   }
   const check = ssh([REMOTE, `${REMOTE_BIN} version`], { encoding: "utf8", timeout: 20000 });
@@ -2230,6 +2236,24 @@ async function spawnRemoteDaemon(remotePort) {
   }
   const started = ssh([REMOTE, remoteCmd], { encoding: "utf8", timeout: 20000 });
   if (started.status !== 0) throw new Error(`remote spawn failed on ${REMOTE}: ${(started.stderr || started.error?.message || "no exit status").trim()}`);
+}
+
+/** The remote spawn's output if its `__serve` has already exited, else null.
+ *  Read through the same channel that spawned it: a box's ssh relays no output. */
+async function remoteSpawnExit() {
+  const cmd = `tail -c 8000 ${spawnLog()} 2>/dev/null`;
+  let out = null;
+  const box = upstashBox();
+  if (box) out = (await boxExec(box, cmd).catch(() => null))?.output ?? null;
+  else {
+    const r = ssh([REMOTE, cmd], { encoding: "utf8", timeout: 20000 });
+    if (r.status === 0) out = r.stdout;
+  }
+  const at = out ? out.lastIndexOf(SERVE_EXIT) : -1;
+  if (at < 0) return null;
+  const status = (/^ (\d+)/.exec(out.slice(at + SERVE_EXIT.length)) || [])[1] ?? "?";
+  const tail = out.slice(0, at).trim().split("\n").slice(-20).join("\n");
+  return { status, tail };
 }
 
 /** POST one command to a box's exec API. The API key is the same one its ssh
@@ -2333,19 +2357,30 @@ async function ensureRemoteDaemon() {
   try { await spawnRemoteDaemon(remotePort); }
   catch (e) { stopTunnel(); throw e; }
   // A cold remote installs Playwright + a browser on this first command, which
-  // is minutes, not seconds — so this waits far longer than the local spawn.
+  // is minutes, not seconds — so this waits far longer than the local spawn. A
+  // daemon that DIED is not slow, though: its spawn log says so within a second,
+  // and that log carries the real error.
   let h = null;
   for (let i = 0; i < 300; i++) {
     h = await healthInfo(local);
     if (h && h.session === SESSION) break;
     h = null;
+    if (i % 2 === 1) {
+      const dead = await remoteSpawnExit();
+      if (dead) {
+        stopTunnel();
+        throw new Error(
+          `browse daemon for session '${SESSION}' failed to start on ${REMOTE} (exit ${dead.status}):\n` +
+          `${clipForRead(dead.tail || "(no output)", "remote start-up log", `read all of ${spawnLog()} on ${REMOTE}`, 3000)}`);
+      }
+    }
     await sleep(1000);
   }
   if (!h) {
     stopTunnel();
     throw new Error(
       `browse daemon for session '${SESSION}' did not come up on ${REMOTE} (port ${remotePort})\n` +
-      `  its start-up output is in ${SPAWN_LOG} on ${REMOTE}, and once it gets as far as\n` +
+      `  its start-up output is in ${spawnLog()} on ${REMOTE}, and once it gets as far as\n` +
       `  launching a browser, ~/.browse/sessions/*/browsed.log. Check '${REMOTE_BIN}' is\n` +
       `  on PATH and executable there.`);
   }
