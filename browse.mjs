@@ -2035,14 +2035,14 @@ function netCommand(argv) {
       // Empty counts as missing. `--grep "$PAT"` with PAT unset arrives as "", and
       // an empty filter is DROPPED (`grep ? … : null`) — so `net --grep ""` printed
       // every request in the log at exit 0, which reads as "these all matched".
-      if (v == null || v === "" || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value — run \`browse help net\``); }
+      if (v == null || v === "" || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value - run \`browse help net\``); }
       return v;
     };
     const netNum = (flag) => {
       const n = Number(netVal(flag));
       // `net --since abc` used to become NaN and answer "no matching requests",
       // which is the same output as a real empty result.
-      if (!Number.isFinite(n) || n < 0) throw new Error(`net: ${flag} wants a number — run \`browse help net\``);
+      if (!Number.isFinite(n) || n < 0) throw new Error(`net: ${flag} wants a number - run \`browse help net\``);
       return n;
     };
     // Every value-taking flag goes through netVal. A bare `next()` let
@@ -2065,7 +2065,7 @@ function netCommand(argv) {
     else if (a === "--all-types") allTypes = true;
     else if (a === "--file" || a === "--path") showFile = true;
     else if (a === "--dir") dir = netVal(a);
-    else if (a.startsWith("-")) { process.stderr.write(`browse net: unknown flag '${a}' — run \`browse help net\`\n`); return 1; }
+    else if (a.startsWith("-")) { process.stderr.write(`browse net: unknown flag '${a}' - run \`browse help net\`\n`); return 1; }
     else if (pattern == null) pattern = a;
     else pattern += " " + a; // unquoted multi-word pattern
   }
