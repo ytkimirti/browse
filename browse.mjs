@@ -2222,9 +2222,11 @@ function freePort() {
 }
 
 const REMOTE_BIN = process.env.BROWSE_REMOTE_BIN || "browse";
-/** Where a remote spawn's own output lands, on the remote. Per session, so two
- *  sessions starting at once do not read each other's failure. */
-const spawnLog = () => `~/.browse/spawn-${SESSION}.log`;
+/** Where a remote spawn's own output lands, on the remote. Per SPAWN, so a
+ *  client only ever reads the exit line of the daemon it started itself: not an
+ *  earlier run's, and not one a second client racing it for the session wrote.
+ *  `@` ends the session part, which sanitizeName never produces. */
+const spawnLog = (id = "*") => `~/.browse/spawn-${SESSION}@${id}.log`;
 /** The line the remote spawn's shell appends once `__serve` has exited. A daemon
  *  that is up never prints it, so seeing it while waiting means start-up failed. */
 const SERVE_EXIT = "browse: __serve exited with status";
@@ -2272,16 +2274,17 @@ async function spawnRemoteDaemon(remotePort) {
   // only place that failure is written down at all.
   // The exit line is what lets the client stop waiting as soon as the daemon dies.
   const serve = `env ${assigns} ${REMOTE_BIN} __serve; echo "${SERVE_EXIT} $?"`;
-  // rm first, synchronously: the background job opens the log after this shell
-  // returns, and a previous run's exit line must never be read as this one's.
+  // Earlier spawns' logs for this session go first. Braces keep the `&` on the
+  // spawn alone, so the rm and mkdir run before this shell returns.
+  const log = spawnLog(`${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
   const remoteCmd =
-    `mkdir -p ~/.browse && rm -f ${spawnLog()} && nohup setsid sh -c ${shq(serve)} ` +
-    `>${spawnLog()} 2>&1 </dev/null &`;
+    `mkdir -p ~/.browse && rm -f ${spawnLog()} && { nohup setsid sh -c ${shq(serve)} ` +
+    `>${log} 2>&1 </dev/null & }`;
 
   if (process.env.BROWSE_REMOTE_SPAWN) {
     spawnSync("sh", ["-c", process.env.BROWSE_REMOTE_SPAWN],
       { env: { ...process.env, ...env, BROWSE_SPAWN_CMD: remoteCmd }, stdio: "inherit", timeout: 120000 });
-    return;
+    return log;
   }
   const box = upstashBox();
   if (box) {
@@ -2289,8 +2292,8 @@ async function spawnRemoteDaemon(remotePort) {
     if (check.exit_code !== 0 || !/^browse /m.test(check.output || ""))
       throw new Error(`cannot run '${REMOTE_BIN}' on ${REMOTE}; check BROWSE_REMOTE_BIN or the Box installation before starting a session`);
     const started = await boxExec(box, remoteCmd);
-    if (started.exit_code !== 0) throw new Error(`remote spawn failed on ${REMOTE}; inspect ${spawnLog()}`);
-    return;
+    if (started.exit_code !== 0) throw new Error(`remote spawn failed on ${REMOTE}; inspect ${log}`);
+    return log;
   }
   const check = ssh([REMOTE, `${REMOTE_BIN} version`], { encoding: "utf8", timeout: 20000 });
   if (check.status !== 0 || !/^browse /m.test(check.stdout || "")) {
@@ -2298,12 +2301,13 @@ async function spawnRemoteDaemon(remotePort) {
   }
   const started = ssh([REMOTE, remoteCmd], { encoding: "utf8", timeout: 20000 });
   if (started.status !== 0) throw new Error(`remote spawn failed on ${REMOTE}: ${(started.stderr || started.error?.message || "no exit status").trim()}`);
+  return log;
 }
 
 /** The remote spawn's output if its `__serve` has already exited, else null.
  *  Read through the same channel that spawned it: a box's ssh relays no output. */
-async function remoteSpawnExit() {
-  const cmd = `tail -c 8000 ${spawnLog()} 2>/dev/null`;
+async function remoteSpawnExit(log) {
+  const cmd = `tail -c 8000 ${log} 2>/dev/null`;
   let out = null;
   const box = upstashBox();
   if (box) out = (await boxExec(box, cmd).catch(() => null))?.output ?? null;
@@ -2416,7 +2420,8 @@ async function ensureRemoteDaemon() {
       `${probe.kind === "browse" ? `browse session '${probe.health.session}'` : "something that is not browse"}\n` +
       `  Re-run with BROWSE_PORT=<a free port there>, or use a different -s name.`);
   }
-  try { await spawnRemoteDaemon(remotePort); }
+  let log;
+  try { log = await spawnRemoteDaemon(remotePort); }
   catch (e) { stopTunnel(); throw e; }
   // A cold remote installs Playwright + a browser on this first command, which
   // is minutes, not seconds — so this waits far longer than the local spawn. A
@@ -2428,12 +2433,16 @@ async function ensureRemoteDaemon() {
     if (h && h.session === SESSION) break;
     h = null;
     if (i % 2 === 1) {
-      const dead = await remoteSpawnExit();
+      const dead = await remoteSpawnExit(log);
+      // Asked again first: a daemon that lost a start-up race to another client
+      // exits 0 while the winner serves this very session.
+      if (dead && (h = await healthInfo(local)) && h.session === SESSION) break;
+      h = null;
       if (dead) {
         stopTunnel();
         throw new Error(
           `browse daemon for session '${SESSION}' failed to start on ${REMOTE} (exit ${dead.status}):\n` +
-          `${clipForRead(dead.tail || "(no output)", "remote start-up log", `read all of ${spawnLog()} on ${REMOTE}`, 3000)}`);
+          `${clipForRead(dead.tail || "(no output)", "remote start-up log", `read all of ${log} on ${REMOTE}`, 3000)}`);
       }
     }
     await sleep(1000);
@@ -2442,7 +2451,7 @@ async function ensureRemoteDaemon() {
     stopTunnel();
     throw new Error(
       `browse daemon for session '${SESSION}' did not come up on ${REMOTE} (port ${remotePort})\n` +
-      `  its start-up output is in ${spawnLog()} on ${REMOTE}, and once it gets as far as\n` +
+      `  its start-up output is in ${log} on ${REMOTE}, and once it gets as far as\n` +
       `  launching a browser, ~/.browse/sessions/*/browsed.log. Check '${REMOTE_BIN}' is\n` +
       `  on PATH and executable there.`);
   }

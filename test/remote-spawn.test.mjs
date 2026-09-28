@@ -67,6 +67,19 @@ writeFileSync(join(shims, "setsid"), '#!/bin/sh\nexec "$@"\n', { mode: 0o755 });
 const BROKEN = join(STORE, "broken-browse");
 writeFileSync(BROKEN, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(ROOT, "browse.mjs"))} "$@"\n`);
 chmodSync(BROKEN, 0o755);
+// A spawn that exits 0 as soon as a daemon it did not wait on serves the
+// session: the shape of a client that lost a start-up race to another.
+const LOSER = join(STORE, "loser-browse");
+writeFileSync(LOSER, `#!/bin/sh
+if [ "$1" = "__serve" ]; then
+  sleep 1.5
+  ${quote(BIN)} __serve >/dev/null 2>&1 </dev/null &
+  until node -e 'fetch("http://127.0.0.1:"+process.env.BROWSE_PORT+"/health").then(r=>process.exit(r.ok?0:1),()=>process.exit(1))'; do sleep 0.2; done
+  exit 0
+fi
+exec ${quote(BIN)} "$@"
+`);
+chmodSync(LOSER, 0o755);
 
 const browsers = process.env.PLAYWRIGHT_BROWSERS_PATH ||
   (platform() === "darwin" ? join(homedir(), "Library", "Caches", "ms-playwright") : join(homedir(), ".cache", "ms-playwright"));
@@ -100,7 +113,7 @@ try {
   let r = remote({}, "open", "about:blank");
   check("--remote open succeeds", r.code === 0 && /\[shots\/[^\]]+\.png\]/.test(r.out), `${r.code} ${r.out}\n${r.err}`);
   check("…with the daemon spawned by the remote launcher (per-session spawn log)",
-    spawnLogs().includes(`spawn-${SESSION}.log`), spawnLogs().join(","));
+    spawnLogs().some((f) => f.startsWith(`spawn-${SESSION}@`)), spawnLogs().join(","));
 
   console.log("\ninit --file is read on the client");
   writeFileSync(join(CLIENT_CWD, "mark.js"), "window.__mark = 'from-client-file';\n");
@@ -125,11 +138,11 @@ try {
   r = remote({}, "-s", fresh, "init", "--file", "missing.js");
   check("an unreadable init --file exits 1 and says so",
     r.code === 1 && /cannot read 'missing\.js'/.test(r.err) && /on this machine/.test(r.err), `${r.code} ${r.err}`);
-  check("…without starting a remote daemon", !spawnLogs().includes(`spawn-${fresh}.log`), spawnLogs().join(","));
+  check("…without starting a remote daemon", !spawnLogs().some((f) => f.startsWith(`spawn-${fresh}@`)), spawnLogs().join(","));
   writeFileSync(join(CLIENT_CWD, "bad.js"), "window.(\n");
   r = remote({}, "-s", fresh, "init", "--file", "bad.js");
   check("a file that does not parse exits 1 before starting anything",
-    r.code === 1 && /'bad\.js' does not parse/.test(r.err) && !spawnLogs().includes(`spawn-${fresh}.log`), `${r.code} ${r.err}`);
+    r.code === 1 && /'bad\.js' does not parse/.test(r.err) && !spawnLogs().some((f) => f.startsWith(`spawn-${fresh}@`)), `${r.code} ${r.err}`);
   r = remote({}, "-s", fresh, "--viewport", "800x600", "open", "about:blank");
   check("…so the retry's launch flags are accepted, not refused", r.code === 0 && !/only applies when the browser starts/.test(r.err), `${r.code} ${r.err}`);
   remote({}, "-s", fresh, "close");
@@ -141,11 +154,26 @@ try {
   check("…and names the real error from the remote log",
     /failed to start on fakehost/.test(r.err) && /Cannot find module/.test(r.err), r.err);
 
+  // An earlier spawn's exit line, left in the remote's data dir, is not this
+  // spawn's: it must not fail a start that is going fine.
+  const stale = `${SESSION}-stale`;
+  writeFileSync(join(REMOTE_HOME, ".browse", `spawn-${stale}@old.log`), "boom\nbrowse: __serve exited with status 1\n");
+  r = remote({}, "-s", stale, "open", "about:blank");
+  check("a previous run's exit line does not fail a new start", r.code === 0, `${r.code} ${r.err}`);
+  check("…and the stale log is cleared", !spawnLogs().includes(`spawn-${stale}@old.log`), spawnLogs().join(","));
+  remote({}, "-s", stale, "close");
+
+  // The log read is slowed so the exit line is seen AFTER a failed health check
+  // and before the next one: the client has to ask /health again, not give up.
+  r = remote({ BROWSE_REMOTE_BIN: LOSER, FAKE_TAIL_DELAY_MS: "6000" }, "-s", `${SESSION}-race`, "open", "about:blank");
+  check("a spawn that exits 0 while a daemon serves the session is not a failure", r.code === 0, `${r.code} ${r.err}`);
+  remote({}, "-s", `${SESSION}-race`, "close");
+
   r = remote({}, "close");
   check("close on the remote session exits 0", r.code === 0 && /closed/.test(r.out), `${r.code} ${r.out}\n${r.err}`);
 } finally {
   remote({}, "close");
-  remote({}, "-s", `${SESSION}-f`, "close");
+  for (const s of ["f", "stale", "race"]) remote({}, "-s", `${SESSION}-${s}`, "close");
   rmSync(STORE, { recursive: true, force: true });
 }
 

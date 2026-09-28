@@ -22,7 +22,7 @@ let boxes = [], created = [], deleted = [], execs = [], uploads = [], seq = 0;
 let version = "browse 0.1.0 (build deadbeef)", refreshFails = false, uploadStatus = 200;
 // Whether browse on the box can start a daemon (the readiness check `up` and
 // `install` run), and the last script `install` ran detached.
-let readyFails = false, script = "";
+let readyFails = false, readyBroken = false, script = "";
 const READY_ERR = "browse cannot start a browser daemon on this box:\nbrowse: daemon failed to start: Cannot find module 'playwright-core/package.json'\n";
 
 const server = http.createServer(async (req, res) => {
@@ -41,7 +41,7 @@ const server = http.createServer(async (req, res) => {
     boxes = b.boxes || []; created = []; deleted = []; execs = []; uploads = []; seq = 0;
     version = b.version ?? "browse 0.1.0 (build deadbeef)";
     refreshFails = !!b.refreshFails; uploadStatus = b.uploadStatus || 200;
-    readyFails = !!b.readyFails; script = "";
+    readyFails = !!b.readyFails; readyBroken = !!b.readyBroken; script = "";
     return send(200, { ok: true });
   }
   if (url === "/__log") return send(200, { boxes, created, deleted, execs, uploads, script });
@@ -75,6 +75,7 @@ const server = http.createServer(async (req, res) => {
       return send(200, { exit_code: 0, output: ready ? "browse: a daemon starts and serves here\n__DONE__ 0\n" : `${READY_ERR}__DONE__ 1\n` });
     }
     if (/__serve/.test(cmd)) {
+      if (readyBroken) return send(502, { error: "gateway went away" });
       return send(200, readyFails ? { exit_code: 1, output: READY_ERR } : { exit_code: 0, output: "browse: a daemon starts and serves here\n" });
     }
     // The refresh runs in its own call, and a box with no route to the repo is
@@ -113,6 +114,9 @@ const server = http.createServer(async (req, res) => {
   send(404, { error: `no route ${req.method} ${url}` });
 });
 
+// The test blocks in spawnSync between requests, often past the 5s default,
+// and a pooled socket the server closed meanwhile fails the next fetch.
+server.keepAliveTimeout = 600000;
 server.listen(0, "127.0.0.1", () => {
   process.stdout.write(`PORT ${server.address().port}\n`);
 });

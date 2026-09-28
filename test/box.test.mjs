@@ -17,7 +17,7 @@
 // the API was actually asked to delete.
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, openSync, ftruncateSync, closeSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, readdirSync, rmSync, openSync, ftruncateSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -264,6 +264,26 @@ try {
   check("...naming the real start-up error", /cannot start a browser/.test(broken.err) && /Cannot find module/.test(broken.err), broken.err);
   check("...printing no host on stdout", broken.out === "", broken.out);
   check("...and deleting the useless box", (await deletedIds()) === "fakebox-1", await deletedIds());
+  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [], readyBroken: true }) });
+  const unchecked = box(["up"]);
+  check("a check that cannot even run fails up and still deletes the box",
+    unchecked.code === 1 && /could not check that browse starts/.test(unchecked.err) && (await deletedIds()) === "fakebox-1",
+    `exit ${unchecked.code} · deleted ${await deletedIds()} · ${unchecked.err}`);
+
+  // The check itself, through a real sh under INSTALL's `set -e`, against a
+  // browse that dies silently: it must still say so, exit 1 and clean up.
+  const readyCheck = /const READY_CHECK = `([\s\S]*?)`;/.exec(readFileSync(BOX, "utf8"))[1];
+  const deadBin = mkdtempSync(join(tmpdir(), "browse-deadbin-"));
+  writeFileSync(join(deadBin, "browse"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const tmpBefore = readdirSync("/tmp").filter((f) => f.startsWith("browse-ready-"));
+  const ran = spawnSync("sh", ["-c", `set -e\n${readyCheck}`], { encoding: "utf8", timeout: 60000,
+    env: { ...process.env, PATH: `${deadBin}:${process.env.PATH}` } });
+  const leftover = readdirSync("/tmp").filter((f) => f.startsWith("browse-ready-") && !tmpBefore.includes(f));
+  check("the readiness check fails a silent daemon death with exit 1 and its message",
+    ran.status === 1 && /cannot start a browser daemon/.test(ran.stdout), `exit ${ran.status} · ${ran.stdout}${ran.stderr}`);
+  check("...and leaves nothing in /tmp", leftover.length === 0, leftover.join(","));
+  rmSync(deadBin, { recursive: true, force: true });
+
   await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [{ id: "fakebox-9", status: "running" }] }) });
   const installed = box(["install", "fakebox-9"]);
   check("install runs the same check after setup",

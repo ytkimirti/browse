@@ -48,6 +48,10 @@ if (mode === "forward") {
     });
     fwd.on("exit", () => process.exit(255));
   } else {
+    // A slow read of the spawn log, so a test can let the daemon come up
+    // between the client's health check and its read of the log.
+    if (process.env.FAKE_TAIL_DELAY_MS && /^tail /.test(args.at(-1)))
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_TAIL_DELAY_MS));
     const env = { PATH: process.env.FAKE_REMOTE_PATH, HOME: process.env.FAKE_REMOTE_HOME,
       PLAYWRIGHT_BROWSERS_PATH: process.env.FAKE_REMOTE_BROWSERS };
     const r = spawnSync("sh", ["-c", args.at(-1)], { env, cwd: process.env.FAKE_REMOTE_HOME, stdio: "inherit" });

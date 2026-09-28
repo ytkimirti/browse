@@ -168,7 +168,7 @@ done
 if [ -z "$ok" ]; then
   kill $pid 2>/dev/null || true
   echo "browse cannot start a browser daemon on this box:"
-  if [ -s $out.log ]; then tail -n 20 $out.log; else awk '/fatal:/{n=5} n-->0' $out/browsed.log 2>/dev/null; fi
+  if [ -s $out.log ]; then tail -n 20 $out.log; else awk '/fatal:/{n=5} n-->0' $out/browsed.log 2>/dev/null || true; fi
   rm -rf $out $out.log; exit 1
 fi
 BROWSE_SESSION=$s browse close >/dev/null 2>&1 || kill $pid 2>/dev/null || true
@@ -595,7 +595,10 @@ switch (cmd) {
              `if a flag there does nothing, that is why`);
     // Last, on the code the box will actually run: can it start a daemon at all.
     // A box that cannot is no use to anyone, so it goes, with the reason.
-    const works = await exec(box.id, READY_CHECK, 300000);
+    const works = await exec(box.id, READY_CHECK, 300000).catch(async (e) => {
+      await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
+      die(`could not check that browse starts on ${box.id}, so the box was deleted: ${e.message}`);
+    });
     if (works.exit_code !== 0) {
       await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
       die(`browse on ${box.id} (${version.trim() || "unknown build"}) cannot start a browser, so the box was deleted:\n` +
