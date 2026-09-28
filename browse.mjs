@@ -2726,7 +2726,9 @@ async function ensureRemoteDaemon() {
   }
   warnBuildSkew(h);
   const rec = saveRemoteRun({ port: local, remotePort, host: REMOTE, ...h });
-  return h.spawnId === spawnId ? { ...rec, spawned: true } : rec;
+  // A daemon too old to echo a spawn id is credited as before (build skew is
+  // common on a box), rather than refusing the very flags that started it.
+  return h.spawnId == null || h.spawnId === spawnId ? { ...rec, spawned: true } : rec;
 }
 
 /** GET one artifact out of the remote session dir into `dest`. Returns false
@@ -2924,7 +2926,12 @@ async function ensureDaemon(attempt = 0) {
       if ((d = await findDaemon())) return spawnedChild ? { ...d, spawned: true } : d;
       // The spawner is done (its lock is gone) yet no daemon is up: its first
       // command failed and discarded the browser. Start one for this command.
-      if (!spawner && i > 0 && !existsSync(lock) && attempt < 2) return ensureDaemon(attempt + 1);
+      // Its own dir: the discarded one is named for the same second and may
+      // still be being wiped.
+      if (!spawner && i > 0 && !existsSync(lock) && attempt < 2) {
+        if (!process.env.BROWSE_OUT) setOut(`${defaultOut()}-${attempt + 2}`);
+        return ensureDaemon(attempt + 1);
+      }
       if (spawnedChild && (spawnedChild.exitCode !== null || spawnedChild.signalCode !== null)) {
         let detail = "";
         try { detail = readFileSync(DAEMON_LOG, "utf8").slice(-3000); } catch { /* no log yet */ }

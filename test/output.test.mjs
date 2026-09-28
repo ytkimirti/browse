@@ -258,7 +258,7 @@ try {
   run(s8, ['close']);
   const s9 = `out-race3-${process.pid}`;
   first = runBg(s9, ['eval', 'throw new Error("bad")']);
-  pause(300);
+  pause(100);
   r = run(s9, ['open', `${BASE}/plain`]);
   a = await first;
   check('a client waiting on a start whose first command was discarded starts its own browser',
