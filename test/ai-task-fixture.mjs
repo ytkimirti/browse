@@ -9,7 +9,7 @@ home();
 </script>`;
 let mode='ok',calls=[];
 http.createServer(async(req,res)=>{
-  const send=(n,data)=>{res.writeHead(n,{'content-type':'application/json'});res.end(JSON.stringify(data));};
+  const send=(n,data)=>{res.writeHead(n,{'content-type':'application/json',connection:'close'});res.end(JSON.stringify(data));};
   if(req.url==='/'){res.end(html);return;}
   if(req.url==='/calls')return send(200,calls);
   if(req.url.startsWith('/mode/')){mode=req.url.slice(6);calls=[];return send(200,{mode});}
