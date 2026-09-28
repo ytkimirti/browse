@@ -582,7 +582,7 @@ const NET_SECRET_WORD = /token|secret|passw|passphrase|bypass|signature|credenti
 const NET_SECRET_EXACT = /^(auth|xauth|sig|sid|pwd|pass|pin|otp|hmac)$/;
 /** Credential-flavoured names that carry none: a flag, a list of header NAMES,
  *  or a field ABOUT the secret (token_type, token_endpoint, passwordPolicy). */
-const NET_NOT_SECRET = /^(accesscontrolallowcredentials|accesscontrolallowheaders|accesscontrolexposeheaders|accesscontrolrequestheaders|wwwauthenticate|proxyauthenticate)$|(type|count|expiresin|expiresat|expires|expiry|ttl|endpoint|url|uri|enabled|required|policy|limit)$/;
+const NET_NOT_SECRET = /^(max|min|num|total|count)|^(accesscontrolallowcredentials|accesscontrolallowheaders|accesscontrolexposeheaders|accesscontrolrequestheaders|wwwauthenticate|proxyauthenticate)$|(type|count|expiresin|expiresat|expires|expiry|ttl|endpoint|url|uri|enabled|required|policy|limit)$/;
 /** `key` alone is a credential in a query string (?key=) and a feature-flag or
  *  list key in a JSON body, so only urls treat it as one. */
 function netSecretName(name, url = false) {
@@ -598,7 +598,7 @@ const NET_SECRET_VALUES = [
   /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}/g,
   /\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_\w{30,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\bsk-[\w-]{20,}/g,
+  /\bsk-(?=[\w-]*\d)[\w-]{20,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\bAIza[\w-]{35}/g,
 ];
@@ -642,58 +642,86 @@ function netRedact(headers) {
   if (NET.secrets) return headers;
   const out = {};
   for (const [k, v] of Object.entries(headers || {})) {
-    out[k] = netSecretName(k) ? netHideValue(k, v) : netScrub(v);
+    out[k] = netSecretName(k) ? netHideValue(k, v) : netScrubHeader(v);
   }
   return out;
 }
-/** Hash credential-shaped substrings, and secret-named params when the value is a url. */
-function netScrub(value) {
+/** Hash credential-shaped substrings: bearer tokens, JWTs, vendor key prefixes. */
+function netShapes(value) {
   let s = String(value);
   s = s.replace(/\b(Bearer\s+)([\w.~+/-]{16,}=*)/gi, (_m, b, t) => b + netHash(t));
   for (const re of NET_SECRET_VALUES) s = s.replace(re, (m) => (m.startsWith("<sha256:") ? m : netHash(m)));
-  // A url, or a bare path: HTTP/2's :path pseudo-header carries the query too.
-  return /^([a-z][a-z0-9+.-]*:\/\/|\/)/i.test(s) ? netQuery(s) : s;
+  return s;
 }
-/** Secret-named query/fragment params keep their name, lose their value. */
+/** A header value, which may be a url or a bare path (HTTP/2's :path, a
+ *  content-location): those also lose their secret-named params. Only a single
+ *  token counts, so a value that merely starts with a slash is left alone. */
+function netScrubHeader(value) {
+  const s = netShapes(value);
+  return /^([a-z][a-z0-9+.-]*:\/\/|\/)\S*$/i.test(s) ? netQuery(s) : s;
+}
+/** Secret-named query/fragment params keep their name, lose their value. `&`
+ *  is the `&` Go's JSON encoder writes, `&amp;` the one HTML writes. */
 function netQuery(url) {
-  return url.replace(/([?#&;])([^=&#?;]+)=([^&#;]*)/g,
-    (m, sep, k, v) => (v && !v.startsWith("<sha256:") && netSecretName(k, true) ? `${sep}${k}=${netHash(v)}` : m));
+  return url.replace(/([?#&]|\\u0026)([^=&#?\\]+)=([^&#\\]*)/g,
+    (m, sep, k, v) => (v && !v.includes("<sha256:") && netSecretName(k, true) ? `${sep}${k}=${netHash(v)}` : m));
 }
 function netRedactUrl(url) {
-  return NET.secrets ? url : netScrub(url);
+  return NET.secrets ? url : netScrubHeader(url);
 }
-/** Bodies are redacted as TEXT, before the size cap, so formatting survives and
- *  a secret straddling the cut can never leave half of itself behind. Covers
- *  JSON (also the backslash-escaped JSON inside RSC/Next payloads), form bodies,
- *  multipart fields and HTML hidden inputs/meta tags. */
-function netRedactBody(body) {
+/** Bodies are redacted as TEXT, so formatting survives and a secret can never
+ *  leave half of itself behind at the size cap. Covers JSON (also the
+ *  backslash-escaped JSON inside RSC/Next payloads), urls and paths inside
+ *  bodies, form bodies (by content type), multipart fields and HTML inputs/meta. */
+function netRedactBody(body, mime = "") {
   if (NET.secrets || typeof body !== "string" || !body) return body;
-  const hide = (k, v) => v && netSecretName(k) && !v.startsWith("<sha256:");
-  let s = netScrub(body).replace(/\bhttps?:\/\/[^\s"'<>\\]+/g, netQuery);
+  const hide = (k, v) => v && netSecretName(k) && !v.includes("<sha256:");
+  // Absolute urls, also with the `\/` slashes PHP's json_encode writes.
+  let s = netShapes(body).replace(/\bhttps?:(?:\\?\/){2}[^\s"'<>]*/g, (u) => {
+    const tail = /\\*$/.exec(u)[0]; // the `\` of a closing `\"` belongs to the JSON
+    return netQuery(u.slice(0, u.length - tail.length)) + tail;
+  });
+  // Relative urls where they are unmistakably urls: a JSON string or an attribute.
+  s = s.replace(/"(\/[^"\s\\]*\?[^"\s\\]*)"/g, (m, u) => `"${netQuery(u)}"`);
+  s = s.replace(/(\b(?:href|src|action)\s*=\s*)(["'])([^"'?]*\?[^"']*)\2/gi, (m, a, q, u) => `${a}${q}${netQuery(u)}${q}`);
   s = s.replace(/"([^"\\\n]{1,64})"(\s*:\s*)"((?:[^"\\\n]|\\.)*)"/g,
     (m, k, sep, v) => (hide(k, v) ? `"${k}"${sep}"${netHash(v)}"` : m));
   s = s.replace(/\\"([^"\\\n]{1,64})\\"(\s*:\s*)\\"([^"\\\n]*)\\"/g,
     (m, k, sep, v) => (hide(k, v) ? `\\"${k}\\"${sep}\\"${netHash(v)}\\"` : m));
-  if (/^[^\s=&]+=[^\s&]*(?:&[^\s=&]+=[^\s&]*)*$/.test(s)) {
+  // A numeric PIN or one-time code: only the short names, never maxTokens.
+  s = s.replace(/"(pin|otp|pwd|pass|passcode|password)"(\s*:\s*)(\d+)/gi, (m, k, sep, v) => `"${k}"${sep}"${netHash(v)}"`);
+  if (/x-www-form-urlencoded/i.test(mime)) {
     s = s.replace(/(^|&)([^=&]+)=([^&]*)/g, (m, sep, k, v) => (hide(k, v) ? `${sep}${k}=${netHash(v)}` : m));
   }
-  s = s.replace(/(Content-Disposition:\s*form-data;\s*name="([^"]+)"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n)([^\r\n]*)/gi,
+  s = s.replace(/(Content-Disposition:\s*form-data;\s*name="([^"]+)"[^\r\n]{0,512}\r?\n(?:[^\r\n]{1,512}\r?\n){0,8}\r?\n)([^\r\n]*)/gi,
     (m, head, k, v) => (hide(k, v) ? head + netHash(v) : m));
-  s = s.replace(/<(?:input|meta)\b[^>]*>/gi, (tag) => {
-    const k = /\b(?:name|id|property)\s*=\s*["']([^"']*)["']/i.exec(tag)?.[1];
-    if (!k || !netSecretName(k)) return tag;
-    return tag.replace(/(\b(?:value|content)\s*=\s*)(["'])([^"']*)\2/i, (m, a, q, v) => (hide(k, v) ? `${a}${q}${netHash(v)}${q}` : m));
+  s = s.replace(/<(?:input|meta)\b[^<>]{0,4096}>/gi, (tag) => {
+    const attr = /\b(name|id|property|value|content)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi;
+    const named = [...tag.matchAll(attr)].filter((a) => /^(name|id|property)$/i.test(a[1]));
+    if (!named.some((a) => netSecretName(a[2] ?? a[3] ?? a[4]))) return tag;
+    return tag.replace(attr, (m, k, d, q, u) => {
+      const v = d ?? q ?? u;
+      if (!/^(value|content)$/i.test(k) || !v || v.includes("<sha256:")) return m;
+      return m.slice(0, m.length - v.length - (u == null ? 1 : 0)) + netHash(v) + (u == null ? m.at(-1) : "");
+    });
   });
   return s;
 }
-function netClip(s) {
+/** Redact then cap. Only the kept part (plus a margin, so a value straddling
+ *  the cut is still seen whole) is scanned, so a 20MB response costs no more
+ *  than a small one; the note still reports the real size. */
+function netBody(raw, mime) {
+  const kept = raw.length > NET.bodyMax ? raw.slice(0, NET.bodyMax + 8192) : raw;
+  return netClip(netRedactBody(kept, mime), raw.length);
+}
+function netClip(s, total = s?.length) {
   if (typeof s !== "string") return s;
   // The cap applies when the body is CAPTURED, so the rest is not kept anywhere
   // and no flag can print it later — the only way to the whole thing is a bigger
   // cap and another run. Reverse-engineering an API is a top use of this log and
   // a body cut mid-string just fails to parse, so the note names the knob.
-  return s.length > NET.bodyMax
-    ? `${s.slice(0, NET.bodyMax)}…[truncated at ${NET.bodyMax} of ${s.length} bytes; not kept — raise BROWSE_NET_BODY_MAX and repeat the request]`
+  return total > NET.bodyMax
+    ? `${s.slice(0, NET.bodyMax)}…[truncated at ${NET.bodyMax} of ${total} bytes; not kept - raise BROWSE_NET_BODY_MAX and repeat the request]`
     : s;
 }
 
@@ -1400,7 +1428,7 @@ Observe / diagnose (for individual actions or a stopped task):
   browse rect <selector>            JSON geometry for the first match: top-page bounding box, frame-local
                                     viewport clipping and center hit-test. Does not scroll or change state.
                                     Center coverage is a sample, not proof the whole element is unobscured.
-  browse errors [console filters]    console + page errors, with the same archive and filter options below
+  browse errors [console filters]    console + page errors; takes console's archive and filter options (help console)
   browse console [--dir <session-dir>] [--level log,warn] [--grep <pat>] [--since <#>] [--last <n>|--all] [--json] [--ungroup]
                                     every console message the page logged, in order, with its # —
                                     the log/info/warn sibling of 'errors' (which is only the alarm).
@@ -1779,8 +1807,15 @@ function helpNames(usage) {
 function helpTopic(topic) {
   const q = topic.toLowerCase();
   const out = [];
-  for (const sec of helpModel().sections) {
-    const hit = (it) => it.names.some((n) => n.toLowerCase() === q);
+  const { sections } = helpModel();
+  const known = new Set(sections.flatMap((sec) => sec.items.flatMap((it) => it.names.map((n) => n.toLowerCase()))));
+  for (const sec of sections) {
+    // An entry also answers for the commands its text lists with slashes
+    // (goto's "open/goto/reload/goBack/goForward take --timeout"), so a lookup
+    // never misses a rule that lives in a neighbouring entry.
+    const hit = (it) => it.names.some((n) => n.toLowerCase() === q)
+      || (known.has(q) && (it.lines.join(" ").match(/[A-Za-z]+(?:\/[A-Za-z]+)+/g) || [])
+        .some((list) => list.toLowerCase().split("/").includes(q)));
     if (sec.topics.includes(q) || (sec.single && sec.items.some(hit))) { out.push(sec.text); continue; }
     if (!sec.items.some(hit)) continue;
     out.push([sec.header, ...sec.items.filter((it) => !it.entry || hit(it)).flatMap((it) => it.lines)].join("\n"));
@@ -1791,14 +1826,21 @@ function helpIndex() {
   const { intro, sections } = helpModel();
   const rows = sections.map((sec) => {
     const uses = sec.items.filter((it) => it.entry).map((it) => it.usage.replace(/^browse /, "").replace(/ · browse /g, " · "));
-    const body = uses.length ? uses.join(" · ") : sec.header.split("\n")[0];
-    // Wrap at 100 columns, breaking only between entries, under a hanging indent.
+    // Wrap at 100 columns under a hanging indent: between entries, or inside a
+    // long usage before one of its [--flag] groups.
+    const atoms = (uses.length ? uses : [sec.header.split("\n")[0]])
+      .flatMap((u, i) => u.split(/(?= \[--)/).map((a, j) => ({ text: a, sep: j ? "" : i ? " · " : "" })));
     const lines = [];
-    let cur = sec.topics[0].padEnd(11);
-    for (const [i, piece] of (uses.length ? uses : [body]).entries()) {
-      const add = (i ? " · " : "") + piece;
-      if (i && cur.length + add.length > 100) { lines.push(cur + " ·"); cur = " ".repeat(11) + piece; }
-      else cur += add;
+    let cur = sec.topics[0].padEnd(11), fresh = true;
+    for (const [n, a] of atoms.entries()) {
+      const between = a.sep !== "";
+      // A command name is never left alone at a line end, apart from its flags.
+      const glued = between && atoms[n + 1]?.sep === "" ? atoms[n + 1].text.length : 0;
+      if (!fresh && cur.length + a.text.length + a.sep.length + (between ? 2 : 0) + glued > 100) {
+        lines.push(cur + (between ? " ·" : ""));
+        cur = " ".repeat(11) + a.text.trimStart();
+      } else cur += a.sep + a.text;
+      fresh = false;
     }
     return [...lines, cur].join("\n");
   });
@@ -1806,6 +1848,7 @@ function helpIndex() {
 
 Commands by topic. 'browse help <command|topic>' prints the full usage, flags and caveats,
 e.g. 'browse help wait' or 'browse help net'; 'browse <command> --help' does the same.
+Launch flags answer to their name without dashes ('browse help viewport').
 'browse help --all' prints everything, 'browse help --env' the env vars.
 
 ${rows.join("\n")}`;
@@ -3054,15 +3097,17 @@ async function client(argv) {
     process.stderr.write(`browse: '${CAMOU_SUFFIX}' is reserved — that dir is profile '${base}' on camoufox. Use \`-p ${base} --camoufox\`.\n`);
     return 1;
   }
-  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h" || argv.slice(1).includes("--help")) {
-    const rest = argv.slice(1).filter((a) => a !== "--help");
-    // `browse wait --help` asks about `wait`; `browse ai task --help` about `ai task`.
-    const words = cmd && cmd !== "help" && !cmd.startsWith("-")
-      ? [cmd, ...(cmd === "ai" && rest[0] && !rest[0].startsWith("-") ? [rest[0]] : [])]
-      : rest.filter((a) => !a.startsWith("-"));
+  // `browse wait --help` asks about `wait`, `browse ai task --help` about `ai
+  // task`. Only right after the command: later, `--help` is a value
+  // (`fill '#q' --help` types it) or an unknown flag, never a hijack.
+  const sub = cmd === "ai" && argv[1] && !argv[1].startsWith("-") ? 1 : 0;
+  const cmdHelp = !!cmd && !cmd.startsWith("-") && cmd !== "help" && argv[1 + sub] === "--help";
+  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h" || cmdHelp) {
+    const rest = cmdHelp ? [] : argv.slice(1);
+    const words = cmdHelp ? argv.slice(0, 1 + sub) : rest.filter((a) => !["--env", "--all", "--help"].includes(a));
     if (rest.includes("--env") || words[0] === "env") { process.stdout.write(ENV_HELP + "\n"); return 0; }
     if (rest.includes("--all")) { process.stdout.write(HELP + "\n"); return 0; }
-    if (!words.length) { process.stdout.write(helpIndex() + "\n"); return 0; }
+    if (!words.length || words[0] === "help") { process.stdout.write(helpIndex() + "\n"); return 0; }
     const topic = words.join(" ");
     const text = helpTopic(topic);
     if (text) { process.stdout.write(text + "\n"); return 0; }
@@ -4816,7 +4861,7 @@ async function daemon() {
     if (error) e.error = error;
     try { e.reqHeaders = netRedact(await req.allHeaders()); } catch { /* gone */ }
     if (NET.bodies) {
-      try { const post = req.postData(); if (post) e.reqBody = netClip(netRedactBody(post)); } catch { /* binary/none */ }
+      try { const post = req.postData(); if (post) e.reqBody = netBody(post, e.reqHeaders?.["content-type"] || ""); } catch { /* binary/none */ }
     }
     let res = null;
     try { res = await req.response(); } catch { /* failed before a response */ }
@@ -4829,7 +4874,7 @@ async function daemon() {
       // Bodies only for text-ish types (JSON APIs are the point) and only up to
       // NET.bodyMax — never pull a video/image payload into the log.
       if (NET.bodies && NET.bodyMax > 0 && NET_TEXTY.test(e.mime)) {
-        try { e.resBody = netClip(netRedactBody((await res.body()).toString("utf8"))); } catch { /* redirect/no body */ }
+        try { e.resBody = netBody((await res.body()).toString("utf8"), e.mime); } catch { /* redirect/no body */ }
       }
     }
     netAppend(e);

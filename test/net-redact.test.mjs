@@ -84,11 +84,11 @@ try {
   r = browse("wait", "#done");
   check("the page finished its requests", r.code === 0, `${r.code} ${r.err}`);
 
-  const log = logged(OUT, 3);
+  const log = logged(OUT, 5);
   const leaks = log.match(/[QHBFR]SECRET-[\w-]+/g) || [];
   check("no secret marker reaches network.jsonl", leaks.length === 0, [...new Set(leaks)].join(", "));
   check("no JWT reaches network.jsonl", !log.includes(JWT), "JWT found verbatim");
-  const keeps = ["KEEP-page", "KEEP-reqid", "KEEP-alice", "KEEP-bearer", "KEEP-bob", "KEEP-trace", "KEEP-next", "KEEP-q"];
+  const keeps = ["KEEP-carol", "KEEP-php", "KEEP-go", "KEEP-step", "KEEP-lib", "KEEP-page", "KEEP-reqid", "KEEP-alice", "KEEP-bearer", "KEEP-bob", "KEEP-trace", "KEEP-next", "KEEP-q"];
   const lost = keeps.filter((k) => !log.includes(k));
   check("harmless values survive", lost.length === 0, `lost: ${lost.join(", ")}`);
   check("a harmless number named like a secret survives", log.includes('\\"maxTokens\\":500'), "maxTokens missing");
@@ -119,9 +119,25 @@ try {
   check("JSON response token and JWT are hashed", /^<sha256:/.test(resBody.token) && /^<sha256:/.test(resBody.note), e.resBody);
   check("a url inside a body loses only its secret param", /page=KEEP-next&access_token=<sha256:/.test(resBody.next || ""), resBody.next);
 
+  r = browse("net", "api/profile", "--json");
+  const p = JSON.parse(r.out.split("\n")[0] || "{}");
+  let profile = null;
+  try { profile = JSON.parse(p.resBody); } catch { /* checked below */ }
+  check("compact JSON holding an '=' still parses, harmless url intact",
+    profile?.session?.user === "KEEP-carol" && profile?.session?.avatar === "https://cdn.test/a.png?s=64", p.resBody);
+  check("a PHP-escaped url loses its token", /^https:\/\/x\.test\/cb\?a=KEEP-php&token=<sha256:/.test(profile?.php || ""), profile?.php);
+  check("a Go-escaped url loses its token", /^https:\/\/x\.test\/cb\?a=KEEP-go&token=<sha256:/.test(profile?.go || ""), profile?.go);
+
+  r = browse("net", "lib.js", "--json");
+  const lib = JSON.parse(r.out.split("\n")[0] || "{}");
+  check("a script that starts with a slash is logged unchanged",
+    lib.resBody === "/*! lib v1 */\n!function(){var a={};a.sessionId=1;if(a&&a.token==2)a.password=3;window.__lib='KEEP-lib'}();", lib.resBody);
+
   r = browse("net", "api/form", "--full");
   check("net --full, exit 0", r.code === 0, `${r.code} ${r.err}`);
   check("form body password is hashed, other fields kept", /user=KEEP-bob&password=<sha256:[0-9a-f]{12} len:10>&remember=1/.test(r.out), r.out);
+  check("a secret name after a harmless id is still hashed", /name="api_key" value="<sha256:/.test(r.out), r.out);
+  check("a relative link loses its token, keeps its other params", /href="\/reset-password\?token=<sha256:[0-9a-f]{12} len:12>&amp;step=KEEP-step"/.test(r.out), r.out);
   check("an HTML csrf meta tag is hashed, other inputs kept", /name="csrf-token" content="<sha256:/.test(r.out) && r.out.includes('value="KEEP-q"'), r.out);
 
   r = browse("net", "--grep", "HSECRET");
@@ -134,8 +150,8 @@ try {
   check("open with secrets kept, exit 0", r.code === 0, `${r.code} ${r.err}`);
   r = raw("wait", "#done");
   check("the page finished its requests", r.code === 0, `${r.code} ${r.err}`);
-  const rawLog = logged(OUT_RAW, 3);
-  const want = ["HSECRET-bypass", "HSECRET-bearer-0123456789", "QSECRET-query", "BSECRET-pw", "FSECRET-pw", "RSECRET-token", "RSECRET-cookie", "RSECRET-csrf", JWT];
+  const rawLog = logged(OUT_RAW, 5);
+  const want = ["HSECRET-bypass", "HSECRET-bearer-0123456789", "QSECRET-query", "BSECRET-pw", "FSECRET-pw", "RSECRET-token", "RSECRET-cookie", "RSECRET-csrf", "RSECRET-php", "RSECRET-go", "RSECRET-href", "RSECRET-input", JWT];
   const missing = want.filter((k) => !rawLog.includes(k));
   check("every secret is kept verbatim", missing.length === 0, `missing: ${missing.join(", ")}`);
   check("…and nothing is hashed", !rawLog.includes("<sha256:"), "found a hash");

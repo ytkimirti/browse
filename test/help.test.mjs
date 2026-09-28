@@ -29,6 +29,7 @@ function browse(...args) {
   return { code: r.status, out: r.stdout || "", err: r.stderr || "" };
 }
 
+let r0;
 try {
   console.log("index");
   const all = browse("help", "--all");
@@ -40,6 +41,8 @@ try {
   check("the index says how to get one command, everything and the env",
     /browse help <command\|topic>/.test(index.out) && /browse <command> --help/.test(index.out) &&
     /browse help --all/.test(index.out) && /browse help --env/.test(index.out), index.out);
+  check("the index stays within 100 columns", index.out.split("\n").every((l) => [...l].length <= 100),
+    index.out.split("\n").filter((l) => [...l].length > 100).join("\n"));
   check("the index lists usages, not descriptions",
     /wait <selector\|ms> \[--gone\]/.test(index.out) && !/hold until an element appears/.test(index.out), index.out);
   check("-h and --help print the index too", browse("-h").out === index.out && browse("--help").out === index.out);
@@ -52,7 +55,12 @@ try {
     /^Navigate \/ act/.test(wait.out) && /browse wait <selector\|ms>/.test(wait.out) && /takes --timeout <ms>/.test(wait.out), wait.out);
   check("…and no other command", !/browse (click|fill|net|snapshot) /.test(wait.out), wait.out);
   check("wait --help is the same text", browse("wait", "--help").out === wait.out);
-  check("--help anywhere after the command is the same text", browse("wait", "#x", "--help").out === wait.out);
+  // Straight to browse.mjs: through bin/browse a non-help command would install deps first.
+  r0 = spawnSync(process.execPath, [join(ROOT, "browse.mjs"), "net", "--all", "--help"],
+    { encoding: "utf8", env: { ...process.env, BROWSE_HOME: join(HOME, "direct") } });
+  r0 = { code: r0.status, out: r0.stdout, err: r0.stderr };
+  check("--help later in the line is not help: net refuses it as a flag, exit 1",
+    r0.code === 1 && r0.out === "" && /unknown flag '--help'/.test(r0.err), `${r0.code} ${r0.err} ${r0.out.slice(0, 100)}`);
   const net = browse("help", "net");
   check("help net prints the whole network section", /--since <#>/.test(net.out) && /Secret VALUES are hashed/.test(net.out), net.out);
   check("…including the --json record fields",
@@ -60,6 +68,10 @@ try {
   check("net --help matches help net", browse("net", "--help").out === net.out);
   const task = browse("ai", "task", "--help");
   check("ai task --help prints the AI section", task.code === 0 && /--max-steps/.test(task.out) && task.out === browse("help", "ai", "task").out, task.out);
+  check("a command whose rules live in a neighbouring entry gets them too",
+    /default 20000/.test(browse("help", "reload").out) && /default 20000/.test(browse("help", "open").out));
+  check("help help is the index", browse("help", "help").out === index.out);
+  check("a flag-shaped topic works where the flag is not a launch flag", /^Run code BEFORE/.test(browse("help", "--stub").out));
   check("topics are case-insensitive", /browse reload \| goBack \| goForward/.test(browse("help", "goback").out));
   check("launch flags answer by name", /--viewport <WxH>/.test(browse("help", "viewport").out) && /^Launch flags/.test(browse("help", "viewport").out));
   check("a section answers by topic", /^Launch flags/.test(browse("help", "launch").out) && /^Artifacts/.test(browse("help", "artifacts").out));

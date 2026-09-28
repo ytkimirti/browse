@@ -101,8 +101,12 @@ case "${CMD:-help}" in
   help|version)
     exec node "$REPO_ROOT/browse.mjs" "$@" ;;
 esac
-# …nor may `browse <command> --help`, which is the same help.
-for _a in "$@"; do [[ "$_a" == "--help" ]] && exec node "$REPO_ROOT/browse.mjs" "$@"; done
+# …nor may `browse <command> --help` (or `browse ai <sub> --help`), the same help.
+if [[ -n "$CMD" ]]; then
+  _h="${_argv[$((CMD_AT + 1))]:-}"
+  [[ "$CMD" == "ai" && -n "$_h" && "$_h" != -* ]] && _h="${_argv[$((CMD_AT + 2))]:-}"
+  [[ "$_h" == "--help" ]] && exec node "$REPO_ROOT/browse.mjs" "$@"
+fi
 
 # `setup` aimed at a remote installs the deps on THAT machine, so this one needs
 # none of it. Local `setup` is the block further down, which does the installing.
