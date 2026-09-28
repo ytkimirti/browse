@@ -3347,7 +3347,8 @@ async function client(argv) {
   const cmd = argv[0];
   // A launch flag AFTER the command was swallowed as an argument to it (a URL, a
   // selector, a value), which is silent and looks like the flag did nothing.
-  const late = argv.slice(1).find((a) => LAUNCH_FLAGS[a] || LAUNCH_OPTS[a]);
+  // `help --viewport` asks about the flag, so help is exempt.
+  const late = cmd !== "help" && argv.slice(1).find((a) => LAUNCH_FLAGS[a] || LAUNCH_OPTS[a]);
   if (late) {
     process.stderr.write(`browse: ${late} configures how the browser starts, so it goes BEFORE the command — e.g. \`browse ${late} ${cmd} …\`\n`);
     return 1;
@@ -3355,7 +3356,7 @@ async function client(argv) {
   // Same for -s / -p: swallowed as an argument, the command quietly drives the
   // DEFAULT session, or a profile-less browser, which reads as the profile being
   // ignored rather than never selected at all.
-  const lateSel = argv.slice(1).find((a) => SELECT_FLAGS.has(a));
+  const lateSel = cmd !== "help" && argv.slice(1).find((a) => SELECT_FLAGS.has(a));
   if (lateSel) {
     const val = argv[argv.indexOf(lateSel, 1) + 1];
     const pair = `${lateSel}${val && !val.startsWith("-") ? ` ${val}` : lateSel === "--remote" ? " <sshhost>" : " <name>"}`;

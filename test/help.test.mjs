@@ -55,6 +55,10 @@ try {
     /^Navigate \/ act/.test(wait.out) && /browse wait <selector\|ms>/.test(wait.out) && /takes --timeout <ms>/.test(wait.out), wait.out);
   check("…and no other command", !/browse (click|fill|net|snapshot) /.test(wait.out), wait.out);
   check("wait --help is the same text", browse("wait", "--help").out === wait.out);
+  const vp = browse("help", "--viewport");
+  check("help --viewport prints the launch flags, exit 0", vp.code === 0 && /--viewport/.test(vp.out) && vp.out === browse("help", "viewport").out, `${vp.code} ${vp.err}`);
+  const prof = browse("help", "-p");
+  check("help -p prints the profile section, exit 0", prof.code === 0 && /browse -p <name>/.test(prof.out), `${prof.code} ${prof.err}`);
   // Straight to browse.mjs: through bin/browse a non-help command would install deps first.
   r0 = spawnSync(process.execPath, [join(ROOT, "browse.mjs"), "net", "--all", "--help"],
     { encoding: "utf8", env: { ...process.env, BROWSE_HOME: join(HOME, "direct") } });
