@@ -2226,7 +2226,7 @@ const REMOTE_BIN = process.env.BROWSE_REMOTE_BIN || "browse";
  *  client only ever reads the exit line of the daemon it started itself: not an
  *  earlier run's, and not one a second client racing it for the session wrote.
  *  `@` ends the session part, which sanitizeName never produces. */
-const spawnLog = (id = "*") => `~/.browse/spawn-${SESSION}@${id}.log`;
+const spawnLog = (id) => `~/.browse/spawn-${SESSION}@${id}.log`;
 /** The line the remote spawn's shell appends once `__serve` has exited. A daemon
  *  that is up never prints it, so seeing it while waiting means start-up failed. */
 const SERVE_EXIT = "browse: __serve exited with status";
@@ -2274,12 +2274,13 @@ async function spawnRemoteDaemon(remotePort) {
   // only place that failure is written down at all.
   // The exit line is what lets the client stop waiting as soon as the daemon dies.
   const serve = `env ${assigns} ${REMOTE_BIN} __serve; echo "${SERVE_EXIT} $?"`;
-  // Earlier spawns' logs for this session go first. Braces keep the `&` on the
-  // spawn alone, so the rm and mkdir run before this shell returns.
+  // Housekeeping: this session's logs nobody has written to for a while go.
+  // find, not an rm glob: ssh runs this in the LOGIN shell, and zsh and fish
+  // fail a glob that matches nothing. Braces keep the `&` on the spawn alone.
   const log = spawnLog(`${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
   const remoteCmd =
-    `mkdir -p ~/.browse && rm -f ${spawnLog()} && { nohup setsid sh -c ${shq(serve)} ` +
-    `>${log} 2>&1 </dev/null & }`;
+    `mkdir -p ~/.browse && find ~/.browse -maxdepth 1 -name ${shq(`spawn-${SESSION}@*.log`)} -mmin +2 -delete && ` +
+    `{ nohup setsid sh -c ${shq(serve)} >${log} 2>&1 </dev/null & }`;
 
   if (process.env.BROWSE_REMOTE_SPAWN) {
     spawnSync("sh", ["-c", process.env.BROWSE_REMOTE_SPAWN],

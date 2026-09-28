@@ -5,7 +5,7 @@
 //
 //   ssh -M ... -L h:lp:h:rp host   start a TCP forward lp -> rp, pid in the -S file
 //   ssh -O check|exit host         that forward's liveness / teardown
-//   ssh [opts] host '<cmd>'        run <cmd> with sh, as a fresh remote login would:
+//   ssh [opts] host '<cmd>'        run <cmd> with sh ($FAKE_REMOTE_SHELL), as a fresh login would:
 //                                  HOME=$FAKE_REMOTE_HOME and no BROWSE_* from the caller
 //
 // `node ssh-fixture.mjs forward <lp> <rp>` is the forwarder process itself.
@@ -54,7 +54,8 @@ if (mode === "forward") {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_TAIL_DELAY_MS));
     const env = { PATH: process.env.FAKE_REMOTE_PATH, HOME: process.env.FAKE_REMOTE_HOME,
       PLAYWRIGHT_BROWSERS_PATH: process.env.FAKE_REMOTE_BROWSERS };
-    const r = spawnSync("sh", ["-c", args.at(-1)], { env, cwd: process.env.FAKE_REMOTE_HOME, stdio: "inherit" });
+    // Real ssh runs the line in the remote user's login shell, which is not always sh.
+    const r = spawnSync(process.env.FAKE_REMOTE_SHELL || "sh", ["-c", args.at(-1)], { env, cwd: process.env.FAKE_REMOTE_HOME, stdio: "inherit" });
     process.exit(r.status ?? 255);
   }
 }

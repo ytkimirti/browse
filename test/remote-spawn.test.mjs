@@ -14,7 +14,7 @@
 // Asserts output AND exit status for the success and the failure paths.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync, symlinkSync, copyFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync, symlinkSync, copyFileSync, chmodSync, utimesSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -157,10 +157,15 @@ try {
   // An earlier spawn's exit line, left in the remote's data dir, is not this
   // spawn's: it must not fail a start that is going fine.
   const stale = `${SESSION}-stale`;
-  writeFileSync(join(REMOTE_HOME, ".browse", `spawn-${stale}@old.log`), "boom\nbrowse: __serve exited with status 1\n");
+  const staleLog = join(REMOTE_HOME, ".browse", `spawn-${stale}@old.log`);
+  writeFileSync(staleLog, "boom\nbrowse: __serve exited with status 1\n");
+  utimesSync(staleLog, new Date(Date.now() - 600000), new Date(Date.now() - 600000));
+  // A racing client's log is fresh, and it is still reading it.
+  writeFileSync(join(REMOTE_HOME, ".browse", `spawn-${stale}@racing.log`), "installing…\n");
   r = remote({}, "-s", stale, "open", "about:blank");
   check("a previous run's exit line does not fail a new start", r.code === 0, `${r.code} ${r.err}`);
   check("…and the stale log is cleared", !spawnLogs().includes(`spawn-${stale}@old.log`), spawnLogs().join(","));
+  check("…but a fresh one another client may be reading is not", spawnLogs().includes(`spawn-${stale}@racing.log`), spawnLogs().join(","));
   remote({}, "-s", stale, "close");
 
   // The log read is slowed so the exit line is seen AFTER a failed health check
@@ -169,11 +174,20 @@ try {
   check("a spawn that exits 0 while a daemon serves the session is not a failure", r.code === 0, `${r.code} ${r.err}`);
   remote({}, "-s", `${SESSION}-race`, "close");
 
+  // ssh hands the spawn line to the remote LOGIN shell. zsh fails a glob that
+  // matches nothing, which every first start of a session would hit.
+  const zsh = spawnSync("sh", ["-c", "command -v zsh"], { encoding: "utf8" }).stdout.trim();
+  if (zsh) {
+    r = remote({ FAKE_REMOTE_SHELL: zsh }, "-s", `${SESSION}-zsh`, "open", "about:blank");
+    check("a first start through a zsh login shell succeeds", r.code === 0, `${r.code} ${r.err}`);
+    remote({ FAKE_REMOTE_SHELL: zsh }, "-s", `${SESSION}-zsh`, "close");
+  } else console.log("  skip zsh login shell (no zsh here)");
+
   r = remote({}, "close");
   check("close on the remote session exits 0", r.code === 0 && /closed/.test(r.out), `${r.code} ${r.out}\n${r.err}`);
 } finally {
   remote({}, "close");
-  for (const s of ["f", "stale", "race"]) remote({}, "-s", `${SESSION}-${s}`, "close");
+  for (const s of ["f", "stale", "race", "zsh"]) remote({}, "-s", `${SESSION}-${s}`, "close");
   rmSync(STORE, { recursive: true, force: true });
 }
 
