@@ -154,7 +154,8 @@ async function apiKey() {
  *  start a daemon the way \`browse --remote\` does (\`browse __serve\` through the
  *  PATH wrapper), wait for its /health, close it. A box whose launcher could not
  *  start a daemon used to report "ready" here and fail every session later.
- *  Leaves nothing behind: the session dir is a temp dir, removed after. */
+ *  Leaves nothing behind: the session dir is a temp dir, removed after. Runs
+ *  under INSTALL's \`set -e\`, so every expected failure is guarded. */
 const READY_CHECK = `s=browse-ready-$$; out=/tmp/$s
 port=$(node -e 'const v=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(v.address().port);v.close()})')
 BROWSE_SESSION=$s BROWSE_PORT=$port BROWSE_OUT=$out BROWSE_VIDEO=0 BROWSE_ENGINE=chromium BROWSE_REMOTE_SIDE=1 browse __serve >$out.log 2>&1 </dev/null &
@@ -165,12 +166,12 @@ for i in $(seq 1 120); do
   sleep 1
 done
 if [ -z "$ok" ]; then
-  kill $pid 2>/dev/null
+  kill $pid 2>/dev/null || true
   echo "browse cannot start a browser daemon on this box:"
   if [ -s $out.log ]; then tail -n 20 $out.log; else awk '/fatal:/{n=5} n-->0' $out/browsed.log 2>/dev/null; fi
   rm -rf $out $out.log; exit 1
 fi
-BROWSE_SESSION=$s browse close >/dev/null 2>&1 || kill $pid 2>/dev/null
+BROWSE_SESSION=$s browse close >/dev/null 2>&1 || kill $pid 2>/dev/null || true
 rm -rf $out $out.log
 echo "browse: a daemon starts and serves here"`;
 
@@ -209,7 +210,9 @@ async function runScript(id, script, label) {
   // exited before it ever printed — the failure branch below was unreachable and
   // every broken install was reported 20 minutes later as a timeout.
   const payload = Buffer.from(script).toString("base64");
-  await exec(id, `nohup setsid sh -c "echo ${payload} | base64 -d | sh; echo __DONE__ \$?" > ${log} 2>&1 </dev/null &`);
+  // `\$?`, escaped: inside the outer double quotes a bare $? is expanded by the
+  // exec's OWN shell before the script runs, so every install read "__DONE__ 0".
+  await exec(id, `nohup setsid sh -c "echo ${payload} | base64 -d | sh; echo __DONE__ \\$?" > ${log} 2>&1 </dev/null &`);
   let seen = 0;
   for (let i = 0; i < 240; i++) {
     await sleep(5000);

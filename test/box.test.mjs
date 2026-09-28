@@ -269,6 +269,15 @@ try {
   check("install runs the same check after setup",
     installed.code === 0 && /browse setup\n[\s\S]*browse __serve/.test((await log()).script) && /daemon starts and serves/.test(installed.err),
     `exit ${installed.code} · ${installed.err}`);
+  // The status line is echoed by an outer shell around the script. Run the exact
+  // command install sent, with the script swapped for a failing step, through a
+  // real sh: an unescaped $? was expanded before the script ran, so it read 0.
+  const detached = (await log()).execs.find((c) => /base64 -d \| sh/.test(c)).replace(/^sh -c /, "");
+  const statusLog = join(HOME, "install-status.log");
+  spawnSync("sh", ["-c", detached.replace(/echo \S+ \| base64 -d \| sh/, "(exit 3)").replace(/nohup setsid /, "")
+    .replace(/\/workspace\/home\/browse-install\.log/, statusLog).replace(/&\s*$/, "")]);
+  check("...and its status line carries the script's real exit status",
+    /__DONE__ 3/.test(readFileSync(statusLog, "utf8")), readFileSync(statusLog, "utf8"));
   await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [{ id: "fakebox-9", status: "running" }], readyFails: true }) });
   const badInstall = box(["install", "fakebox-9"]);
   check("an install whose browse cannot start a daemon fails, exit 1",
