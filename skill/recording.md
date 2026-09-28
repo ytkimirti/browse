@@ -48,7 +48,7 @@ A deliberate secondary tab contributes footage while active. Switching back
 continues the earlier tab's footage, and closing a secondary tab retains what
 was already recorded. Popups begin excluded: inspect a consent or login screen
 before choosing to include it. Recording selection applies from that moment,
-so choose before the interaction that needs proof; see `browse help`.
+so choose before the interaction that needs proof; see `browse help target`.
 
 If finalization fails, retained raw files can contain excluded popup footage.
 Treat them as editing sources, not deliverables. Review the finished MP4 before

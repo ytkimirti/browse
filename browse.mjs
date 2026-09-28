@@ -49,7 +49,7 @@
  *   ~/.browse/camoufox-pw/           playwright-core pinned to camoufox's build,
  *                                    patched by the launcher so camoufox can
  *                                    record video (see bin/browse)
- *   ~/.browse/sessions/<stamp>/      transcript.md, recording.mp4, feedback.md,
+ *   ~/.browse/sessions/<stamp>/      transcript.md, recording.mp4,
  *                                    browsed.log, shots/step-*.png (video/*.webm
  *                                    only while live)
  *   ~/.browse/{profiles,state,run}/  persistent logins, saved auth, live daemons
@@ -81,7 +81,7 @@
  *   BROWSE_FPS         capture and output frame rate (default 30, max 60)
  *   BROWSE_NET_BODIES=0      don't capture request/response bodies
  *   BROWSE_NET_BODY_MAX      max bytes kept per body (default 32768)
- *   BROWSE_NET_SECRETS=1     keep auth headers/cookies verbatim (default: values hashed)
+ *   BROWSE_NET_SECRETS=1     keep secrets in the network log verbatim (default: values hashed)
  *   BROWSE_KEEP_WEBM=1 keep the raw .webm after the mp4 is written, so the
  *                      session can be re-cut later with one ffmpeg call
  *   BROWSE_FFMPEG      the ffmpeg used to finalize the mp4
@@ -620,8 +620,8 @@ const NET_CONDITIONS = {
 // the context) is appended to `network.jsonl` in the session dir as it completes
 // — so `browse net` can query it while the browser is live AND long after the
 // session closed (the file outlives the daemon). Bodies are captured for
-// text-ish content types up to bodyMax bytes; auth headers/cookies are redacted
-// unless BROWSE_NET_SECRETS=1.
+// text-ish content types up to bodyMax bytes; secret values in headers, urls and
+// bodies are hashed unless BROWSE_NET_SECRETS=1.
 const NET = {
   on: process.env.BROWSE_NET !== "0",
   bodies: process.env.BROWSE_NET_BODIES !== "0",
@@ -632,7 +632,40 @@ const NET = {
   secrets: process.env.BROWSE_NET_SECRETS === "1",
 };
 const NET_TEXTY = /json|text|xml|javascript|x-www-form-urlencoded|graphql|csv|html|plain/i;
-const NET_SECRET_HEADER = /^(authorization|cookie|set-cookie|proxy-authorization|x-api-key|x-auth-token|x-amz-security-token|x-csrf-token)$/i;
+/** Names whose VALUES are credentials, for headers, query params, form fields
+ *  and JSON keys alike. A fixed header list stored x-vercel-protection-bypass
+ *  verbatim, so this matches the name folded to [a-z0-9] (clientSecret,
+ *  client_secret and client-secret are one name): the strong words anywhere in
+ *  it, the short ones only as the whole name, where they cannot be a fragment of
+ *  something harmless (author, keyboard, pinned). */
+const NET_SECRET_WORD = /token|secret|passw|passphrase|bypass|signature|credential|csrf|xsrf|cookie|session|apikey|accesskey|privatekey|secretkey|clientkey|subscriptionkey|functionskey|authorization|authkey|jwt/;
+const NET_SECRET_EXACT = /^(auth|xauth|sig|sid|pwd|pass|pin|otp|hmac)$/;
+/** Credential-flavoured names that carry none: a flag, a list of header NAMES,
+ *  or a field ABOUT the secret (token_type, token_endpoint, passwordPolicy). */
+const NET_NOT_SECRET = /^(accesscontrolallowcredentials|accesscontrolallowheaders|accesscontrolexposeheaders|accesscontrolrequestheaders|wwwauthenticate|proxyauthenticate)$|(type|count|expiresin|expiresat|expires|expiry|ttl|endpoint|url|uri|enabled|required|policy|limit)$/;
+/** `key` alone is a credential in a query string (?key=) and a feature-flag or
+ *  list key in a JSON body, so only urls treat it as one. */
+function netSecretName(name, url = false) {
+  let n = String(name);
+  try { n = decodeURIComponent(n); } catch { /* keep it raw */ }
+  // maxTokens, total_tokens: a COUNT of secrets. Judged on the first word, so
+  // minioSecretKey and mintToken still count.
+  const first = n.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[^A-Za-z0-9]+/).filter(Boolean)[0]?.toLowerCase();
+  if (/^(max|min|num|total|count)$/.test(first || "")) return false;
+  n = n.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return !!n && !NET_NOT_SECRET.test(n) && (NET_SECRET_WORD.test(n) || NET_SECRET_EXACT.test(n) || (url && n === "key"));
+}
+/** Credential SHAPES, caught wherever they sit (a harmless-named header, a url
+ *  path, a response body): JWTs, bearer tokens and the common vendor key prefixes. */
+const NET_SECRET_VALUES = [
+  /\beyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*/g,
+  /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}/g,
+  /\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_\w{30,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\bsk-(?=[\w-]{0,200}?\d)[\w-]{20,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bAIza[\w-]{35}/g,
+];
 function netFileIn(dir) { return `${dir}/network.jsonl`; }
 /** Playwright dims parts of its error messages with ANSI codes (the call log
  *  arrives as literal ESC[2m…ESC[22m). Those bytes are noise in a JSON response
@@ -673,18 +706,97 @@ function netRedact(headers) {
   if (NET.secrets) return headers;
   const out = {};
   for (const [k, v] of Object.entries(headers || {})) {
-    out[k] = NET_SECRET_HEADER.test(k) ? netHideValue(k, v) : v;
+    out[k] = netSecretName(k) ? netHideValue(k, v) : netScrubHeader(v);
   }
   return out;
 }
-function netClip(s) {
+/** A value that is already nothing but a digest (or a scheme plus one). */
+const NET_HASHED = /^(?:Bearer )?<sha256:[0-9a-f]{12} len:\d+>$/;
+/** Hash credential-shaped substrings: bearer tokens, JWTs, vendor key prefixes. */
+function netShapes(value) {
+  let s = String(value);
+  s = s.replace(/\b(Bearer\s+)([\w.~+/-]{16,}=*)/gi, (_m, b, t) => b + netHash(t));
+  for (const re of NET_SECRET_VALUES) s = s.replace(re, (m) => (m.startsWith("<sha256:") ? m : netHash(m)));
+  return s;
+}
+/** A header value, which may be a url or a bare path (HTTP/2's :path, a
+ *  content-location): those also lose their secret-named params. Only a single
+ *  token counts, so a value that merely starts with a slash is left alone. */
+function netScrubHeader(value) {
+  const s = netShapes(value);
+  return /^([a-z][a-z0-9+.-]*:\/\/|\/)\S*$/i.test(s) ? netQuery(s) : s;
+}
+/** Secret-named query/fragment params keep their name, lose their value. `&`
+ *  is the `&` Go's JSON encoder writes, `&amp;` the one HTML writes. */
+function netQuery(url) {
+  return url.replace(/(&amp;|\\u0026|[?#&;])([^=&#?;\\]+)=([^&#?;\\]*)/g,
+    (m, sep, k, v) => (v && !NET_HASHED.test(v) && netSecretName(k, true) ? `${sep}${k}=${netHash(v)}` : m));
+}
+function netRedactUrl(url) {
+  return NET.secrets ? url : netScrubHeader(url);
+}
+/** Bodies are redacted as TEXT, so formatting survives and a secret can never
+ *  leave half of itself behind at the size cap. Covers JSON (also the
+ *  backslash-escaped JSON inside RSC/Next payloads), urls and paths inside
+ *  bodies, form bodies (by content type), multipart fields and HTML inputs/meta. */
+function netRedactBody(body, mime = "") {
+  if (NET.secrets || typeof body !== "string" || !body) return body;
+  const hide = (k, v) => v && netSecretName(k) && !NET_HASHED.test(v);
+  // Absolute urls, also with the `\/` slashes PHP's json_encode writes.
+  let s = netShapes(body).replace(/\bhttps?:(?:\\?\/){2}[^\s"'<>]*/g, (u) => {
+    const tail = /\\*$/.exec(u)[0]; // the `\` of a closing `\"` belongs to the JSON
+    return netQuery(u.slice(0, u.length - tail.length)) + tail;
+  });
+  // Relative urls where they are unmistakably urls: a JSON string or an attribute.
+  s = s.replace(/"(\/[^"\s\\]*\?[^"\s\\]*)"/g, (m, u) => `"${netQuery(u)}"`);
+  s = s.replace(/(\b(?:href|src|action)\s*=\s*)(["'])([^"'?]*\?[^"']*)\2/gi, (m, a, q, u) => `${a}${q}${netQuery(u)}${q}`);
+  s = s.replace(/"([^"\\\n]{1,64})"(\s*:\s*)"((?:[^"\\\n]|\\.)*)"/g,
+    (m, k, sep, v) => (hide(k, v) ? `"${k}"${sep}"${netHash(v)}"` : m));
+  s = s.replace(/\\"([^"\\\n]{1,64})\\"(\s*:\s*)\\"([^"\\\n]*)\\"/g,
+    (m, k, sep, v) => (hide(k, v) ? `\\"${k}\\"${sep}\\"${netHash(v)}\\"` : m));
+  // A numeric PIN or one-time code: only the short names, never maxTokens.
+  s = s.replace(/"(pin|otp|pwd|passcode|password)"(\s*:\s*)(\d+)(?![\d.eE])/gi, (m, k, sep, v) => `"${k}"${sep}"${netHash(v)}"`);
+  if (/x-www-form-urlencoded/i.test(mime)) {
+    s = s.replace(/(^|&)([^=&]+)=([^&]*)/g, (m, sep, k, v) => (hide(k, v) ? `${sep}${k}=${netHash(v)}` : m));
+  }
+  s = s.replace(/(Content-Disposition:\s*form-data;\s*name="([^"]+)"[^\r\n]{0,512}\r?\n(?:[^\r\n]{1,512}\r?\n){0,8}\r?\n)([^\r\n]*)/gi,
+    (m, head, k, v) => (hide(k, v) ? head + netHash(v) : m));
+  s = s.replace(/<(?:input|meta)\b[^<>]{0,4096}>/gi, (tag) => {
+    const attr = /\b(name|id|property|value|content)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi;
+    const named = [...tag.matchAll(attr)].filter((a) => /^(name|id|property)$/i.test(a[1]));
+    if (!named.some((a) => netSecretName(a[2] ?? a[3] ?? a[4]))) return tag;
+    return tag.replace(attr, (m, k, d, q, u) => {
+      const v = d ?? q ?? u;
+      if (!/^(value|content)$/i.test(k) || !v || NET_HASHED.test(v)) return m;
+      return m.slice(0, m.length - v.length - (u == null ? 1 : 0)) + netHash(v) + (u == null ? m.at(-1) : "");
+    });
+  });
+  return s;
+}
+/** Redact then cap. Only the kept part (plus a margin, so a value straddling
+ *  the cut is still seen whole) is scanned, so a 20MB response costs no more
+ *  than a small one; the note still reports the real size. */
+function netBody(raw, mime) {
+  if (raw.length <= NET.bodyMax) return netRedactBody(raw, mime);
+  // Redaction SHRINKS text, so the margin is measured after it: widen the
+  // slice until the redacted text still reaches past the cut by the margin.
+  const want = NET.bodyMax + 8192;
+  let n = want, s;
+  for (;;) {
+    s = netRedactBody(raw.slice(0, n), mime);
+    if (n >= raw.length || s.length >= want) break;
+    n = Math.min(raw.length, n * 2);
+  }
+  return netClip(s, raw.length);
+}
+function netClip(s, total = s?.length) {
   if (typeof s !== "string") return s;
   // The cap applies when the body is CAPTURED, so the rest is not kept anywhere
   // and no flag can print it later — the only way to the whole thing is a bigger
   // cap and another run. Reverse-engineering an API is a top use of this log and
   // a body cut mid-string just fails to parse, so the note names the knob.
-  return s.length > NET.bodyMax
-    ? `${s.slice(0, NET.bodyMax)}…[truncated at ${NET.bodyMax} of ${s.length} bytes; not kept — raise BROWSE_NET_BODY_MAX and repeat the request]`
+  return total > NET.bodyMax
+    ? `${s.slice(0, NET.bodyMax)}…[truncated at ${NET.bodyMax} of ${total} bytes; not kept - raise BROWSE_NET_BODY_MAX and repeat the request]`
     : s;
 }
 
@@ -1308,16 +1420,7 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     server compiling a route on first hit. goBack/goForward FAIL when
                                     there is nowhere to go. A landing url that looks like a sign-in
                                     wall is called out inline, here and after a click.
-  browse click <selector>           click an element. Every command that takes a SELECTOR (click through
-                                    focus below — not drag or scroll) also takes --timeout <ms>, written
-                                    LAST: raise it for a control that is still rendering, lower it to
-                                    fail fast. A selector spanning controls and non-controls is refused
-                                    (text=Pause must not click prose instead of the Pause button). When
-                                    several controls match and the first is covered, browse gives up after
-                                    ${AMBIGUOUS_MS}ms and lists every match with what is on top of it.
-                                    click/dblclick/rightclick/hover also take --position <x,y> after
-                                    the selector, before --timeout: pixels from the padding-box top-left.
-                                    Out-of-bounds positions fail. Use rect to inspect the element first.
+  browse click <selector>           click an element
   browse dblclick <selector>        double-click an element
   browse rightclick <selector>      right-click it — opens the app's context menu
   browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
@@ -1351,6 +1454,13 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     opens a region at the default factor (${IDLE.speed}x); 'speed off' with
                                     nothing open is an error. A 'toast' inside the region is
                                     fast-forwarded with it, so show captions OUTSIDE it.
+  Every command in this section that takes a SELECTOR, except drag and scroll, takes --timeout <ms>,
+  written LAST: raise it for a control that is still rendering, lower it to fail fast. A selector
+  spanning controls and non-controls is refused (text=Pause must not click prose instead of the
+  Pause button). When several controls match and the first is covered, browse gives up after
+  ${AMBIGUOUS_MS}ms and lists every match with what is on top of it. click/dblclick/rightclick/hover
+  also take --position <x,y> after the selector, before --timeout: pixels from the padding-box
+  top-left. Out-of-bounds positions fail. Use rect to inspect the element first.
 
 AI tasks (preferred for multistep goals):
   browse ai task <goal>                delegate the whole goal using fresh DOM observations
@@ -1393,7 +1503,7 @@ Observe / diagnose (for individual actions or a stopped task):
   browse rect <selector>            JSON geometry for the first match: top-page bounding box, frame-local
                                     viewport clipping and center hit-test. Does not scroll or change state.
                                     Center coverage is a sample, not proof the whole element is unobscured.
-  browse errors [console filters]    console + page errors, with the same archive and filter options below
+  browse errors [console filters]    console + page errors; takes console's archive and filter options (help console)
   browse console [--dir <session-dir>] [--level log,warn] [--grep <pat>] [--since <#>] [--last <n>|--all] [--json] [--ungroup]
                                     every console message the page logged, in order, with its # —
                                     the log/info/warn sibling of 'errors' (which is only the alarm).
@@ -1464,7 +1574,9 @@ while the browser is live AND after close; queries never spawn a browser):
     --last <n>                      keep the last n matches (default 30) · --all for everything
     --grep <pat>                    match anywhere in the entry (headers, request/response bodies, url)
     --full                          headers + bodies            --body        just the bodies
-    --json                          raw JSON lines — pipe to jq for anything the flags don't cover
+    --json                          raw JSON lines, pipe to jq for anything the flags don't cover. Fields:
+                                    i (the #), t (s into recording), at, ms, method, url, type, reqHeaders,
+                                    reqBody, status, ok, resHeaders, mime, size, resBody, error, mock, mockVia
     --stats                         counts by status / type / host
     --all-types                     a bare PATTERN hides static assets (script, stylesheet, image,
                                     font, media, manifest, texttrack) so app calls aren't buried in
@@ -1473,9 +1585,11 @@ while the browser is live AND after close; queries never spawn a browser):
                                     shown rather than leaving you with an empty result.
     --dir <session dir>             query an OLD session's log  --file        print the log's path
   e.g. browse net -d api.upstash.com --failed --full · browse net --json | jq 'select(.ms>500)'
-  Auth headers + cookie VALUES are hashed (sha256 prefix + length), so you can tell tokens
-  apart and see when one rotates without the secret landing in the log (BROWSE_NET_SECRETS=1
-  keeps them verbatim; BROWSE_NET=0 turns logging off entirely).
+  Secret VALUES are hashed (sha256 prefix + length), so you can tell tokens apart and see one
+  rotate without it landing in the log: headers, query params and form/JSON/HTML fields whose
+  name looks secret (token, secret, password, session, bypass, auth, signature, cookie, api key…),
+  plus JWTs, bearer tokens and common API-key shapes anywhere. BROWSE_NET_SECRETS=1 keeps
+  everything verbatim; BROWSE_NET=0 turns logging off entirely.
 
 Intercept requests (mock an API, block an asset, rewrite a response):
   browse middleware <pattern> '<playwright route handler>'
@@ -1523,7 +1637,7 @@ Misc:
                                     (~reading time); [--for <sec>] [--sticky] [--color yellow|blue|green|red|neutral]
                                     [--pos top|bottom]; --clear removes a sticky one
   browse dir                        print THIS session's artifacts dir
-  browse close [--gif] [--keep-raw] end the session, finalize the recording, print the mp4 path.
+  browse close [--gif] [--keep-raw]  end the session, finalize the recording, print the mp4 path.
                                     --gif also writes a looping recording.gif; --keep-raw keeps the
                                     raw .webm (BROWSE_KEEP_WEBM=1 too) so you can re-cut it yourself
 
@@ -1680,7 +1794,7 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_KEEP_WEBM=1       keep the raw .webm after the mp4 lands (= 'close --keep-raw')
   BROWSE_NET_BODIES=0      don't capture request/response bodies
   BROWSE_NET_BODY_MAX      max bytes kept per body (32768)
-  BROWSE_NET_SECRETS=1     keep auth headers/cookie values verbatim (default: hashed)
+  BROWSE_NET_SECRETS=1     keep secret headers, url params and body fields verbatim (default: hashed)
   BROWSE_SSH_PASSWORD      password for a --remote that has no key (an Upstash Box falls back to
                            its API key by itself: UPSTASH_BOX_API_KEY, else the one 'browse box
                            key' saved in ~/.browse/box.json). Handed to ssh through an askpass
@@ -1698,6 +1812,148 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_FFMPEG            path to the ffmpeg used for the mp4 finalize
   BROWSE_PW_BASE           path whose parent dir holds node_modules/playwright
   BROWSE_CAMOUFOX_PYTHON   python that can 'import camoufox' (default python3)`;
+
+/** `browse help` prints an index, `browse help <topic>` one command or section,
+ *  `browse help --all` the whole of HELP. Agents re-read help constantly, and
+ *  30KB per read was most of their context. All three views are cut from HELP
+ *  at runtime, so it stays the single source of truth.
+ *
+ *  HELP's shape is the contract: blank-line separated blocks; a section is a
+ *  header (unindented lines) plus items at two spaces, each continued by lines
+ *  indented deeper. An item is an ENTRY when it starts `browse ` or is a
+ *  `--flag` with a two-space gap before its description; anything else at two
+ *  spaces is a NOTE, printed with every lookup into that section. */
+const HELP_SECTION_TOPICS = [
+  ["Navigate", ["act", "navigate"]], ["AI tasks", ["ai"]], ["Observe", ["observe", "diagnose"]],
+  ["Tabs", ["tabs", "frames", "emulation", "dialogs", "downloads"]], ["Network", ["net", "network"]],
+  ["Intercept", ["middleware", "intercept", "mock"]], ["Run code BEFORE", ["init"]], ["Misc", ["misc"]],
+  ["Parallel", ["parallel", "session"]], ["Run the browser on another", ["remote"]],
+  ["Launch flags", ["launch", "flags"]], ["Persistent profile", ["profile"]],
+  ["Artifacts", ["artifacts", "recording", "video"]],
+];
+const HELP_FLAG_WORDS = { s: "session", p: "profile" };
+function helpModel() {
+  const blocks = HELP.split(/\n\n/);
+  const first = blocks.findIndex((b) => /^  \S/m.test(b));
+  const intro = blocks.slice(0, first).join("\n\n");
+  const sections = blocks.slice(first).map((text) => {
+    const lines = text.split("\n");
+    let h = 0;
+    while (h < lines.length && !/^ /.test(lines[h])) h++;
+    const items = [];
+    for (const line of lines.slice(h)) {
+      if (/^  \S/.test(line) || !items.length) items.push({ lines: [line] });
+      else items.at(-1).lines.push(line);
+    }
+    for (const it of items) {
+      const head = it.lines[0].trim();
+      it.entry = /^browse /.test(head) || /^--\S.*?\S {2,}\S/.test(head);
+      it.usage = head.split(/\s{2,}/)[0];
+      it.names = it.entry ? helpNames(it.usage) : [];
+    }
+    const cmds = new Set(items.filter((it) => /^browse [a-z]/i.test(it.usage)).map((it) => it.names[0]));
+    const topics = HELP_SECTION_TOPICS.find(([prefix]) => lines[0].startsWith(prefix))?.[1]
+      || [lines[0].split(/\W+/)[0].toLowerCase()];
+    return { text, header: lines.slice(0, h).join("\n"), items, topics, single: cmds.size === 1 };
+  });
+  return { intro, sections };
+}
+/** Every name an entry answers to: `check|uncheck`, `reload | goBack | goForward`,
+ *  `ai click|hover` (as `ai click`), `--headful / --headless`, `-p <name> clear`. */
+function helpNames(usage) {
+  const names = [];
+  for (const part of usage.split(/\s+[|·/]\s+/)) {
+    const w = part.replace(/^browse\s+/, "").split(/\s+/);
+    if (/^-/.test(w[0])) {
+      const bare = w[0].replace(/^-+/, "");
+      names.push(w[0], HELP_FLAG_WORDS[bare] || bare);
+      if (/^[a-z]+$/i.test(w[2] || "") && /^browse /.test(part)) names.push(w[2]);
+      continue;
+    }
+    const heads = w[0].split("|").filter((x) => /^[a-z]/i.test(x));
+    names.push(...heads);
+    if (heads[0] === "ai" && w[1]) names.push(...w[1].split("|").map((x) => `ai ${x}`));
+  }
+  return names;
+}
+/** The full text for one topic, or null. A section named by the topic, or one
+ *  that documents a single command, prints whole; otherwise the section header,
+ *  the matching entries and the section's notes, in their original order. */
+function helpTopic(topic) {
+  const q = topic.toLowerCase();
+  const out = [];
+  const { sections } = helpModel();
+  const known = new Set(sections.flatMap((sec) => sec.items.flatMap((it) => it.names.map((n) => n.toLowerCase()))));
+  for (const sec of sections) {
+    // An entry also answers for the commands its text lists with slashes
+    // (goto's "open/goto/reload/goBack/goForward take --timeout"), so a lookup
+    // never misses a rule that lives in a neighbouring entry.
+    const hit = (it) => it.names.some((n) => n.toLowerCase() === q)
+      || (known.has(q) && (it.lines.join(" ").match(/[A-Za-z]+(?:\/[A-Za-z]+)+/g) || [])
+        .some((list) => list.toLowerCase().split("/").includes(q)));
+    if (sec.topics.includes(q) || (sec.single && sec.items.some(hit))) { out.push(sec.text); continue; }
+    if (!sec.items.some(hit)) continue;
+    out.push([sec.header, ...sec.items.filter((it) => !it.entry || hit(it)).flatMap((it) => it.lines)].join("\n"));
+  }
+  return out.length ? out.join("\n\n") : null;
+}
+function helpIndex() {
+  const { intro, sections } = helpModel();
+  const rows = sections.map((sec) => {
+    const uses = sec.items.filter((it) => it.entry).map((it) => it.usage.replace(/^browse /, "").replace(/ · browse /g, " · "));
+    // Wrap at 100 columns under a hanging indent: between entries, or inside a
+    // long usage before one of its [--flag] groups.
+    const atoms = (uses.length ? uses : [sec.header.split("\n")[0]])
+      .flatMap((u, i) => u.split(/(?= \[--)/).map((a, j) => ({ text: a, sep: j ? "" : i ? " · " : "" })));
+    const lines = [];
+    let cur = sec.topics[0].padEnd(11), fresh = true;
+    for (const [n, a] of atoms.entries()) {
+      const between = a.sep !== "";
+      // A command name is never left alone at a line end, apart from its flags.
+      const glued = between && atoms[n + 1]?.sep === "" ? atoms[n + 1].text.length : 0;
+      if (!fresh && cur.length + a.text.length + a.sep.length + (between ? 2 : 0) + glued > 100) {
+        lines.push(cur + (between ? " ·" : ""));
+        cur = " ".repeat(11) + a.text.trimStart();
+      } else cur += a.sep + a.text;
+      fresh = false;
+    }
+    return [...lines, cur].join("\n");
+  });
+  return `${intro}
+
+Commands by topic. 'browse help <command|topic>' prints the full usage, flags and caveats,
+e.g. 'browse help wait' or 'browse help net'; 'browse <command> --help' does the same.
+Launch flags answer to their name without dashes ('browse help viewport').
+'browse help --all' prints everything, 'browse help --env' the env vars.
+
+${rows.join("\n")}`;
+}
+/** Unknown topic: the closest names, by prefix, containment, then edit distance. */
+function helpSuggest(topic) {
+  const q = topic.toLowerCase();
+  const all = [...new Set(helpModel().sections.flatMap((sec) => [...sec.topics, ...sec.items.flatMap((it) => it.names)]))]
+    .filter((n) => !n.startsWith("-"));
+  const dist = (a, b) => {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+    return d[a.length][b.length];
+  };
+  const score = (n) => {
+    const l = n.toLowerCase();
+    if (q.length >= 3 && l.startsWith(q)) return 0;
+    if ((q.length >= 4 && l.includes(q)) || (l.length >= 4 && q.includes(l))) return 1;
+    const e = dist(q, l);
+    return e <= Math.max(1, Math.floor(q.length / 3)) ? 1 + e : Infinity;
+  };
+  const ranked = all.map((n) => [n, score(n)]).filter(([, sc]) => sc < Infinity).sort((a, b) => a[1] - b[1] || a[0].length - b[0].length);
+  return ranked.slice(0, 3).map(([n]) => `'${n}'`);
+}
 
 /* ========================================================= network queries */
 
@@ -1898,14 +2154,14 @@ function netCommand(argv) {
       // Empty counts as missing. `--grep "$PAT"` with PAT unset arrives as "", and
       // an empty filter is DROPPED (`grep ? … : null`) — so `net --grep ""` printed
       // every request in the log at exit 0, which reads as "these all matched".
-      if (v == null || v === "" || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value — run \`browse help\``); }
+      if (v == null || v === "" || String(v).startsWith("--")) { throw new Error(`net: ${flag} needs a value - run \`browse help net\``); }
       return v;
     };
     const netNum = (flag) => {
       const n = Number(netVal(flag));
       // `net --since abc` used to become NaN and answer "no matching requests",
       // which is the same output as a real empty result.
-      if (!Number.isFinite(n) || n < 0) throw new Error(`net: ${flag} wants a number — run \`browse help\``);
+      if (!Number.isFinite(n) || n < 0) throw new Error(`net: ${flag} wants a number - run \`browse help net\``);
       return n;
     };
     // Every value-taking flag goes through netVal. A bare `next()` let
@@ -1928,7 +2184,7 @@ function netCommand(argv) {
     else if (a === "--all-types") allTypes = true;
     else if (a === "--file" || a === "--path") showFile = true;
     else if (a === "--dir") dir = netVal(a);
-    else if (a.startsWith("-")) { process.stderr.write(`browse net: unknown flag '${a}' — run \`browse help\`\n`); return 1; }
+    else if (a.startsWith("-")) { process.stderr.write(`browse net: unknown flag '${a}' - run \`browse help net\`\n`); return 1; }
     else if (pattern == null) pattern = a;
     else pattern += " " + a; // unquoted multi-word pattern
   }
@@ -2963,10 +3219,23 @@ async function client(argv) {
     process.stderr.write(`browse: '${CAMOU_SUFFIX}' is reserved — that dir is profile '${base}' on camoufox. Use \`-p ${base} --camoufox\`.\n`);
     return 1;
   }
-  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
-    const envOnly = argv.slice(1).some((a) => a === "--env" || a === "env");
-    process.stdout.write((envOnly ? ENV_HELP : HELP) + "\n");
-    return 0;
+  // `browse wait --help` asks about `wait`, `browse ai task --help` about `ai
+  // task`. Only right after the command: later, `--help` is a value
+  // (`fill '#q' --help` types it) or an unknown flag, never a hijack.
+  const sub = cmd === "ai" && argv[1] && !argv[1].startsWith("-") ? 1 : 0;
+  const cmdHelp = !!cmd && !cmd.startsWith("-") && cmd !== "help" && argv[1 + sub] === "--help";
+  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h" || cmdHelp) {
+    const rest = cmdHelp ? [] : argv.slice(1);
+    const words = cmdHelp ? argv.slice(0, 1 + sub) : rest.filter((a) => !["--env", "--all", "--help"].includes(a));
+    if (rest.includes("--env") || words[0] === "env") { process.stdout.write(ENV_HELP + "\n"); return 0; }
+    if (rest.includes("--all")) { process.stdout.write(HELP + "\n"); return 0; }
+    if (!words.length || words[0] === "help") { process.stdout.write(helpIndex() + "\n"); return 0; }
+    const topic = words.join(" ");
+    const text = helpTopic(topic);
+    if (text) { process.stdout.write(text + "\n"); return 0; }
+    const near = helpSuggest(topic);
+    process.stderr.write(`browse help: no command or topic '${topic}'.${near.length ? ` Did you mean ${near.join(", ")}?` : ""} Run 'browse help' for the index.\n`);
+    return 1;
   }
   if (process.env.BROWSE_PREFLIGHT === "1") {
     validateCdpLaunch({ ...process.env, ...LAUNCH_ENV }, PROFILE);
@@ -4714,7 +4983,7 @@ async function daemon() {
       at: new Date(meta.t0).toISOString(),
       ms: Date.now() - meta.t0,
       method: req.method(),
-      url: req.url(),
+      url: netRedactUrl(req.url()),
       type: req.resourceType(),
     };
     const mock = mwMarks.get(req);
@@ -4722,7 +4991,7 @@ async function daemon() {
     if (error) e.error = error;
     try { e.reqHeaders = netRedact(await req.allHeaders()); } catch { /* gone */ }
     if (NET.bodies) {
-      try { const post = req.postData(); if (post) e.reqBody = netClip(post); } catch { /* binary/none */ }
+      try { const post = req.postData(); if (post) e.reqBody = netBody(post, e.reqHeaders?.["content-type"] || ""); } catch { /* binary/none */ }
     }
     let res = null;
     try { res = await req.response(); } catch { /* failed before a response */ }
@@ -4735,7 +5004,7 @@ async function daemon() {
       // Bodies only for text-ish types (JSON APIs are the point) and only up to
       // NET.bodyMax — never pull a video/image payload into the log.
       if (NET.bodies && NET.bodyMax > 0 && NET_TEXTY.test(e.mime)) {
-        try { e.resBody = netClip((await res.body()).toString("utf8")); } catch { /* redirect/no body */ }
+        try { e.resBody = netBody((await res.body()).toString("utf8"), e.mime); } catch { /* redirect/no body */ }
       }
     }
     netAppend(e);
@@ -6437,7 +6706,12 @@ async function daemon() {
         }
         if (sel != null && /^\d+$/.test(sel)) {
           await page.waitForTimeout(durable("", Number(sel)));
-          return `waited ${sel}ms`;
+          // Real sessions slept on guessed durations dozens of times a run. A
+          // pause long enough to be a guess gets one line pointing at the waits
+          // that actually assert something; a short settle stays quiet.
+          return Number(sel) >= 1000
+            ? `waited ${sel}ms - a fixed pause asserts nothing; prefer wait <selector> [--text <s>] or wait --url <pattern>`
+            : `waited ${sel}ms`;
         }
         if (!sel) throw new Error("wait: needs a selector, a number of ms, or --url <pattern>");
         try { await L(sel).first().waitFor({ state: gone ? "hidden" : "visible", timeout }); }
@@ -7160,13 +7434,13 @@ async function daemon() {
           closeReply = {
             ok: true,
             result: (saved && (saved.mp4 || saved.webm)
-              ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (${saved.mp4Fail || "ffmpeg missing/failed - mp4 not written"})`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`
+              ? `closed - recording saved\n  ${saved.mp4 ? `mp4:  ${tildePath(saved.mp4)} (hand this path to the user as-is)` : `webm: ${tildePath(saved.webm)} (${saved.mp4Fail || "ffmpeg missing/failed - mp4 not written"})`}\n${saved.mp4 && saved.webm ? `  webm: ${tildePath(saved.webm)} (kept - re-cut it with one ffmpeg call)\n` : ""}${wantGif ? `  gif:  ${tildePath(join(OUT, "recording.gif"))} (encoding now - give it a few seconds)\n` : ""}  dir:  ${tildePath(OUT)}\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`
               : VIDEO_ON
                 ? "closed - recording flushed (no video captured)"
                 // Not a failure, and it must not read as one: the caller asked
                 // for this with --no-video. Name what IS there instead - and keep
                 // the mock disclosure, which is about the SCREENSHOTS too.
-                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}\n  next: write feedback.md into that dir (what worked / friction / one improvement idea)`) + lastNotes,
+                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`) + lastNotes,
           };
           send(closeReply);
           // The gif is a two-pass encode that can outlast the client's 120s

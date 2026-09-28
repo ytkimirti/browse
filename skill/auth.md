@@ -21,7 +21,7 @@ one bounded retry. Preserve the profile or state backup before resetting storage
 
 For a Box, transfer saved browser state to the machine running the browser and
 verify the exact Box app again. A successful state import proves the data loaded;
-it does not prove the app accepted it. Read `browse help` for state operations.
+it does not prove the app accepted it. Read `browse help state` for state operations.
 
 For the Upstash console, see [the console recipe](console.md) before copying an
 environment or attempting preview authentication.

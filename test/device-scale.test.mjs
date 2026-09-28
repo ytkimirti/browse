@@ -67,6 +67,5 @@ try {
   console.log('Device scale: invalid settings rejected; page, element, padded, full screenshots and video dimensions pass; default and fractional densities pass.');
 } finally {
   run(['close']);
-  writeFileSync(join(out, 'feedback.md'), 'Integration capture: native device density and CSS-sized video verified; invalid density and unsupported engines refused.');
   console.log(`Artifacts: ${out}`);
 }

@@ -10,9 +10,11 @@ browser via a localhost daemon, one browser per session name. The first command
 spawns the browser with recording already on; every later command drives the same
 live session.
 
-**`browse help` is the command and flag surface** (`browse help --env` for env
-vars). Read it before reaching for a command or flag you have not used this
-session, rather than recalling Playwright from memory.
+**`browse help` is the command and flag surface.** Bare `browse help` is a short
+index; `browse help <command>` (or `browse <command> --help`) prints one command
+in full. Look a command up before its first use this session rather than
+recalling Playwright from memory, and look up only that command: `help --all` is
+the whole reference and rarely worth its size.
 
 ## The loop
 
@@ -22,22 +24,28 @@ and returns the recorded steps and outcome.
 
 1. **Act**, then read the output closely. New console/page errors, answered
    dialogs and saved downloads are appended inline to the next command's result.
-2. **Observe often.** `snapshot` is your check step. Scope it to the relevant
-   region when a long feed or unrelated content crowds out the controls. `wait`
-   doubles as your assertion: it exits non-zero if the thing never happens. Hold for what the UI
-   says or shows, never for a guessed duration — a fixed pause asserts nothing,
-   slows the run and paces the video worse (`browse help` for the ways to wait).
-3. **Diagnose** from what the session already recorded: `errors` (the alarm),
+2. **Observe with `snapshot`, not `eval`.** `snapshot` is your check step: it
+   shows what a user can see and act on. Scope it to the relevant region when a
+   long feed or unrelated content crowds out the controls. Keep `eval` for state
+   the page does not render (a global, storage, a computed value); reading
+   visible UI through `eval` checks the DOM, not what the user sees.
+3. **Wait for a condition, never a duration.** Before `wait`, name what proves
+   the step finished (an element, its text, the URL) and wait on that: it
+   doubles as your assertion and exits non-zero if the thing never happens. A
+   fixed `wait <ms>` asserts nothing, is flaky when too short and leaves dead air
+   when too long. If you cannot name the condition, `snapshot` to find one
+   (`browse help wait`).
+4. **Diagnose** from what the session already recorded: `errors` (the alarm),
    `console` (everything the page logged), and `net` (note the last entry `#`,
    act, then `net --since <#> --failed` to see only what that action caused).
-4. **Reach states the UI can't get you to** with `middleware` for a REQUEST (an
+5. **Reach states the UI can't get you to** with `middleware` for a REQUEST (an
    error path, an empty list, a slow endpoint, a paid tier) and `init` for page
    STATE that must exist before the app's own JS runs (an analytics stub, a
    consent flag, a frozen clock). Both only affect what happens after they are
    registered, so set them up before `open`, or `reload` after. Never rewrite a
    dev server's HTML document with `middleware` to inject a script: on Next/Vite
    that produces an endless reload loop that reads exactly like an app bug.
-5. **Finish the recording.** Wait for `close` to finish and verify the reported
+6. **Finish the recording.** Wait for `close` to finish and verify the reported
    artifacts exist locally before handing them off or deleting the remote.
    A tool returning a running process handle is still working. Preserve the
    full tool result and wait on that handle; printing only its output loses the
@@ -94,7 +102,7 @@ recording need not be the deliverable. When the user wants a demo, or the moving
 interaction is the point, read `skill/recording.md` BEFORE the session starts,
 since the frame size is fixed the moment the browser spawns.
 
-A run can also be recorded not at all (`browse help`, launch flags). Reach for
+A run can also be recorded not at all (`browse help launch`). Reach for
 that only when the session is a pure READ nobody will watch — asserting a count,
 minting a token, exporting state. If there is any chance the user will ask "show
 me" afterwards, keep the recording: it cannot be added later.
@@ -111,20 +119,13 @@ Each session gets `~/.browse/sessions/<timestamp>/` with `transcript.md`,
 under `shots/` (Read them as images to see what a step looked like). Give the user
 the bare `~/…` path that `close` printed, pasteable straight into their shell.
 
-## After every recording: write feedback.md
-
-Right after `browse close`, write a short `feedback.md` into that session's dir.
-Cover: what flow you recorded, what worked, any friction (selector misses,
-timing/pacing, missing commands, video quality), and one concrete improvement idea
-for this skill. These get reviewed across sessions to keep improving the skill, so
-be candid and specific; a few bullets is enough.
-Separate the observed command/result from your suspected cause. Check help
-before proposing a missing capability, and keep tool-wrapper failures distinct
-from browser failures.
+When reporting a failure, separate the observed command and result from your
+suspected cause, and keep tool-wrapper failures distinct from browser failures.
+Check help before calling a capability missing.
 
 ## More
 
-- `browse help` — every command, flag and default; `browse help --env` for env vars
+- `browse help` - index; `browse help <command>` one command in full; `--all` everything; `--env` env vars
 - `skill/recording.md` — recording craft, when the video is the deliverable
 - `skill/engines.md` — camoufox (default, clears bot walls) vs chromium (needed for
   `emulate`, PDF, and polished demos)

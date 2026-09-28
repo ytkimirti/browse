@@ -3,7 +3,7 @@
 `browse --remote <sshhost>` runs the browser, the recording and ffmpeg on
 another machine and copies the artifacts back. Reach for it when the browser is
 the thing you cannot afford locally: RAM, CPU, battery, or a laptop already
-running several agents. `browse help` has the flag and its env vars.
+running several agents. `browse help remote` has the flag; `browse help --env` its env vars.
 
 Everything else is unchanged. Same commands, same output, same loop, and the
 paths it prints are local files, because each reply's artifacts are copied down

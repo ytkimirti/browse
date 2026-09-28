@@ -6,7 +6,7 @@ which Chromium cannot do at all: its new-headless is handed an unsolved
 `cf_clearance`, and headed Chrome can't be hidden on macOS because
 `--window-position` is clamped onto the nearest real display. An unavailable engine can change which saved state is accessible.
 An explicit engine or a named profile must keep that identity; browse fails
-startup when it cannot. Check `browse help` for engine selection and setup.
+startup when it cannot. Check `browse help launch` for engine selection and `browse help setup` for setup.
 
 Reach for `--chromium` when you need `browse emulate tz= locale= cpu= net=`
 (CDP-only), a `.pdf`

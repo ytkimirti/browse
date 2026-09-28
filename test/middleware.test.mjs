@@ -406,6 +406,7 @@ try {
   check("close discloses which rules were live (the mp4 shows mocked data as real)",
     /middleware rule was active during this recording/.test(closed.out) && closed.out.includes("**/api/user"), closed.out);
   check("...without the handler", !closed.out.includes("plan: 'pro'"), closed.out);
+  check("close asks for no feedback file", !/feedback/i.test(closed.out), closed.out);
   check("the mp4 exists on disk", existsSync(join(OUT, "recording.mp4")), `no recording.mp4 in ${OUT}`);
 
   // --- no handler body may reach an artifact people share. Matched on
