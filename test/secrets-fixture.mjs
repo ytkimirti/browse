@@ -44,6 +44,8 @@ http.createServer((req, res) => {
       "set-cookie": "sid=RSECRET-cookie; Path=/; HttpOnly",
       "x-upstream-signature": "RSECRET-sig",
       "x-trace": "KEEP-trace",
+      // A bare path with a query, the shape of HTTP/2's :path pseudo-header.
+      "content-location": "/api/login?page=KEEP-path&access_token=RSECRET-path",
       "x-forwarded-token-note": `id ${JWT}`,
     });
     return res.end(JSON.stringify({ token: "RSECRET-token", user: { name: "KEEP-alice" }, note: JWT,

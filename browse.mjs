@@ -651,7 +651,8 @@ function netScrub(value) {
   let s = String(value);
   s = s.replace(/\b(Bearer\s+)([\w.~+/-]{16,}=*)/gi, (_m, b, t) => b + netHash(t));
   for (const re of NET_SECRET_VALUES) s = s.replace(re, (m) => (m.startsWith("<sha256:") ? m : netHash(m)));
-  return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? netQuery(s) : s;
+  // A url, or a bare path: HTTP/2's :path pseudo-header carries the query too.
+  return /^([a-z][a-z0-9+.-]*:\/\/|\/)/i.test(s) ? netQuery(s) : s;
 }
 /** Secret-named query/fragment params keep their name, lose their value. */
 function netQuery(url) {

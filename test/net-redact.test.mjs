@@ -104,6 +104,9 @@ try {
     /access_token=<sha256:[0-9a-f]{12} len:\d+>&page=KEEP-page&key=<sha256:/.test(e.url || ""), e.url);
   check("set-cookie keeps its attributes", /^sid=<sha256:[0-9a-f]{12} len:14>; Path=\/; HttpOnly$/.test(e.resHeaders?.["set-cookie"] || ""),
     e.resHeaders?.["set-cookie"]);
+  check("a bare path keeps its harmless params, loses its secret ones",
+    /^\/api\/login\?page=KEEP-path&access_token=<sha256:[0-9a-f]{12} len:12>$/.test(e.resHeaders?.["content-location"] || ""),
+    e.resHeaders?.["content-location"]);
   check("a *signature* response header is hashed", /^<sha256:/.test(e.resHeaders?.["x-upstream-signature"] || ""), e.resHeaders?.["x-upstream-signature"]);
   check("a JWT inside a harmless header is hashed in place", /^id <sha256:[0-9a-f]{12} len:\d+>$/.test(e.resHeaders?.["x-forwarded-token-note"] || ""),
     e.resHeaders?.["x-forwarded-token-note"]);
