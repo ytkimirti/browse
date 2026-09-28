@@ -150,6 +150,30 @@ async function apiKey() {
 // libraries itself; this provides what setup assumes: ffmpeg for the mp4
 // finalize, fonts so headless Chromium renders text instead of boxes, and
 // browse on PATH with its data pointed at the persistent volume.
+/** Proof that browse on the box WORKS, not just that it answers \`version\`:
+ *  start a daemon the way \`browse --remote\` does (\`browse __serve\` through the
+ *  PATH wrapper), wait for its /health, close it. A box whose launcher could not
+ *  start a daemon used to report "ready" here and fail every session later.
+ *  Leaves nothing behind: the session dir is a temp dir, removed after. */
+const READY_CHECK = `s=browse-ready-$$; out=/tmp/$s
+port=$(node -e 'const v=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(v.address().port);v.close()})')
+BROWSE_SESSION=$s BROWSE_PORT=$port BROWSE_OUT=$out BROWSE_VIDEO=0 BROWSE_ENGINE=chromium BROWSE_REMOTE_SIDE=1 browse __serve >$out.log 2>&1 </dev/null &
+pid=$!; ok=
+for i in $(seq 1 120); do
+  if node -e 'fetch("http://127.0.0.1:"+process.argv[1]+"/health").then(r=>r.json()).then(h=>process.exit(h.session===process.argv[2]?0:1),()=>process.exit(1))' $port $s; then ok=1; break; fi
+  kill -0 $pid 2>/dev/null || break
+  sleep 1
+done
+if [ -z "$ok" ]; then
+  kill $pid 2>/dev/null
+  echo "browse cannot start a browser daemon on this box:"
+  if [ -s $out.log ]; then tail -n 20 $out.log; else awk '/fatal:/{n=5} n-->0' $out/browsed.log 2>/dev/null; fi
+  rm -rf $out $out.log; exit 1
+fi
+BROWSE_SESSION=$s browse close >/dev/null 2>&1 || kill $pid 2>/dev/null
+rm -rf $out $out.log
+echo "browse: a daemon starts and serves here"`;
+
 const INSTALL = `set -e
 sudo apt-get update -qq
 echo "installing ffmpeg + fonts…"
@@ -163,7 +187,8 @@ chmod +x ${WORK}/browse/bin/browse
 printf '#!/bin/sh\\nexport BROWSE_HOME=\${BROWSE_HOME:-${WORK}/.browse}\\nexport PLAYWRIGHT_BROWSERS_PATH=\${PLAYWRIGHT_BROWSERS_PATH:-${WORK}/.browse/ms-playwright}\\nexec ${WORK}/browse/bin/browse "$@"\\n' | sudo tee /usr/local/bin/browse > /dev/null
 sudo chmod +x /usr/local/bin/browse
 echo "installing playwright + chromium (~1GB, a few minutes)…"
-browse setup`;
+browse setup
+${READY_CHECK}`;
 
 /** Run a long script in the box and stream its log. The exec API is not a place
  *  to hold a connection open for minutes, so the script runs detached against a
@@ -415,9 +440,11 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
   up [--ttl <sec>] [--size medium|small] [--name <n>] [--snapshot <id>]
                               make a box from the warm image and print its --remote host.
                               ~13s, nothing to install, and the browse on it is pulled up to date
-                              first (an image is as old as the day it was taken). Builds the image
-                              first if there isn't one yet (~6 min, once). The box also deletes itself
-                              after --ttl (default ${TTL_DEFAULT}s) if you never call down.
+                              first (an image is as old as the day it was taken), then proven by
+                              starting a daemon on it; a box that cannot is deleted, with the error.
+                              Builds the image first if there isn't one yet (~6 min, once). The
+                              box also deletes itself after --ttl (default ${TTL_DEFAULT}s) if you
+                              never call down.
                               --size picks the DISK and nothing else (same CPU and RAM
                               either way): medium is 10GB, small is 5GB — of which the warm
                               image already uses ~2.5GB, so 'small' does not fit an app's
@@ -448,7 +475,8 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
   url <box> <port>            public https URL for a port, to hand someone who wants to click
                               around the app themselves. The server must be listening on
                               0.0.0.0, not 127.0.0.1, or the URL answers 502
-  install <box>               (re)install browse on a box, e.g. to refresh the image builder
+  install <box>               (re)install browse on a box, e.g. to refresh the image builder, and
+                              prove a daemon starts there (image runs the same check)
 
 <box> is a box id or the '<id>@…' host you pass to browse --remote, so $BROWSE_REMOTE works.
 
@@ -562,6 +590,14 @@ switch (cmd) {
     if (refreshed) version = line;
     else say(`note: could not bring the box's browse up to date, so it runs the image's (${version.trim() || "unknown"}) - ` +
              `if a flag there does nothing, that is why`);
+    // Last, on the code the box will actually run: can it start a daemon at all.
+    // A box that cannot is no use to anyone, so it goes, with the reason.
+    const works = await exec(box.id, READY_CHECK, 300000);
+    if (works.exit_code !== 0) {
+      await api("DELETE", `/v2/box/${box.id}`).catch(() => {});
+      die(`browse on ${box.id} (${version.trim() || "unknown build"}) cannot start a browser, so the box was deleted:\n` +
+          `${clip(`${works.output || ""}${works.error || ""}`, 2000)}`);
+    }
     const freeMb = Number(dfLine.trim().split(/\s+/)[3]);
     // The build hash is what makes the version line mean anything (the package
     // version is a constant). Compared against THIS checkout, so a box tracking

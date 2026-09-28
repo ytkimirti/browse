@@ -20,6 +20,10 @@ let boxes = [], created = [], deleted = [], execs = [], uploads = [], seq = 0;
 // build, and a box that cannot reach the repo, are the two the CLI has to
 // report differently instead of blaming the image.
 let version = "browse 0.1.0 (build deadbeef)", refreshFails = false, uploadStatus = 200;
+// Whether browse on the box can start a daemon (the readiness check `up` and
+// `install` run), and the last script `install` ran detached.
+let readyFails = false, script = "";
+const READY_ERR = "browse cannot start a browser daemon on this box:\nbrowse: daemon failed to start: Cannot find module 'playwright-core/package.json'\n";
 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
@@ -37,9 +41,10 @@ const server = http.createServer(async (req, res) => {
     boxes = b.boxes || []; created = []; deleted = []; execs = []; uploads = []; seq = 0;
     version = b.version ?? "browse 0.1.0 (build deadbeef)";
     refreshFails = !!b.refreshFails; uploadStatus = b.uploadStatus || 200;
+    readyFails = !!b.readyFails; script = "";
     return send(200, { ok: true });
   }
-  if (url === "/__log") return send(200, { boxes, created, deleted, execs, uploads });
+  if (url === "/__log") return send(200, { boxes, created, deleted, execs, uploads, script });
 
   if (req.headers["x-box-api-key"] !== KEY) return send(401, { error: "bad key" });
 
@@ -62,6 +67,16 @@ const server = http.createServer(async (req, res) => {
     if (!boxes.some((b) => b.id === exec[1])) return send(404, { error: "Box has been deleted" });
     const cmd = String(((await body()).command || []).join(" "));
     execs.push(cmd);
+    // install: the script runs detached, and its log is what gets polled.
+    const detached = /echo (\S+) \| base64 -d \| sh/.exec(cmd);
+    if (detached) { script = Buffer.from(detached[1], "base64").toString(); return send(200, { exit_code: 0, output: "" }); }
+    if (/^sh -c cat .*browse-install\.log/.test(cmd)) {
+      const ready = /__serve/.test(script) && !readyFails;
+      return send(200, { exit_code: 0, output: ready ? "browse: a daemon starts and serves here\n__DONE__ 0\n" : `${READY_ERR}__DONE__ 1\n` });
+    }
+    if (/__serve/.test(cmd)) {
+      return send(200, readyFails ? { exit_code: 1, output: READY_ERR } : { exit_code: 0, output: "browse: a daemon starts and serves here\n" });
+    }
     // The refresh runs in its own call, and a box with no route to the repo is
     // the case that must NOT read as a broken image.
     if (/git -C/.test(cmd)) {

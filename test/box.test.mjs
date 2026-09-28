@@ -250,6 +250,31 @@ try {
     /could not bring the box's browse up to date/.test(offline.err) && !/has no browse on it/.test(offline.err), offline.err);
   check("...and nothing was deleted", (await deletedIds()) === "", await deletedIds());
 
+  // `version` answering proves nothing about whether a session can start: a
+  // launcher that killed every daemon it spawned still printed its version, and
+  // `up` handed out that box as ready. The check has to start a real daemon.
+  console.log("\nup and install prove a daemon starts");
+  await reset();
+  const works = box(["up"]);
+  check("up runs a daemon start-up check on the box",
+    works.code === 0 && (await log()).execs.some((c) => /browse __serve/.test(c) && /\/health/.test(c)), `exit ${works.code} · ${works.err}`);
+  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [], readyFails: true }) });
+  const broken = box(["up"]);
+  check("a box whose browse cannot start a daemon fails up, exit 1", broken.code === 1, `exit ${broken.code} · ${broken.err}`);
+  check("...naming the real start-up error", /cannot start a browser/.test(broken.err) && /Cannot find module/.test(broken.err), broken.err);
+  check("...printing no host on stdout", broken.out === "", broken.out);
+  check("...and deleting the useless box", (await deletedIds()) === "fakebox-1", await deletedIds());
+  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [{ id: "fakebox-9", status: "running" }] }) });
+  const installed = box(["install", "fakebox-9"]);
+  check("install runs the same check after setup",
+    installed.code === 0 && /browse setup\n[\s\S]*browse __serve/.test((await log()).script) && /daemon starts and serves/.test(installed.err),
+    `exit ${installed.code} · ${installed.err}`);
+  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [{ id: "fakebox-9", status: "running" }], readyFails: true }) });
+  const badInstall = box(["install", "fakebox-9"]);
+  check("an install whose browse cannot start a daemon fails, exit 1",
+    badInstall.code === 1 && /install failed/.test(badInstall.err) && /Cannot find module/.test(badInstall.err) && !/browse is on/.test(badInstall.err),
+    `exit ${badInstall.code} · ${badInstall.err}`);
+
   console.log("\npush");
   await reset();
   box(["up"]);
