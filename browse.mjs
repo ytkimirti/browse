@@ -1918,7 +1918,8 @@ function helpIndex() {
       const between = a.sep !== "";
       // A command name is never left alone at a line end, apart from its flags.
       const glued = between && atoms[n + 1]?.sep === "" ? atoms[n + 1].text.length : 0;
-      if (!fresh && cur.length + a.text.length + a.sep.length + (between ? 2 : 0) + glued > 100) {
+      // The 2 is room for the " ·" a later wrap may append to this line.
+      if (!fresh && cur.length + a.text.length + a.sep.length + 2 + glued > 100) {
         lines.push(cur + (between ? " ·" : ""));
         cur = " ".repeat(11) + a.text.trimStart();
       } else cur += a.sep + a.text;
@@ -2672,7 +2673,7 @@ async function ensureRemoteDaemon() {
   const probe = await probePort(local);
   if (probe.kind === "browse" && probe.health.session === SESSION) {
     warnBuildSkew(probe.health);
-    return { ...saveRemoteRun({ port: local, remotePort, host: REMOTE, ...probe.health }), reattached: true };
+    return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...probe.health });
   }
   // Anything ELSE on that port means a daemon spawned now would fail to bind, so
   // say so here rather than wait out the whole start-up poll to report a browser
@@ -2691,7 +2692,7 @@ async function ensureRemoteDaemon() {
   // is minutes, not seconds — so this waits far longer than the local spawn. A
   // daemon that DIED is not slow, though: its spawn log says so within a second,
   // and that log carries the real error.
-  let h = null;
+  let h = null, lostRace = false;
   for (let i = 0; i < 300; i++) {
     h = await healthInfo(local);
     if (h && h.session === SESSION) break;
@@ -2700,7 +2701,7 @@ async function ensureRemoteDaemon() {
       const dead = await remoteSpawnExit(log);
       // Asked again first: a daemon that lost a start-up race to another client
       // exits 0 while the winner serves this very session.
-      if (dead && (h = await healthInfo(local)) && h.session === SESSION) break;
+      if (dead && (h = await healthInfo(local)) && h.session === SESSION) { lostRace = true; break; }
       h = null;
       if (dead) {
         stopTunnel();
@@ -2720,7 +2721,8 @@ async function ensureRemoteDaemon() {
       `  on PATH and executable there.`);
   }
   warnBuildSkew(h);
-  return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...h });
+  const rec = saveRemoteRun({ port: local, remotePort, host: REMOTE, ...h });
+  return lostRace ? rec : { ...rec, spawned: true };
 }
 
 /** GET one artifact out of the remote session dir into `dest`. Returns false
@@ -2899,6 +2901,8 @@ async function ensureDaemon() {
         env: {
         ...process.env,
         BROWSE_OUT: OUT,
+        // Only a dir browse made up may be removed by a discarded start.
+        BROWSE_OUT_GENERATED: process.env.BROWSE_OUT ? "0" : "1",
         BROWSE_SESSION: SESSION,
         ...(PROFILE ? { BROWSE_PROFILE: PROFILE } : {}),
         // Launch flags win over an inherited env var: the flag is on THIS
@@ -2911,7 +2915,9 @@ async function ensureDaemon() {
     }
     // Launching Chromium takes a few seconds; poll generously.
     for (let i = 0; i < 60; i++) {
-      if ((d = await findDaemon())) return d;
+      // `spawned`: this client started the browser, so its first command may
+      // discard it and prints the start line; any other client just attached.
+      if ((d = await findDaemon())) return spawnedChild ? { ...d, spawned: true } : d;
       if (spawnedChild && (spawnedChild.exitCode !== null || spawnedChild.signalCode !== null)) {
         let detail = "";
         try { detail = readFileSync(DAEMON_LOG, "utf8").slice(-3000); } catch { /* no log yet */ }
@@ -3381,7 +3387,7 @@ async function client(argv) {
     const words = cmdHelp ? argv.slice(0, 1 + sub) : rest.filter((a) => !["--env", "--all", "--help"].includes(a));
     if (rest.includes("--env") || words[0] === "env") { process.stdout.write(ENV_HELP + "\n"); return 0; }
     if (rest.includes("--all")) { process.stdout.write(HELP + "\n"); return 0; }
-    if (!words.length || words[0] === "help") { process.stdout.write(helpIndex() + "\n"); return 0; }
+    if (!words.length || words[0] === "help" || !words.join("").trim()) { process.stdout.write(helpIndex() + "\n"); return 0; }
     const topic = words.join(" ");
     const text = helpTopic(topic);
     if (text) { process.stdout.write(text + "\n"); return 0; }
@@ -3714,19 +3720,20 @@ async function client(argv) {
   const inferred = live ? null : inferEngine();
   if (inferred) LAUNCH_ENV.BROWSE_ENGINE = inferred;
   const d = await ensureDaemon();
-  // A remote daemon found by probing its port (its run file was gone) is as live
-  // as one findDaemon saw, so the same launch-flag check applies.
-  if (d.reattached && refuseLaunch(d)) return 1;
+  // A daemon this client did not start (another client won the start-up race,
+  // or a remote one found by probing its port) is as live as one findDaemon saw,
+  // so the same launch-flag check applies.
+  if (!live && !d.spawned && refuseLaunch(d)) return 1;
   // The path only labels the script in the transcript; its source travels as
   // initSource. Absolute, so the label names the file the caller meant.
   const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
   if (CLOSERS.has(cmd)) writeFileSync(runFile(SESSION), JSON.stringify({ ...d, phase: "closing" }));
-  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}), ...(initSource != null ? { initSource } : {}) }, postTimeout(cmd, args));
+  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}), ...(initSource != null ? { initSource } : {}), ...(d.spawned ? { starter: true } : {}) }, postTimeout(cmd, args));
   // Which browser and which login this session got, said once, when it starts.
   // Landing signed out on the wrong engine's half of a profile was invisible.
   // A discarded remote session still holds this side's tunnel and run file.
   if (res.discarded && REMOTE) { stopTunnel(); rmSync(runFile(SESSION), { force: true }); }
-  if (!live && !d.reattached && !res.discarded) {
+  if (d.spawned && !res.discarded) {
     const engine = d.launch?.BROWSE_ENGINE || d.engine || "?";
     const prof = d.launch ? d.launch.profile : PROFILE;
     process.stderr.write(`started session '${SESSION}': ${engine}, ${prof ? `profile '${prof}'${inferred ? ` (its last-used engine)` : ""}` : "no profile"}\n`);
@@ -7753,7 +7760,9 @@ async function daemon() {
       if (OUT_BEFORE.has(f)) continue; // a reused BROWSE_OUT keeps what an earlier run left
       try { rmSync(join(OUT, f), { recursive: true, force: true }); } catch { /* best effort */ }
     }
-    try { if (!readdirSync(OUT).length) rmSync(OUT, { recursive: true, force: true }); } catch { /* keep it */ }
+    if (!process.env.BROWSE_OUT || process.env.BROWSE_OUT_GENERATED === "1") {
+      try { if (!readdirSync(OUT).length) rmSync(OUT, { recursive: true, force: true }); } catch { /* keep it */ }
+    }
   }
 
   const server = http.createServer((req, res) => {
@@ -7809,8 +7818,8 @@ async function daemon() {
     req.setEncoding("utf8");
     req.on("data", (c) => (body += c));
     req.on("end", async () => {
-      let cmd = "?", args = [], hold = false, ai, initSource;
-      try { ({ cmd, args = [], hold = false, ai, initSource } = JSON.parse(body)); } catch { /* ignore */ }
+      let cmd = "?", args = [], hold = false, ai, initSource, starter = false;
+      try { ({ cmd, args = [], hold = false, ai, initSource, starter = false } = JSON.parse(body)); } catch { /* ignore */ }
       const send = (obj) => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obj)); };
       let ownsTask = false, ownsCommand = false, taskTimer;
       const asides = [];
@@ -7928,7 +7937,9 @@ async function daemon() {
         // in it (a bad flag, a selector on a blank tab): take the browser down
         // again. Left up, it was a live blank session that the next command
         // silently reused, screenshotting about:blank.
-        if (firstRequest && commandCount === 1 && !closing && pristine()) {
+        // Only the client that spawned it: a second client racing in with a
+        // failing command must not take down the browser the first one opened.
+        if (starter && firstRequest && commandCount === 1 && !closing && pristine()) {
           await discardSession();
           send({ ok: false, error: `${msg}\n(no session was left running: the browser this command started was closed again)`, discarded: true });
           setTimeout(() => process.exit(0), 50);

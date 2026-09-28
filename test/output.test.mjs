@@ -229,6 +229,38 @@ try {
   check('a dialog answered after the last command is said by close, on stderr',
     r.code === 0 && /dialog\(alert\): "hey"/.test(r.err) && !/dialog/.test(r.out) && /^closed/.test(r.out), show(r));
 
+  /* --------------------------------- concurrent starts and a user BROWSE_OUT */
+  console.log('\ntwo clients starting one session');
+  const runBg = (session, args) => new Promise((resolve) => {
+    if (!sessions.includes(session)) sessions.push(session);
+    const c = spawn(join(ROOT, 'bin', 'browse'), ['-s', session, ...args], { cwd: CWD, env: BASE_ENV });
+    let out = '', err = '';
+    c.stdout.on('data', (d) => (out += d)); c.stderr.on('data', (d) => (err += d));
+    c.on('close', (code) => resolve({ code, out: out.trim(), err: err.trim() }));
+  });
+  const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const s7 = `out-race-${process.pid}`;
+  let first = runBg(s7, ['--viewport', '800x600', 'open', `${BASE}/plain`]);
+  pause(300);
+  r = run(s7, ['eval', 'throw new Error("x")']);
+  let a = await first;
+  check('a second client failing during start-up does not discard the first client\'s browser',
+    a.code === 0 && r.code === 1 && !/no session was left running/.test(r.err), `A: ${show(a)}\nB: ${show(r)}`);
+  run(s7, ['close']);
+  const s8 = `out-race2-${process.pid}`;
+  first = runBg(s8, ['--viewport', '800x600', 'open', `${BASE}/plain`]);
+  pause(300);
+  r = run(s8, ['--viewport', '1024x768', 'url']);
+  a = await first;
+  check('a client that attaches to a browser another client started refuses differing launch flags',
+    a.code === 0 && /started session/.test(a.err) && r.code === 1 && /different launch settings: --viewport/.test(r.err) && !/started session/.test(r.err),
+    `A: ${show(a)}\nB: ${show(r)}`);
+  run(s8, ['close']);
+  const userOut = join(HOME, 'user-out');
+  mkdirSync(userOut);
+  r = run(`out-uo-${process.pid}`, ['text', 'h1'], { BROWSE_OUT: userOut });
+  check('a discarded start keeps an empty BROWSE_OUT the user made', r.code === 1 && /no session was left running/.test(r.err) && existsSync(userOut), show(r));
+
   /* ------------------------------------- H: profile engine + profiles text */
   console.log('\nprofiles');
   const prof = `p${process.pid}`;

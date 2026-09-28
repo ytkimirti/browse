@@ -55,6 +55,10 @@ try {
     /^Navigate \/ act/.test(wait.out) && /browse wait <selector\|ms>/.test(wait.out) && /takes --timeout <ms>/.test(wait.out), wait.out);
   check("…and no other command", !/browse (click|fill|net|snapshot) /.test(wait.out), wait.out);
   check("wait --help is the same text", browse("wait", "--help").out === wait.out);
+  const empty = browse("help", "");
+  check("help with an empty topic prints the index, exit 0", empty.code === 0 && empty.out === index.out, `${empty.code} ${empty.err}`);
+  const box = browse("box", "--help");
+  check("box --help prints box usage on stdout, exit 0", box.code === 0 && /browse box/.test(box.out) && box.err === "", `${box.code} ${box.err}`);
   const vp = browse("help", "--viewport");
   check("help --viewport prints the launch flags, exit 0", vp.code === 0 && /--viewport/.test(vp.out) && vp.out === browse("help", "viewport").out, `${vp.code} ${vp.err}`);
   const prof = browse("help", "-p");

@@ -774,8 +774,11 @@ switch (cmd) {
   default:
     // Usage on the ERROR path goes to stderr, so `browse box $typo | …` does not
     // feed a help page into whatever was expecting output.
-    (cmd && cmd !== "help" ? process.stderr : process.stdout).write(HELP);
-    process.exitCode = cmd && cmd !== "help" ? 1 : 0;
+    {
+      const asked = !cmd || ["help", "--help", "-h"].includes(cmd);
+      (asked ? process.stdout : process.stderr).write(HELP);
+      process.exitCode = asked ? 0 : 1;
+    }
 }
 } catch (e) {
   // die() throws rather than exiting so that `finally` blocks run — buildImage's
