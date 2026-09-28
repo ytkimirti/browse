@@ -306,14 +306,20 @@ if [[ "$CMD" == "setup" ]]; then
   exit 0
 fi
 
-# Reject malformed launch arguments before any runtime bootstrap.
-BROWSE_PREFLIGHT=1 node "$REPO_ROOT/browse.mjs" "$@"
+# `__serve` IS the daemon a remote client spawns here. Both probes below are
+# client checks, and running one with `__serve` on the line would start the
+# daemon itself, without BROWSE_PW_BASE, which then dies unable to find
+# Playwright. The client already validated its launch flags before spawning.
+if [[ "$CMD" != "__serve" ]]; then
+  # Reject malformed launch arguments before any runtime bootstrap.
+  BROWSE_PREFLIGHT=1 node "$REPO_ROOT/browse.mjs" "$@"
 
-# An existing local daemon already owns its runtime. In particular a CDP session
-# can have only the driver installed, and later commands omit its launch flags.
-if [[ -z "$REMOTE_SEEN" && -z "${BROWSE_REMOTE:-}" ]] && \
-    BROWSE_LIVE_ONLY=1 node "$REPO_ROOT/browse.mjs" "$@" >/dev/null 2>&1; then
-  BROWSE_PW_BASE="$PW_DIR/package.json" exec node "$REPO_ROOT/browse.mjs" "$@"
+  # An existing local daemon already owns its runtime. In particular a CDP session
+  # can have only the driver installed, and later commands omit its launch flags.
+  if [[ -z "$REMOTE_SEEN" && -z "${BROWSE_REMOTE:-}" ]] && \
+      BROWSE_LIVE_ONLY=1 node "$REPO_ROOT/browse.mjs" "$@" >/dev/null 2>&1; then
+    BROWSE_PW_BASE="$PW_DIR/package.json" exec node "$REPO_ROOT/browse.mjs" "$@"
+  fi
 fi
 
 # CDP borrows a remote browser. Validate before installing anything, then fetch

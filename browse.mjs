@@ -7182,8 +7182,18 @@ for (const s of [process.stdout, process.stderr]) {
 }
 
 const mode = process.argv[2];
-if (mode === "__serve") {
-  daemon().catch((e) => { logDaemon("fatal: " + (e?.stack || e)); process.exit(1); });
+// The launcher's probes (BROWSE_PREFLIGHT, BROWSE_LIVE_ONLY) are client checks.
+// A probe that reached daemon() started a browser with none of the launcher's
+// runtime env, so with either set `__serve` is answered like any other word.
+const probing = process.env.BROWSE_PREFLIGHT === "1" || process.env.BROWSE_LIVE_ONLY === "1";
+if (mode === "__serve" && !probing) {
+  // stderr as well as browsed.log: a remote spawn captures stderr in the log the
+  // client polls, which is how it reports this instead of waiting out its timeout.
+  daemon().catch((e) => {
+    logDaemon("fatal: " + (e?.stack || e));
+    process.stderr.write(`browse: daemon failed to start: ${e?.message || e}\n`);
+    process.exit(1);
+  });
 } else {
   // Set exitCode and let node exit on its own once the event loop drains —
   // process.exit() here would TRUNCATE a large stdout write into a pipe
