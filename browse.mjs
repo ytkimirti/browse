@@ -81,7 +81,7 @@
  *   BROWSE_FPS         capture and output frame rate (default 30, max 60)
  *   BROWSE_NET_BODIES=0      don't capture request/response bodies
  *   BROWSE_NET_BODY_MAX      max bytes kept per body (default 32768)
- *   BROWSE_NET_SECRETS=1     keep auth headers/cookies verbatim (default: values hashed)
+ *   BROWSE_NET_SECRETS=1     keep secrets in the network log verbatim (default: values hashed)
  *   BROWSE_KEEP_WEBM=1 keep the raw .webm after the mp4 is written, so the
  *                      session can be re-cut later with one ffmpeg call
  *   BROWSE_FFMPEG      the ffmpeg used to finalize the mp4
@@ -560,8 +560,8 @@ const NET_CONDITIONS = {
 // the context) is appended to `network.jsonl` in the session dir as it completes
 // — so `browse net` can query it while the browser is live AND long after the
 // session closed (the file outlives the daemon). Bodies are captured for
-// text-ish content types up to bodyMax bytes; auth headers/cookies are redacted
-// unless BROWSE_NET_SECRETS=1.
+// text-ish content types up to bodyMax bytes; secret values in headers, urls and
+// bodies are hashed unless BROWSE_NET_SECRETS=1.
 const NET = {
   on: process.env.BROWSE_NET !== "0",
   bodies: process.env.BROWSE_NET_BODIES !== "0",
@@ -572,7 +572,36 @@ const NET = {
   secrets: process.env.BROWSE_NET_SECRETS === "1",
 };
 const NET_TEXTY = /json|text|xml|javascript|x-www-form-urlencoded|graphql|csv|html|plain/i;
-const NET_SECRET_HEADER = /^(authorization|cookie|set-cookie|proxy-authorization|x-api-key|x-auth-token|x-amz-security-token|x-csrf-token)$/i;
+/** Names whose VALUES are credentials, for headers, query params, form fields
+ *  and JSON keys alike. A fixed header list stored x-vercel-protection-bypass
+ *  verbatim, so this matches the name folded to [a-z0-9] (clientSecret,
+ *  client_secret and client-secret are one name): the strong words anywhere in
+ *  it, the short ones only as the whole name, where they cannot be a fragment of
+ *  something harmless (author, keyboard, pinned). */
+const NET_SECRET_WORD = /token|secret|passw|passphrase|bypass|signature|credential|csrf|xsrf|cookie|session|apikey|accesskey|privatekey|secretkey|clientkey|subscriptionkey|functionskey|authorization|authkey|jwt/;
+const NET_SECRET_EXACT = /^(auth|xauth|sig|sid|pwd|pass|pin|otp|hmac)$/;
+/** Credential-flavoured names that carry none: a flag, a list of header NAMES,
+ *  or a field ABOUT the secret (token_type, token_endpoint, passwordPolicy). */
+const NET_NOT_SECRET = /^(accesscontrolallowcredentials|accesscontrolallowheaders|accesscontrolexposeheaders|accesscontrolrequestheaders|wwwauthenticate|proxyauthenticate)$|(type|count|expiresin|expiresat|expires|expiry|ttl|endpoint|url|uri|enabled|required|policy|limit)$/;
+/** `key` alone is a credential in a query string (?key=) and a feature-flag or
+ *  list key in a JSON body, so only urls treat it as one. */
+function netSecretName(name, url = false) {
+  let n = String(name);
+  try { n = decodeURIComponent(n); } catch { /* keep it raw */ }
+  n = n.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return !!n && !NET_NOT_SECRET.test(n) && (NET_SECRET_WORD.test(n) || NET_SECRET_EXACT.test(n) || (url && n === "key"));
+}
+/** Credential SHAPES, caught wherever they sit (a harmless-named header, a url
+ *  path, a response body): JWTs, bearer tokens and the common vendor key prefixes. */
+const NET_SECRET_VALUES = [
+  /\beyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*/g,
+  /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}/g,
+  /\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_\w{30,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\bsk-[\w-]{20,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bAIza[\w-]{35}/g,
+];
 function netFileIn(dir) { return `${dir}/network.jsonl`; }
 /** Playwright dims parts of its error messages with ANSI codes (the call log
  *  arrives as literal ESC[2m…ESC[22m). Those bytes are noise in a JSON response
@@ -613,9 +642,48 @@ function netRedact(headers) {
   if (NET.secrets) return headers;
   const out = {};
   for (const [k, v] of Object.entries(headers || {})) {
-    out[k] = NET_SECRET_HEADER.test(k) ? netHideValue(k, v) : v;
+    out[k] = netSecretName(k) ? netHideValue(k, v) : netScrub(v);
   }
   return out;
+}
+/** Hash credential-shaped substrings, and secret-named params when the value is a url. */
+function netScrub(value) {
+  let s = String(value);
+  s = s.replace(/\b(Bearer\s+)([\w.~+/-]{16,}=*)/gi, (_m, b, t) => b + netHash(t));
+  for (const re of NET_SECRET_VALUES) s = s.replace(re, (m) => (m.startsWith("<sha256:") ? m : netHash(m)));
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? netQuery(s) : s;
+}
+/** Secret-named query/fragment params keep their name, lose their value. */
+function netQuery(url) {
+  return url.replace(/([?#&;])([^=&#?;]+)=([^&#;]*)/g,
+    (m, sep, k, v) => (v && !v.startsWith("<sha256:") && netSecretName(k, true) ? `${sep}${k}=${netHash(v)}` : m));
+}
+function netRedactUrl(url) {
+  return NET.secrets ? url : netScrub(url);
+}
+/** Bodies are redacted as TEXT, before the size cap, so formatting survives and
+ *  a secret straddling the cut can never leave half of itself behind. Covers
+ *  JSON (also the backslash-escaped JSON inside RSC/Next payloads), form bodies,
+ *  multipart fields and HTML hidden inputs/meta tags. */
+function netRedactBody(body) {
+  if (NET.secrets || typeof body !== "string" || !body) return body;
+  const hide = (k, v) => v && netSecretName(k) && !v.startsWith("<sha256:");
+  let s = netScrub(body).replace(/\bhttps?:\/\/[^\s"'<>\\]+/g, netQuery);
+  s = s.replace(/"([^"\\\n]{1,64})"(\s*:\s*)"((?:[^"\\\n]|\\.)*)"/g,
+    (m, k, sep, v) => (hide(k, v) ? `"${k}"${sep}"${netHash(v)}"` : m));
+  s = s.replace(/\\"([^"\\\n]{1,64})\\"(\s*:\s*)\\"([^"\\\n]*)\\"/g,
+    (m, k, sep, v) => (hide(k, v) ? `\\"${k}\\"${sep}\\"${netHash(v)}\\"` : m));
+  if (/^[^\s=&]+=[^\s&]*(?:&[^\s=&]+=[^\s&]*)*$/.test(s)) {
+    s = s.replace(/(^|&)([^=&]+)=([^&]*)/g, (m, sep, k, v) => (hide(k, v) ? `${sep}${k}=${netHash(v)}` : m));
+  }
+  s = s.replace(/(Content-Disposition:\s*form-data;\s*name="([^"]+)"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n)([^\r\n]*)/gi,
+    (m, head, k, v) => (hide(k, v) ? head + netHash(v) : m));
+  s = s.replace(/<(?:input|meta)\b[^>]*>/gi, (tag) => {
+    const k = /\b(?:name|id|property)\s*=\s*["']([^"']*)["']/i.exec(tag)?.[1];
+    if (!k || !netSecretName(k)) return tag;
+    return tag.replace(/(\b(?:value|content)\s*=\s*)(["'])([^"']*)\2/i, (m, a, q, v) => (hide(k, v) ? `${a}${q}${netHash(v)}${q}` : m));
+  });
+  return s;
 }
 function netClip(s) {
   if (typeof s !== "string") return s;
@@ -1413,9 +1481,11 @@ while the browser is live AND after close; queries never spawn a browser):
                                     shown rather than leaving you with an empty result.
     --dir <session dir>             query an OLD session's log  --file        print the log's path
   e.g. browse net -d api.upstash.com --failed --full · browse net --json | jq 'select(.ms>500)'
-  Auth headers + cookie VALUES are hashed (sha256 prefix + length), so you can tell tokens
-  apart and see when one rotates without the secret landing in the log (BROWSE_NET_SECRETS=1
-  keeps them verbatim; BROWSE_NET=0 turns logging off entirely).
+  Secret VALUES are hashed (sha256 prefix + length), so you can tell tokens apart and see one
+  rotate without it landing in the log: headers, query params and form/JSON/HTML fields whose
+  name looks secret (token, secret, password, session, bypass, auth, signature, cookie, api key…),
+  plus JWTs, bearer tokens and common API-key shapes anywhere. BROWSE_NET_SECRETS=1 keeps
+  everything verbatim; BROWSE_NET=0 turns logging off entirely.
 
 Intercept requests (mock an API, block an asset, rewrite a response):
   browse middleware <pattern> '<playwright route handler>'
@@ -1620,7 +1690,7 @@ Env-only (set once in a shell profile — no flag):
   BROWSE_KEEP_WEBM=1       keep the raw .webm after the mp4 lands (= 'close --keep-raw')
   BROWSE_NET_BODIES=0      don't capture request/response bodies
   BROWSE_NET_BODY_MAX      max bytes kept per body (32768)
-  BROWSE_NET_SECRETS=1     keep auth headers/cookie values verbatim (default: hashed)
+  BROWSE_NET_SECRETS=1     keep secret headers, url params and body fields verbatim (default: hashed)
   BROWSE_SSH_PASSWORD      password for a --remote that has no key (an Upstash Box falls back to
                            its API key by itself: UPSTASH_BOX_API_KEY, else the one 'browse box
                            key' saved in ~/.browse/box.json). Handed to ssh through an askpass
@@ -4599,7 +4669,7 @@ async function daemon() {
       at: new Date(meta.t0).toISOString(),
       ms: Date.now() - meta.t0,
       method: req.method(),
-      url: req.url(),
+      url: netRedactUrl(req.url()),
       type: req.resourceType(),
     };
     const mock = mwMarks.get(req);
@@ -4607,7 +4677,7 @@ async function daemon() {
     if (error) e.error = error;
     try { e.reqHeaders = netRedact(await req.allHeaders()); } catch { /* gone */ }
     if (NET.bodies) {
-      try { const post = req.postData(); if (post) e.reqBody = netClip(post); } catch { /* binary/none */ }
+      try { const post = req.postData(); if (post) e.reqBody = netClip(netRedactBody(post)); } catch { /* binary/none */ }
     }
     let res = null;
     try { res = await req.response(); } catch { /* failed before a response */ }
@@ -4620,7 +4690,7 @@ async function daemon() {
       // Bodies only for text-ish types (JSON APIs are the point) and only up to
       // NET.bodyMax — never pull a video/image payload into the log.
       if (NET.bodies && NET.bodyMax > 0 && NET_TEXTY.test(e.mime)) {
-        try { e.resBody = netClip((await res.body()).toString("utf8")); } catch { /* redirect/no body */ }
+        try { e.resBody = netClip(netRedactBody((await res.body()).toString("utf8"))); } catch { /* redirect/no body */ }
       }
     }
     netAppend(e);
