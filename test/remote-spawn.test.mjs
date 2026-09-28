@@ -111,7 +111,7 @@ try {
 
   console.log("\na remote daemon starts through the launcher");
   let r = remote({}, "open", "about:blank");
-  check("--remote open succeeds", r.code === 0 && /\[shots\/[^\]]+\.png\]/.test(r.out), `${r.code} ${r.out}\n${r.err}`);
+  check("--remote open succeeds", r.code === 0 && /\[shots\/[^\]]+\.png\]/.test(r.err), `${r.code} ${r.out}\n${r.err}`);
   check("…with the daemon spawned by the remote launcher (per-session spawn log)",
     spawnLogs().some((f) => f.startsWith(`spawn-${SESSION}@`)), spawnLogs().join(","));
 

@@ -35,7 +35,7 @@ try {
   let r = b('ai', 'click', 'settings'); check('AI requires an existing browser', r.code === 1 && /open a page/.test(r.err), r.err);
   r = b('open', base); check('fixture opens', r.code === 0, r.err);
   r = b('snapshot', '#blob'); check('scoped snapshot excludes other regions', r.code === 0 && /Blob storage/.test(r.out) && !/Redis cache/.test(r.out), r.out + r.err);
-  r = b('snapshot', 'section'); check('ambiguous snapshot scope fails', r.code === 1, r.err);
+  r = b('snapshot', 'section'); check('ambiguous snapshot scope reads the first match and says so', r.code === 0 && /matched 3 - this is the first/.test(r.err), r.err);
   r = b('ai', 'click', 'Settings for Blob storage'); check('semantic click selects correct duplicate label', r.code === 0 && /input_tokens=500/.test(r.out) && b('text','#result').out.includes('Blob settings'), r.out + r.err);
   check('AI action gets a step screenshot', readdirSync(join(ENV.BROWSE_OUT, 'shots')).some(n => n.includes('ai-click')));
   b('eval', "document.querySelector('#result').textContent='Ready'");
