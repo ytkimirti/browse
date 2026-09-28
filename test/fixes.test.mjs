@@ -304,8 +304,9 @@ try {
     const popup = pop("click", "#blank");
     // The page event lands after click() resolves, so this note used to arrive
     // on the NEXT command while the click reported the tab it had just left.
-    check("the click that opens a popup reports it", /switched to popup tab/.test(popup.out),
-      `out=${JSON.stringify(popup.out)}\ntabs:\n${pop("target").out}`);
+    // Notices are on stderr; the result line stays alone on stdout.
+    check("the click that opens a popup reports it", /switched to popup tab/.test(popup.err),
+      `err=${JSON.stringify(popup.err)}\ntabs:\n${pop("target").out}`);
     check("...and its status line is the popup, not the old tab", /popup=1/.test(popup.out), popup.out);
     check("...and the popup really is a second tab", /\n\*? ?1 /.test(pop("target").out), pop("target").out);
   } finally {
@@ -488,10 +489,10 @@ try {
     `${savedSeq} -> ${read("document.cookie.replace(/.*sess=/, '')")}`);
   const merged = browse("state", "--load", STATEFILE);
   check("a merge load exits 0", merged.code === 0, `exit ${merged.code} · ${merged.err}`);
-  check("...and reports what the page replaced", /replaced or dropped 1 of them/.test(merged.out), merged.out);
-  check("...and points at --clean", /--clean/.test(merged.out), merged.out);
+  check("...and reports what the page replaced", /replaced or dropped 1 of them/.test(merged.err), merged.err);
+  check("...and points at --clean", /--clean/.test(merged.err), merged.err);
   const cleaned = browse("state", "--load", STATEFILE, "--clean");
-  check("--clean loads with no such note", cleaned.code === 0 && !/replaced or dropped/.test(cleaned.out),
+  check("--clean loads with no such note", cleaned.code === 0 && !/replaced or dropped/.test(cleaned.out + cleaned.err),
     `exit ${cleaned.code} · ${cleaned.out}`);
 
   /* ----------------------------------------------------- right click */
@@ -519,9 +520,9 @@ try {
   console.log("\na click that changes nothing says so");
   const inert = browse("click", "#inertwrap");
   check("clicking an inert wrapper still exits 0", inert.code === 0, `exit ${inert.code} · ${inert.err}`);
-  check("...and says nothing changed", /nothing changed/.test(inert.out), inert.out);
+  check("...and says nothing changed", /nothing changed/.test(inert.err), inert.err);
   const real = browse("click", "#btn");
-  check("a real button gets no such note", real.code === 0 && !/nothing changed/.test(real.out), real.out);
+  check("a real button gets no such note", real.code === 0 && !/nothing changed/.test(real.out + real.err), real.out + real.err);
 
   /* --------------------------------------------- a snapshot line as a selector */
   // `snapshot` prints `- button "Go":` and pasting that back is the obvious next

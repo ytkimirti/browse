@@ -116,6 +116,7 @@ import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFi
 // for the sake of a diagnostic that only ever runs after a crash.
 import * as nodeFs from "node:fs";
 import { pipeline } from "node:stream";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { homedir, freemem, totalmem } from "node:os";
 import { join, resolve, basename } from "node:path";
@@ -1348,7 +1349,7 @@ Observe / diagnose (for individual actions or a stopped task):
                                     long line is cut with a note, and object arguments are resolved to
                                     real JSON on both engines. A %c-styled log keeps its CSS arguments
                                     on chromium; firefox/camoufox applies the styling and drops them.
-  browse screenshot [name] [--full] [--sel <selector>] [--pad <px>] [--after <selector>] [--text <substring>] [--timeout <ms>] [--hide <css>]
+  browse screenshot [name|path] [--full] [--sel <selector>] [--pad <px>] [--after <selector>] [--text <substring>] [--timeout <ms>] [--hide <css>] [--scale css]
                                     save a screenshot into the session dir. --full captures the whole
                                     scrollable page (without moving it, so the recording is untouched),
                                     --sel shoots one element, and a name ending in .pdf prints a PDF.
@@ -1360,7 +1361,9 @@ Observe / diagnose (for individual actions or a stopped task):
                                     It removes the agent round trip, but does not freeze a transient state.
                                     --text/--timeout require --after. --hide is a repeatable CSS selector,
                                     hidden only during the image capture and disclosed in the result.
-                                    These capture options do not apply to PDF output.
+                                    These capture options do not apply to PDF output. --scale css saves
+                                    1x (one pixel per CSS pixel) on a Retina session. A name with a '/'
+                                    is a path: written there, relative to your cwd.
 
 Tabs, frames, emulation, saved logins:
   browse target                     list tabs (index, title, url, * = active)
@@ -1387,9 +1390,11 @@ Tabs, frames, emulation, saved logins:
                                     already there (right for restoring one login); --clean wipes
                                     cookies + that origin's localStorage first, which is what you
                                     want when switching between two accounts
-  Dialogs (alert/confirm/prompt) are auto-accepted and reported inline; put
+  Dialogs (alert/confirm/prompt) are auto-accepted and reported on stderr; put
   --dialog dismiss (or --dialog "accept:my answer") on the command that triggers one.
-  Downloads are saved to downloads/ in the session dir and their path is reported inline.
+  Downloads are saved to downloads/ in the session dir and their path is reported on stderr.
+  stdout carries only a command's result. Notes, tips, the step shot, new page errors,
+  dialogs and downloads go to stderr, so '| tail -1' and '$(…)' get just the result.
 
 Network (every request of the session is logged to network.jsonl by default — works
 while the browser is live AND after close; queries never spawn a browser):
@@ -1507,7 +1512,8 @@ this one — see 'browse help --env' for the auth + install knobs):
                                     'browse box help'.
 
 Launch flags (how the browser STARTS — put them before the command that opens the
-session; on an already-live session browse refuses rather than ignoring them):
+session; a live session accepts flags that match how it started and refuses the rest,
+naming each value that differs):
   --cdp <endpoint>                  attach to an existing Chromium browser over http(s)/ws(s).
                                     Requires --no-video; existing contexts cannot start video capture.
                                     No profile or browser-setting launch overrides. Bare open keeps
@@ -1548,17 +1554,18 @@ Persistent profile (keep cookies + localStorage across close→open, e.g. stay l
                                     unlimited — see 'browse target'); a second session on the
                                     same profile can't share the locked dir.
                                     No -p = throwaway clean context (the default).
-  browse profiles [name]            list the persistent profiles, with the engine(s) each has a
-                                    login under, its size, when it was last written, and how many
-                                    hosts still hold a live cookie. With a NAME: every one of those
-                                    hosts and when it expires — the cheap pre-flight for "is this
-                                    login still good?", with no browser and no recording. Hosts and
-                                    expiries only; cookie values are never read.
+  browse profiles [name]            list the persistent profiles, with the engine(s) each has data
+                                    under, its size, when it was last written, and how many sites
+                                    still hold a live cookie. With a NAME: every one of those sites
+                                    and when its cookie expires, with no browser and no recording.
+                                    A cookie means the site was visited, not that you are signed in.
+                                    Hosts and expiries only; cookie values are never read.
   browse -p <name> clear            delete a profile (both engines' dirs; --chromium / --camoufox
                                     clears just that half). Close it first if it's open.
   A profile is stored PER ENGINE — a Firefox profile and a Chromium user-data dir are
   incompatible formats, so 'browse --camoufox -p x' and 'browse --chromium -p x' are two
-  separate logins under one name. Log in on the engine you will drive with.
+  separate logins under one name. Log in on the engine you will drive with. A local -p with
+  no engine flag (and no BROWSE_ENGINE) starts on the engine that profile was last used with.
 
 Artifacts (transcript.md, step screenshots, video) land in a per-session dir
 under ${join(BROWSE_HOME, "sessions")}/. On close, ffmpeg (if installed) trims the
@@ -2625,26 +2632,90 @@ const CLOSERS = new Set(["close"]);
  *  When several score the same it names them ALL rather than picking - `shot` is
  *  genuinely both `screenshot` and `snapshot`, and guessing one sends the agent
  *  to a command that succeeds at the wrong thing. */
-function nearestCommand(cmd) {
-  // Damerau, not plain Levenshtein: swapping two neighbours is the commonest
-  // typo there is, and at plain Levenshtein it costs 2 — so `clcik` scored the
-  // same as a word with two unrelated letters wrong and got no suggestion.
-  const dist = (a, b) => {
-    const d = [];
-    for (let i = 0; i <= a.length; i++) d[i] = [i];
-    for (let j = 0; j <= b.length; j++) d[0][j] = j;
-    for (let i = 1; i <= a.length; i++) {
-      for (let j = 1; j <= b.length; j++) {
-        const sub = a[i - 1] === b[j - 1] ? 0 : 1;
-        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + sub);
-        if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
-          d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
-        }
+// Damerau, not plain Levenshtein: swapping two neighbours is the commonest
+// typo there is, and at plain Levenshtein it costs 2 — so `clcik` scored the
+// same as a word with two unrelated letters wrong and got no suggestion.
+function editDistance(a, b) {
+  const d = [];
+  for (let i = 0; i <= a.length; i++) d[i] = [i];
+  for (let j = 0; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const sub = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + sub);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
       }
     }
-    return d[a.length][b.length];
-  };
+  }
+  return d[a.length][b.length];
+}
+
+/** Commands agents reach for that browse spells differently. Edit distance
+ *  cannot get from `ls` to `sessions`, and a guess that far off is not a typo:
+ *  it is a different vocabulary. Null-prototype for the same reason as RETIRED. */
+const COMMAND_GUESSES = Object.assign(Object.create(null), {
+  ls: "'sessions' (live sessions) or 'target' (tabs)", list: "'sessions' (live sessions) or 'target' (tabs)",
+  ps: "'sessions'", status: "'whoami' or 'sessions'", tabs: "'target'", tab: "'target'",
+  frame: "'target <iframe selector>'", iframe: "'target <iframe selector>'",
+  back: "'goBack'", forward: "'goForward'", refresh: "'reload'",
+  navigate: "'goto'", visit: "'goto'", go: "'goto'", exit: "'close'",
+  js: "'eval'", exec: "'eval'", run: "'eval'", html: "'content'", source: "'content'",
+  log: "'console'", logs: "'console'", select: "'selectOption'", upload: "'setInputFiles'",
+  key: "'press'", keypress: "'press'", sleep: "'wait <ms>'", pause: "'wait <ms>'",
+  tree: "'snapshot'", find: "'snapshot' or 'rect'", inspect: "'snapshot' or 'rect'", query: "'snapshot' or 'eval'",
+  capture: "'screenshot'", cookies: "'state --save <file>'", scrollto: "'scroll <selector>'",
+});
+/** The same for flags, mostly launch flags other tools spell differently. */
+const FLAG_GUESSES = Object.assign(Object.create(null), {
+  "--no-record": "--no-video", "--no-recording": "--no-video", "--record": "--video",
+  "--headed": "--headful", "--show": "--headful", "--firefox": "--camoufox", "--chrome": "--chromium",
+  "--size": "--viewport", "--window-size": "--viewport", "--dpr": "--device-scale", "--retina": "--device-scale",
+  "--name": "-s", "--fullpage": "--full", "--full-page": "--full", "--selector": "--sel",
+});
+/** Flags each command takes, for "did you mean" on a per-command unknown flag.
+ *  `browse help` stays the documentation; this only ranks guesses. */
+const COMMAND_FLAGS = Object.assign(Object.create(null), {
+  open: ["--timeout"], goto: ["--timeout"], reload: ["--timeout"], goBack: ["--timeout"], goForward: ["--timeout"],
+  snapshot: ["--compact", "--refs", "--timeout"],
+  screenshot: ["--full", "--sel", "--pad", "--after", "--text", "--timeout", "--hide", "--scale"],
+  wait: ["--gone", "--text", "--not-text", "--url", "--timeout"], scroll: ["--x"],
+  toast: ["--for", "--sticky", "--color", "--pos", "--clear"], init: ["--file", "--label", "--stub", "--remove", "--clear"],
+  middleware: ["--remove", "--clear"], state: ["--save", "--load", "--clean"], close: ["--gif", "--keep-raw"],
+  console: ["--dir", "--level", "--grep", "--since", "--last", "--all", "--json", "--ungroup"],
+  errors: ["--dir", "--level", "--grep", "--since", "--last", "--all", "--json", "--ungroup"],
+});
+for (const c of ELEMENT_TARGETED) COMMAND_FLAGS[c] = ["--timeout", "--dialog", ...(["click", "dblclick", "rightclick", "hover"].includes(c) ? ["--position"] : [])];
+
+/** The closest of `candidates` to `word`, or "" when nothing is close enough
+ *  to be a typo rather than a guess. Same cap as nearestCommand. */
+function nearestWord(word, candidates) {
+  const q = String(word).toLowerCase().replace(/^-+/, "");
+  let best = "", bestScore = Infinity;
+  for (const c of candidates) {
+    const s = editDistance(q, c.toLowerCase().replace(/^-+/, ""));
+    if (s < bestScore) { bestScore = s; best = c; }
+  }
+  return best && best !== word && bestScore <= Math.max(1, Math.floor(q.length / 3)) ? best : "";
+}
+
+/** "did you mean" for an unknown flag: the command's own flags first, then the
+ *  launch flags - which belong BEFORE the command, so that is said too. */
+function flagSuggestion(flag, cmd) {
+  const launch = [...Object.keys(LAUNCH_FLAGS), ...Object.keys(LAUNCH_OPTS)];
+  const own = (cmd && COMMAND_FLAGS[cmd]) || [];
+  const guess = FLAG_GUESSES[flag];
+  const hit = guess && (own.includes(guess) || launch.includes(guess) || !cmd) ? guess
+    : nearestWord(flag, own) || nearestWord(flag, launch);
+  if (!hit) return "";
+  if (cmd && launch.includes(hit) && !own.includes(hit))
+    return `did you mean ${hit}? It is a launch flag, so it goes BEFORE the command: browse ${hit}${LAUNCH_OPTS[hit] ? " <value>" : ""} ${cmd} …`;
+  return `did you mean ${hit}?`;
+}
+
+function nearestCommand(cmd) {
   const q = String(cmd).toLowerCase();
+  if (COMMAND_GUESSES[q]) return ` - did you mean ${COMMAND_GUESSES[q]}?`;
   const all = [...DAEMON_COMMANDS, ...LOCAL_CMDS, "box", "install", "sessions"]
     .filter((c) => !UNDOCUMENTED.has(c));
   let best = [], bestScore = Infinity;
@@ -2655,7 +2726,7 @@ function nearestCommand(cmd) {
     // outside any edit distance short enough to stay honest. Four characters
     // minimum on each side so `net`/`url` don't match an unrelated word.
     const near = (q.length >= 4 && lc.includes(q)) || (lc.length >= 4 && q.includes(lc));
-    const s = near ? 0 : dist(q, lc);
+    const s = near ? 0 : editDistance(q, lc);
     if (s < bestScore) { bestScore = s; best = [c]; }
     else if (s === bestScore) best.push(c);
   }
@@ -2791,12 +2862,91 @@ function validateCdpLaunch(env, profile) {
     throw new Error("--cdp borrows the existing browser settings; omit headful, viewport, device-scale, cursor, keylog and popup launch overrides");
 }
 
+/** `screenshot <path>` with a directory in it: the daemon still writes into the
+ *  session dir (the transcript and a remote mirror both expect it there) and
+ *  the CLIENT copies the file to the path, resolved against the caller's cwd,
+ *  not the daemon's. A bare name stays a label in the session dir. Returns the
+ *  args the daemon should see and where the copy goes. */
+function screenshotDest(argv) {
+  const VALUED = new Set(["--after", "--text", "--hide", "--timeout", "--sel", "--pad", "--scale", "--dialog"]);
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (VALUED.has(a)) { i++; continue; }
+    if (a.startsWith("-")) continue;
+    if (!a.includes("/") && !a.startsWith("~")) break;
+    let dest = resolve(a.replace(/^~(?=\/|$)/, homedir()));
+    let isDir = a.endsWith("/");
+    try { isDir = isDir || statSync(dest).isDirectory(); } catch { /* a new file */ }
+    const out = argv.slice();
+    if (isDir) { out.splice(i, 1); return { argv: out, shotDest: { dir: dest } }; }
+    const ext = /\.(png|jpe?g|pdf)$/i.exec(dest);
+    dest = ext ? dest.slice(0, -ext[0].length) + ext[0].toLowerCase() : `${dest}.png`;
+    out[i] = basename(dest);
+    return { argv: out, shotDest: { file: dest } };
+  }
+  return { argv, shotDest: null };
+}
+
+/** One launch value in the form the daemon reports it (see launchConfig). */
+function launchNorm(env, v) {
+  const s = String(v ?? "");
+  if (env === "BROWSE_VIEWPORT") { const m = /^(\d+)[x×,](\d+)$/.exec(s); return m ? `${m[1]}x${m[2]}` : s; }
+  if (env === "BROWSE_DEVICE_SCALE" || env === "BROWSE_TYPE_DELAY" || env === "BROWSE_IDLE_MS") return String(Number(s));
+  if (env === "BROWSE_CDP") return s ? netHash(s) : "";
+  return s;
+}
+
+/** The launch flags on this command that DIFFER from the live session, each
+ *  said with the value the session really runs, e.g. "--headful (it runs
+ *  --headless)". Empty when every flag matches. */
+function launchMismatch(launch, seen, profileSeen) {
+  const out = [], done = new Set();
+  const asFlag = (env, v) => {
+    const pair = Object.entries(LAUNCH_FLAGS).find(([, [e, val]]) => e === env && val === v);
+    if (pair) return pair[0];
+    const opt = Object.entries(LAUNCH_OPTS).find(([, o]) => o.env === env);
+    return env === "BROWSE_CDP" ? (v ? "another --cdp endpoint" : "no --cdp") : `${opt ? opt[0] : env} ${v}`;
+  };
+  for (const flag of seen) {
+    const env = LAUNCH_FLAGS[flag] ? LAUNCH_FLAGS[flag][0] : LAUNCH_OPTS[flag].env;
+    if (done.has(env)) continue;
+    done.add(env);
+    const want = launchNorm(env, LAUNCH_ENV[env]);
+    if (!(env in launch) || want === String(launch[env])) continue;
+    out.push(`${asFlag(env, want)} (it runs ${asFlag(env, String(launch[env]))})`);
+  }
+  if (profileSeen && (launch.profile || null) !== (PROFILE || null))
+    out.push(`-p ${PROFILE || "<none>"} (it runs ${launch.profile ? `profile '${launch.profile}'` : "without a profile"})`);
+  return out;
+}
+
+/** When `-p <name>` names no engine, the engine that profile was last used on:
+ *  its two halves are separate logins, and landing on the empty one of the two
+ *  (camoufox is the default) reads as "the login expired". Null when there is
+ *  nothing to go on. Newest top-level write wins; no du, no cookie read. */
+function profileEngine(name) {
+  let best = null, bestAt = 0;
+  for (const engine of ["chromium", "camoufox"]) {
+    const dir = profileDir(name, engine);
+    let at = 0;
+    try {
+      for (const f of readdirSync(dir)) {
+        if (f === ".DS_Store") continue;
+        try { at = Math.max(at, statSync(join(dir, f)).mtimeMs); } catch { /* vanished */ }
+      }
+    } catch { continue; }
+    if (at > bestAt) { best = engine; bestAt = at; }
+  }
+  return best;
+}
+
 async function client(argv) {
   // Leading flags (any order): `-s <name>` selects a named parallel session,
   // `-p <name>` selects a persistent profile. Both must accompany EVERY command
   // aimed at that session (BROWSE_SESSION / BROWSE_PROFILE work too). Launch
   // flags (LAUNCH_FLAGS / LAUNCH_OPTS) go here too, on the command that opens.
   const launchSeen = [];
+  let profileSeen = false;
   for (;;) {
     const a = argv[0];
     if (a === "-s" || a === "--session") {
@@ -2805,6 +2955,7 @@ async function client(argv) {
       if (!process.env.BROWSE_OUT) setOut(defaultOut());
     } else if (a === "-p" || a === "--profile") {
       PROFILE = argv[1] ? sanitizeName(argv[1]) : null;
+      profileSeen = true;
       argv = argv.slice(2);
     } else if (a === "--remote") {
       REMOTE = String(argv[1] || "").trim();
@@ -2861,9 +3012,17 @@ async function client(argv) {
     process.stdout.write((envOnly ? ENV_HELP : HELP) + "\n");
     return 0;
   }
+  // A profile's two engine halves are separate logins: with no engine named,
+  // a session starts on the half it was last used with rather than the default's.
+  const inferEngine = () => PROFILE && !REMOTE && !LAUNCH_ENV.BROWSE_ENGINE && !process.env.BROWSE_ENGINE
+    && !LAUNCH_ENV.BROWSE_CDP && !process.env.BROWSE_CDP ? profileEngine(PROFILE) : null;
   if (process.env.BROWSE_PREFLIGHT === "1") {
+    // A live session is judged against how it really started (launchMismatch),
+    // not against defaults it may not have started with.
+    if (!REMOTE && (await findDaemon())) return 0;
+    const inferredEngine = inferEngine();
     validateCdpLaunch({ ...process.env, ...LAUNCH_ENV }, PROFILE);
-    validateDeviceScale({ ...process.env, ...LAUNCH_ENV });
+    validateDeviceScale({ ...process.env, ...LAUNCH_ENV, ...(inferredEngine ? { BROWSE_ENGINE: inferredEngine } : {}) });
     return 0;
   }
   if (process.env.BROWSE_LIVE_ONLY === "1") return (await findDaemon()) ? 0 : 3;
@@ -2901,7 +3060,8 @@ async function client(argv) {
         + `and you wrote it before '${real}'. Run \`browse help\` for which command takes it.\n`);
       return 1;
     }
-    process.stderr.write(`browse: unknown flag ${cmd} — run \`browse help\` (or \`browse help --env\` for the env-only knobs)\n`);
+    const sug = flagSuggestion(cmd, null);
+    process.stderr.write(`browse: unknown flag ${cmd}${sug ? ` - ${sug}` : ""} — run \`browse help\` (or \`browse help --env\` for the env-only knobs)\n`);
     return 1;
   }
   // These read the REMOTE's disk — the profiles it stores, the Playwright it
@@ -3029,7 +3189,7 @@ async function client(argv) {
         if (!p.engines.length) { out.push(`${p.name}  (empty — nothing was ever stored under this name)`); continue; }
         for (const e of p.engines) {
           const c = e.cookies;
-          out.push(`${p.name}  ${e.engine}  ${e.size}  last written ${e.used}`);
+          out.push(`${p.name}  ${e.engine}  ${e.size}  last written ${e.used}  - sites that stored cookies (a visit alone does that; not a list of logins)`);
           if (!c) { out.push("  (cannot read this profile's cookie db — needs sqlite3 on PATH)"); continue; }
           if (c.unreadable) { out.push(`  (cookie db unreadable: ${c.unreadable})`); continue; }
           if (c.open) { out.push("  a live session is driving this profile and its newest cookies are still in memory — 'browse close' first"); continue; }
@@ -3056,11 +3216,12 @@ async function client(argv) {
       p.engines.forEach((e, i) => {
         const c = e.cookies;
         const logins = !c ? "cookies: ? (no sqlite3)" : c.unreadable ? "cookies: ? (db unreadable)"
-          : c.open ? "in use - cannot tell yet" : c.live ? `${c.live} host${c.live > 1 ? "s" : ""} with unexpired cookies` : "no live cookies";
+          : c.open ? "in use - cannot tell yet" : c.live ? `cookies from ${c.live} site${c.live > 1 ? "s" : ""}` : "no live cookies";
         out.push(`${(i ? "" : p.name).padEnd(nameW)}  ${e.engine.padEnd(8)}  ${e.size.padStart(5)}  ${String(e.used).padEnd(9)}  ${logins}`);
       });
     }
-    out.push("", "(a login lives per engine — pick with --chromium / --camoufox · `browse profiles <name>` lists its hosts)");
+    out.push("", "(cookies say which sites were VISITED, not which are signed in: only the target app proves a login.",
+      " Data is kept per engine (--chromium / --camoufox); a local -p with no engine named starts on the one used last. `browse profiles <name>` lists the sites)");
     process.stdout.write(out.join("\n") + "\n");
     return 0;
   }
@@ -3134,16 +3295,24 @@ async function client(argv) {
     return 0;
   }
   // Launch flags configure the browser at START-UP, so a live session cannot
-  // adopt one. Refusing beats ignoring: `browse --headful click …` against an
-  // already-open session would otherwise report success with the window still
+  // adopt one. A flag that MATCHES how it started is fine (the reflex is one
+  // `B="browse --chromium -p x -s y"` reused for every command); one that does
+  // not is refused rather than ignored: `browse --headful click …` against a
+  // headless session would otherwise report success with the window still
   // hidden, and nothing on screen would say why.
-  if (launchSeen.length && (await findDaemon())) {
+  const live = await findDaemon();
+  if (live && (launchSeen.length || profileSeen)) {
     const s = SESSION === "default" ? "" : ` -s ${SESSION}`;
-    process.stderr.write(
-      `browse: ${launchSeen.join(" ")} only applies when the browser starts, and session '${SESSION}' is already live.\n` +
-      `        The FIRST command of a session starts it (an 'init' or a 'middleware' before 'open' counts),\n` +
-      `        so the flag belongs on that one. Run \`browse${s} close\` and re-open with it, or use -s <name>.\n`);
-    return 1;
+    const differ = live.launch ? launchMismatch(live.launch, launchSeen, profileSeen) : launchSeen;
+    if (differ.length) {
+      process.stderr.write(live.launch
+        ? `browse: session '${SESSION}' is already live with different launch settings: ${differ.join(", ")}.\n` +
+          `        Launch flags only apply when the browser starts. Drop them, or run \`browse${s} close\` and re-open with them (or use another -s <name>).\n`
+        : `browse: ${launchSeen.join(" ")} only applies when the browser starts, and session '${SESSION}' is already live.\n` +
+          `        The FIRST command of a session starts it (an 'init' or a 'middleware' before 'open' counts),\n` +
+          `        so the flag belongs on that one. Run \`browse${s} close\` and re-open with it, or use -s <name>.\n`);
+      return 1;
+    }
   }
   if ((cmd === "console" || cmd === "errors") && !(await findDaemon()))
     throw new Error(`no live session '${SESSION}'; read saved evidence with '${cmd} --dir <session-dir>'`);
@@ -3153,6 +3322,10 @@ async function client(argv) {
     ai = aiConfig();
     if (!(await findDaemon())) throw new Error("ai: open a page in this session first");
   }
+  let shotDest = null;
+  if (cmd === "screenshot") ({ argv, shotDest } = screenshotDest(argv));
+  const inferred = live ? null : inferEngine();
+  if (inferred) LAUNCH_ENV.BROWSE_ENGINE = inferred;
   const d = await ensureDaemon();
   // `init --file <path>` is read by the DAEMON, which sits in whatever directory
   // the session was first opened from - a relative path would resolve against a
@@ -3160,13 +3333,49 @@ async function client(argv) {
   const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
   if (CLOSERS.has(cmd)) writeFileSync(runFile(SESSION), JSON.stringify({ ...d, phase: "closing" }));
   const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}) }, postTimeout(cmd, args));
+  // Which browser and which login this session got, said once, when it starts.
+  // Landing signed out on the wrong engine's half of a profile was invisible.
+  if (!live && !res.discarded) {
+    const engine = d.launch?.BROWSE_ENGINE || d.engine || "?";
+    const prof = d.launch ? d.launch.profile : PROFILE;
+    process.stderr.write(`started session '${SESSION}': ${engine}, ${prof ? `profile '${prof}'${inferred ? ` (its last-used engine)` : ""}` : "no profile"}\n`);
+  }
   if (res.ok) {
     let text = res.result == null ? "" : String(res.result);
-    if (REMOTE) text = await landArtifacts(d, cmd, text);
+    let notes = res.notes == null ? "" : String(res.notes);
+    if (REMOTE) {
+      // One pass over both, so every artifact either names is mirrored, then
+      // split back apart at a line no reply can contain.
+      const SPLIT = "\n\u0000browse-notes\u0000\n";
+      const both = await landArtifacts(d, cmd, `${text}${SPLIT}${notes}`);
+      const at = both.indexOf(SPLIT);
+      text = both.slice(0, at);
+      notes = both.slice(at + SPLIT.length).replace(/^\n+/, "");
+    }
+    if (shotDest) {
+      const m = /^saved (.+?\.(?:png|jpe?g|pdf))(?= \(|$)/m.exec(text);
+      if (m) {
+        const dest = shotDest.file || join(shotDest.dir, basename(m[1]));
+        try { mkdirSync(join(dest, ".."), { recursive: true }); nodeFs.copyFileSync(m[1], dest); }
+        catch (e) { throw new Error(`screenshot: saved ${m[1]}, but could not write ${dest} (${e.code || e.message})`); }
+        text = text.replace(m[1], dest);
+      }
+    }
+    // Notices first, on stderr; the answer alone on stdout, so `| tail -1`,
+    // `$(…)` and `| jq` always get the result, never a remark about it.
+    if (notes !== "") process.stderr.write(notes + "\n");
     if (text !== "") process.stdout.write(text + "\n");
     return 0;
   }
-  process.stderr.write(`browse: ${res.error || "error"}\n`);
+  let error = res.error || "error";
+  // The daemon names the unknown flag; the nearest real one is said here, where
+  // the launch flags are known too (a launch flag written after the command).
+  const unknownFlag = /unknown flag '(-[^']+)'/.exec(error);
+  if (unknownFlag && !/did you mean/.test(error)) {
+    const sug = flagSuggestion(unknownFlag[1], cmd);
+    if (sug) error = error.replace(/\n|$/, (m) => `\n${sug}${m}`);
+  }
+  process.stderr.write(`browse: ${error}\n`);
   return 1;
 }
 
@@ -4101,6 +4310,9 @@ async function daemon() {
     logDaemon(`uncaught exception (session kept alive): ${e?.stack || e}`);
   });
   mkdirSync(OUT, { recursive: true });
+  // What was already in the artifacts dir (a reused BROWSE_OUT): a discarded
+  // start must only remove what this daemon made.
+  const OUT_BEFORE = new Set(readdirSync(OUT));
   if (VIDEO_ON) mkdirSync(VIDEO_DIR, { recursive: true });
   mkdirSync(SHOTS_DIR, { recursive: true });
   logDaemon(`starting daemon (session ${SESSION}, out ${OUT})`);
@@ -4359,6 +4571,12 @@ async function daemon() {
   // so the agent hears about them without a verb to poll.
   const notes = [];
   const note = (s) => { if (notes.length < 50) notes.push(s); };
+  // A command's own side remarks (a tip, a sign-in-wall hint, "selector matched
+  // 3"). They travel apart from the result and print on stderr, so stdout holds
+  // only the answer: `browse eval location.href | tail -1` and `$(browse text h1)`
+  // must never pick up a notice instead. Per request, since commands can overlap.
+  const asideStore = new AsyncLocalStorage();
+  const aside = (s) => { const list = asideStore.getStore(); if (list) list.push(s); else note(s); };
 
   // Every page of the context in the order it appeared, and which one commands
   // drive: `page` is always pages[activeIdx]. `activeFrame` (set by
@@ -4367,6 +4585,15 @@ async function daemon() {
   let activeIdx = 0;
   let page = null;
   let activeFrame = null, activeFrameSel = null;
+  // The iframe selectors from the top document down: `target` inside a scope
+  // nests (Stripe puts frames inside frames). activeFrameSel is its display form.
+  let activeFrameChain = [];
+  const frameScopes = new WeakMap(); // page → the chain it had when switched away from
+  const setFrameScope = (chain) => {
+    activeFrameChain = chain;
+    activeFrame = chain.length ? chain.reduce((scope, sel) => scope.frameLocator(sel), page) : null;
+    activeFrameSel = chain.length ? chain.join(" >> ") : null;
+  };
   // One-shot dialog policy from `--dialog accept|dismiss[:text]`, consumed by the
   // next dialog the page raises. null = the default (accept).
   let dialogPolicy = null;
@@ -4376,6 +4603,8 @@ async function daemon() {
   let stateScriptInstalled = false;
   // The speed badge can't render on every ffmpeg; say so once, not every time.
   let badgeWarned = false;
+  // The --full lazy-load tip is said once per session, not on every full shot.
+  let fullTipShown = false;
   // Set while WE are opening a tab (`browse target new`), so the context's page
   // listener can tell a deliberate tab from a popup the site threw at us.
   let openingTab = false;
@@ -4411,8 +4640,15 @@ async function daemon() {
    *  UNWANTED popup opens a cut interval - see cutMarks. */
   function activate(i) {
     activeIdx = Math.max(0, Math.min(pages.length - 1, i));
-    page = pages[activeIdx];
-    activeFrame = null; activeFrameSel = null; // a frame scope belongs to its tab
+    // A frame scope belongs to its tab and is kept per tab: resetting it on
+    // every switch dropped it whenever a popup (3-D Secure, OAuth) opened and
+    // closed again, and the next command silently ran in the top document.
+    if (pages[activeIdx] !== page) {
+      if (page) frameScopes.set(page, activeFrameChain);
+      page = pages[activeIdx];
+      setFrameScope(frameScopes.get(page) || []);
+      if (activeFrameSel) note(`tab ${activeIdx} is back in its frame scope ${activeFrameSel}`);
+    }
     const open = cutMarks.find((c) => c.end === Infinity);
     const cuttable = !wantedPages.has(page);
     if (!cuttable) { if (open) open.end = now(); }
@@ -4543,10 +4779,14 @@ async function daemon() {
   async function frameForEval() {
     // elementHandle THROWS a raw locator timeout when the iframe is gone, so the
     // guidance has to hang off the catch, not off a null check.
-    let h;
-    try { h = await page.locator(activeFrameSel).first().elementHandle({ timeout: 8000 }); }
-    catch { h = null; }
-    const f = h && (await h.contentFrame());
+    let f = page.mainFrame();
+    for (const sel of activeFrameChain) {
+      let h;
+      try { h = await f.locator(sel).first().elementHandle({ timeout: 8000 }); }
+      catch { h = null; }
+      f = h && (await h.contentFrame());
+      if (!f) break;
+    }
     if (!f) throw new Error(`eval: the frame scope '${activeFrameSel}' is no longer on the page - run 'browse target top' to leave it, or re-scope with 'browse target <iframe selector>'`);
     return f;
   }
@@ -4887,15 +5127,18 @@ async function daemon() {
     return slug ? "-" + slug : "";
   }
 
+  // `step` numbers transcript entries, one per command (and per ai task
+  // action), so no two entries share a number; a step shot takes its entry's.
   async function autoShot(cmd, args) {
-    step++;
     const name = `step-${String(step).padStart(2, "0")}-${cmd}${shotSlug(cmd, args)}.png`;
     // Playwright defaults to caret:"hide", which briefly writes
     // style="caret-color: transparent" onto every focused input. React can see
     // that temporary mutation during hydration and reports it as an app-owned
     // mismatch. Screenshots do not need to alter page state: a visible caret is
     // a truthful frame, and the recording already keeps it.
-    try { await page.screenshot({ path: `${SHOTS_DIR}/${name}`, timeout: 5000, caret: "initial" }); return `shots/${name}`; }
+    // CSS pixels: step shots are for reading back a step, and at Retina density
+    // they were 3200px wide for no gain. Deliverable shots keep device density.
+    try { await page.screenshot({ path: `${SHOTS_DIR}/${name}`, timeout: 5000, caret: "initial", scale: "css" }); return `shots/${name}`; }
     catch { return null; }
   }
 
@@ -4918,10 +5161,11 @@ async function daemon() {
     // Says what it SAW (the url), never what it did not check: the cookie db is
     // not readable while the browser holds it, so "your login expired" would be a
     // guess - and a wrong one every time you are deliberately recording a login.
-    return `\nnote: this url looks like a sign-in wall${redirected ? ` (redirected off ${(() => { try { return new URL(requested, landed).host; } catch { return "the requested host"; } })()})` : ""}. ` +
+    aside(`note: this url looks like a sign-in wall${redirected ? ` (redirected off ${(() => { try { return new URL(requested, landed).host; } catch { return "the requested host"; } })()})` : ""}. ` +
       (PROFILE
         ? `If you did not mean to land here, profile '${PROFILE}' may have no live login for this host - 'browse profiles ${PROFILE}' (after 'close') lists what it holds.`
-        : "If you did not mean to land here, note this context has no saved login: drive the login once with -p <name> --headful, or hand it a 'browse state --load <file>'.");
+        : "If you did not mean to land here, note this context has no saved login: drive the login once with -p <name> --headful, or hand it a 'browse state --load <file>'."));
+    return "";
   }
 
   /** The page that rendered but never came alive.
@@ -4998,7 +5242,7 @@ async function daemon() {
       await page.waitForTimeout(250);
     } while (Date.now() < deadline);
     const stalled = await hydrationHint();
-    return { out, note: `\nnote: still empty after waiting ${Math.round((Date.now() - startedAt) / 100) / 10}s for load + content - ` +
+    return { out, note: `note: still empty after waiting ${Math.round((Date.now() - startedAt) / 100) / 10}s for load + content - ` +
       (stalled || "the page may be mid-load/hydration (check 'browse url' + 'browse errors'), or this element really is empty") };
   }
 
@@ -5279,8 +5523,61 @@ async function daemon() {
     if (!sel) return "";
     try {
       const n = await L(sel).count();
-      return n > 1 ? `\n(selector matched ${n} - this is the first. 'browse eval' reads them all)` : "";
+      if (n > 1) aside(`note: selector matched ${n} - this is the first. 'browse eval' reads them all`);
+      return "";
     } catch { return ""; }
+  }
+
+  /** A never-navigated tab reads as a blank page with nothing saying why - the
+   *  usual cause is a first command that failed before anything was opened. */
+  function blankNote() {
+    if (activeFrame || page.url() !== "about:blank") return false;
+    aside("note: this tab is about:blank - nothing has been opened in it yet ('browse open <url>')");
+    return true;
+  }
+
+  /** What a read can scope to on this page, written as selectors that work. */
+  async function landmarkList() {
+    try {
+      return await L("body").first().evaluate((body) => {
+        const doc = body.ownerDocument, found = [];
+        for (const sel of ["main", "[role=main]", "header", "[role=banner]", "nav", "[role=navigation]",
+          "aside", "[role=complementary]", "footer", "[role=contentinfo]", "form", "[role=search]",
+          "dialog", "[role=dialog]", "article", "section[aria-label]", "[role=region]"]) {
+          const n = doc.querySelectorAll(sel).length;
+          if (n) found.push(n > 1 ? `${sel} (${n})` : sel);
+        }
+        // An app root is the usual scope when a page has no landmarks at all.
+        for (const el of body.children) {
+          if (el.id && !el.id.startsWith("__") && !el.hasAttribute("data-browse-overlay") && found.length < 16) found.push(`#${el.id}`);
+        }
+        return found;
+      }, undefined, { timeout: 2000 });
+    } catch { return []; }
+  }
+
+  /** A read (text, snapshot) on a selector that matches nothing: fail within
+   *  `waitMs` naming what IS there, rather than wait out a locator timeout and
+   *  hand back Playwright's call log. The short wait still lets a region that
+   *  is mid-render land. Returns the match count. */
+  const READ_SCOPE_MS = 2500;
+  async function requireScope(cmd, sel, waitMs) {
+    const loc = L(sel);
+    let n;
+    try { n = await loc.count(); }
+    catch (e) {
+      const hint = roleFormHint(sel);
+      throw new Error(`${cmd}: '${sel}' is not a valid selector - ${stripAnsi(e?.message || e).split("\n")[0]}${hint ? `\n${hint}` : ""}`);
+    }
+    if (n) return n;
+    try { await loc.first().waitFor({ state: "attached", timeout: waitMs }); return await loc.count(); }
+    catch { /* still nothing: say what there is instead */ }
+    const marks = await landmarkList();
+    let hint = "";
+    try { hint = await selectorHint(sel); } catch { /* a bonus */ }
+    throw new Error(`${cmd}: nothing matches '${sel}'${activeFrameSel ? ` inside frame ${activeFrameSel}` : ""} (waited ${waitMs}ms). ` +
+      (marks.length ? `This page has: ${marks.join(", ")}` : "This page has no landmarks (main, nav, header, [role=...]); 'browse snapshot' shows its structure") +
+      (hint ? `\n${hint}` : "") + `\nstill rendering? 'browse wait <selector>' holds for it first.`);
   }
 
   /** Glide the on-page cursor to an element's center before we act on it, so the
@@ -5618,9 +5915,10 @@ async function daemon() {
   async function deadClickNote(before) {
     const changed = await stopWatchingDom(400);
     if (changed || page.url() !== before) return "";
-    return "\nnote: nothing changed - no navigation, and the DOM is untouched. That element has no interactive " +
+    aside("note: nothing changed - no navigation, and the DOM is untouched. That element has no interactive " +
       "ancestor and no pointer cursor, so the click probably landed on a wrapper rather than the control inside it " +
-      "('browse snapshot' names what is clickable).";
+      "('browse snapshot' names what is clickable).");
+    return "";
   }
 
   /** Pull a one-shot `--dialog accept|dismiss[:text]` out of ANY command's args:
@@ -5668,12 +5966,40 @@ async function daemon() {
       `${REMOTE_SIDE ? "; a box's disk is what 'browse box up --size' picks" : ""}.`);
   }
 
+  /** Does this command resolve anything inside the frame scope? */
+  const usesFrame = (cmd, args) => ELEMENT_TARGETED.has(cmd) || ["snapshot", "text", "rect", "scroll", "eval", "ai"].includes(cmd)
+    || (cmd === "wait" && !/^\d+$/.test(String(args[0] ?? "")) && !args.includes("--url"))
+    || (cmd === "screenshot" && (args.includes("--sel") || args.includes("--after")));
+  /** A scope persists until `target` changes it or its frame is gone. Gone is
+   *  checked (with a moment's grace for a frame being re-rendered) and SAID:
+   *  the command fails and the scope is dropped, instead of every command
+   *  timing out on a frame that no longer exists. */
+  async function checkFrameScope() {
+    let scope = page;
+    for (const sel of activeFrameChain) {
+      const loc = scope.locator(sel);
+      let n = 0;
+      try { n = await loc.count(); } catch { /* treated as gone */ }
+      if (!n) {
+        try { await loc.first().waitFor({ state: "attached", timeout: 2000 }); n = 1; } catch { /* gone */ }
+      }
+      if (!n) {
+        const was = activeFrameSel;
+        setFrameScope([]);
+        throw new Error(`the frame scope '${was}' is gone: no '${sel}' on the page any more (removed, or the page navigated). ` +
+          `The scope is dropped, so commands resolve in the top frame again; re-scope with 'browse target <iframe selector>' once it is back.`);
+      }
+      scope = scope.frameLocator(sel);
+    }
+  }
+
   let dispatchedCommands = 0;
   async function dispatch(cmd, args, ai, signal) {
     const firstCommand = dispatchedCommands++ === 0;
     const stripped = takeDialogFlag(args);
     const armed = stripped !== args;
     try {
+      if (activeFrameChain.length && usesFrame(cmd, stripped)) await checkFrameScope();
       return await dispatchCmd(cmd, stripped, ai, signal, firstCommand);
     } catch (e) {
       throw withCrashCause(e);
@@ -5697,6 +6023,7 @@ async function daemon() {
         },
         record: async (line, at, action) => {
           if (action !== "wait") stepMarks.push({ t: at, cmd: `ai task ${action}` });
+          step++;
           const shot = await autoShot("ai-task", [action]);
           logTranscript(`### ${step} · ai task\n${transcriptBody(line)}${shot ? `\n[${shot}]` : ""}\n\n`);
           return shot;
@@ -5765,7 +6092,7 @@ async function daemon() {
       // Report the engine we ACTUALLY got, once. A camoufox→chromium fallback
       // otherwise looked identical to a working stealth session.
       let note = "";
-      if (context.__engineNote) { note = `\nnote: ${context.__engineNote}`; context.__engineNote = null; }
+      if (context.__engineNote) { aside(`note: ${context.__engineNote}`); context.__engineNote = null; }
       return `opened ${await brief()}${note}${wall}`;
     }
     if (cmd === "drag") {
@@ -6034,7 +6361,7 @@ async function daemon() {
     }
     switch (cmd) {
       case "snapshot": {
-        let selector = "body", scoped = false, compact = false, refs = false, timeout = 4000;
+        let selector = "body", scoped = false, compact = false, refs = false, timeout = 4000, timeoutSeen = false;
         for (let i = 0; i < args.length; i++) {
           const arg = args[i];
           if (arg === "--compact") compact = true;
@@ -6042,15 +6369,22 @@ async function daemon() {
           else if (arg === "--timeout") {
             const value = args[++i];
             if (!/^\d+$/.test(value || "") || Number(value) < 1) throw new Error("snapshot: --timeout wants positive milliseconds");
-            timeout = Number(value);
+            timeout = Number(value); timeoutSeen = true;
           } else if (arg.startsWith("-")) throw new Error(`snapshot: unknown flag '${arg}'`);
           else if (scoped) throw new Error(`snapshot: unexpected argument '${arg}'`);
           else { selector = arg; scoped = true; }
         }
-        const locator = L(selector);
+        const blank = blankNote();
+        // A missing scope fails fast (an explicit --timeout still waits it out),
+        // and several matches read the first, saying so, instead of Playwright's
+        // strict-mode error. Resolved BEFORE the refs are cleared, so an @eN
+        // from the previous snapshot still works as the scope.
+        const matches = await requireScope("snapshot", selector, timeoutSeen ? timeout : Math.min(timeout, READ_SCOPE_MS));
+        if (scoped && matches > 1) aside(`note: '${selector}' matched ${matches} - this is the first; narrow it or add '>> nth=<i>'`);
+        const locator = L(selector).first();
         references.clear();
-        await locator.waitFor({ state: "attached", timeout });
-        const { out: raw, note: settle } = await readSettled(() => locator.ariaSnapshot({ mode: refs ? "ai" : "default", timeout }));
+        const { out: raw, note: settle } = blank ? { out: await locator.ariaSnapshot({ timeout }), note: "" }
+          : await readSettled(() => locator.ariaSnapshot({ mode: refs ? "ai" : "default", timeout }));
         let lines = raw.split("\n");
         if (compact) {
           const keep = new Set();
@@ -6072,13 +6406,18 @@ async function daemon() {
           references.set(key, { native, page, frame: activeFrameSel });
           return `[${key}]`;
         });
-        return `${await brief()}\n\n${out}${settle}`;
+        if (settle) aside(settle);
+        return `${await brief()}\n\n${out}`;
       }
       case "text": {
         const sel = args[0] || "body";
-        const { out, note: settle } = await readSettled(() => L(sel).first().innerText());
-        return clipForRead(out, "text", `pass a narrower selector than '${sel}'`, 6000) + settle
-          + await readMatchNote(args[0]);
+        const blank = blankNote();
+        await requireScope("text", sel, READ_SCOPE_MS);
+        const { out, note: settle } = blank ? { out: await L(sel).first().innerText({ timeout: 2000 }), note: "" }
+          : await readSettled(() => L(sel).first().innerText());
+        if (settle) aside(settle);
+        await readMatchNote(args[0]);
+        return clipForRead(out, "text", `pass a narrower selector than '${sel}'`, 6000);
       }
       case "title": return await page.title();
       case "url": return page.url();
@@ -6102,7 +6441,7 @@ async function daemon() {
           if (!args[i] || args[i].startsWith("--")) throw new Error(`screenshot: ${flag} needs a value`);
           return args[i];
         };
-        let name = null, full = false, sel = null, pad = 0, padSeen = false;
+        let name = null, full = false, sel = null, pad = 0, padSeen = false, scale = null;
         for (let i = 0; i < args.length; i++) {
           const a = args[i];
           if (a === "--after") after = need(a, ++i);
@@ -6114,6 +6453,12 @@ async function daemon() {
               throw new Error("screenshot: --timeout needs positive milliseconds within the timer limit");
           }
           else if (a === "--full") full = true;
+          // Retina sessions shoot at device pixels (3200px wide at 2x); `css`
+          // gives one pixel per CSS pixel for a shot that is only for reading.
+          else if (a === "--scale") {
+            scale = need(a, ++i);
+            if (scale !== "css" && scale !== "device") throw new Error(`screenshot: --scale wants css or device, got '${scale}'`);
+          }
           // --pad exists because an element screenshot clips to the element's
           // BORDER BOX: a caption that overflows its parent, a focus ring, a
           // shadow, a badge hanging off a corner all come back sliced with
@@ -6168,7 +6513,7 @@ async function daemon() {
           // page.pdf prints the WHOLE page: there is no element form and no clip,
           // so accepting these and printing a full page at exit 0 is the same
           // silent wrong-artifact this command already refuses elsewhere.
-          if (after || hide.length) throw new Error("screenshot: --after and --hide apply to image captures, not PDFs");
+          if (after || hide.length || scale) throw new Error("screenshot: --after, --hide and --scale apply to image captures, not PDFs");
           if (sel || padSeen) throw new Error(`screenshot: a .pdf name prints the whole page, so it cannot take ${sel && padSeen ? "--sel or --pad" : sel ? "--sel" : "--pad"} - save a .png to shoot one element`);
           if (context.__engine !== "chromium")
             throw new Error(
@@ -6182,23 +6527,25 @@ async function daemon() {
           if (!valid) throw new Error(`screenshot: --hide needs a CSS selector, got '${css}'`);
         }
         const style = hide.map((css) => `${css} { visibility: hidden !important; }`).join("\n");
-        const captureOpts = { caret: "initial", ...(style ? { style } : {}) };
-        const disclosure = hide.length ? `\nnote: hidden for this screenshot: ${hide.join(", ")}` : "";
+        const captureOpts = { caret: "initial", ...(style ? { style } : {}), ...(scale ? { scale } : {}) };
+        if (hide.length) aside(`note: hidden for this screenshot: ${hide.join(", ")}`);
         if (after) {
           let target = L(after);
           if (wantedText !== null) target = target.filter({ hasText: wantedText });
           await target.filter({ visible: true }).first().waitFor({ state: "visible", timeout });
         }
+        blankNote();
         if (sel) {
+          await requireScope("screenshot", sel, READ_SCOPE_MS);
           if (!pad) {
             try { await L(sel).first().screenshot({ path, ...captureOpts }); }
             catch (e) { throw await withSelectorHint(e, sel); }
-            let overlap = "";
             try {
               const geometry = await elementGeometry(sel);
-              if (geometry.center.covered) overlap = `\nnote: element center is covered by ${geometry.center.hit}; inspect the saved image and 'browse rect' before claiming full coverage`;
+              if (geometry.center.covered) aside(`note: element center is covered by ${geometry.center.hit}; inspect the saved image and 'browse rect' before claiming full coverage`);
             } catch { /* a transient element can disappear after its screenshot */ }
-            return `saved ${path} (${sel})${await readMatchNote(sel)}${overlap}${disclosure}`;
+            await readMatchNote(sel);
+            return `saved ${path} (${sel})`;
           }
           // Padded: a viewport shot clipped to the element's box grown by `pad`.
           // locator.screenshot() has no way to do this - it always crops to the
@@ -6222,20 +6569,21 @@ async function daemon() {
           if (clip.width <= 0 || clip.height <= 0) throw new Error(`screenshot: '${sel}' is off screen, so there is nothing to pad around - scroll it into view first`);
           await page.screenshot({ path, clip, ...captureOpts });
           const clamped = clip.width < box.width + pad * 2 || clip.height < box.height + pad * 2;
-          return `saved ${path} (${sel} + ${pad}px)${clamped ? ` - clipped to the viewport: left ${Math.max(0, pad - box.x)}px, top ${Math.max(0, pad - box.y)}px, right ${Math.max(0, box.x + box.width + pad - vp.width)}px, bottom ${Math.max(0, box.y + box.height + pad - vp.height)}px (includes padding)` : ""}${await readMatchNote(sel)}${disclosure}`;
+          await readMatchNote(sel);
+          return `saved ${path} (${sel} + ${pad}px)${clamped ? ` - clipped to the viewport: left ${Math.max(0, pad - box.x)}px, top ${Math.max(0, pad - box.y)}px, right ${Math.max(0, box.x + box.width + pad - vp.width)}px, bottom ${Math.max(0, box.y + box.height + pad - vp.height)}px (includes padding)` : ""}`;
         }
         await page.screenshot({ path, fullPage: full, ...captureOpts });
         // --full captures past the viewport via CDP, so the page never moves and
         // the recording is unaffected - but anything that only loads once it is
         // scrolled to simply isn't in the DOM yet.
-        let tip = "";
-        if (full) {
+        // Once per session: the same advice on every full shot is noise.
+        if (full && !fullTipShown) {
           let tall = false;
           try { tall = await page.evaluate(() => document.body.scrollHeight > 2 * window.innerHeight); }
           catch { /* mid-navigation */ }
-          if (tall) tip = "\ntip: run 'browse scroll bottom' first if the page lazy-loads";
+          if (tall) { fullTipShown = true; aside("tip: run 'browse scroll bottom' first if the page lazy-loads"); }
         }
-        return `saved ${path}${tip}${disclosure}`;
+        return `saved ${path}`;
       }
       case "wait": {
         // One verb for every "hold until…": an element appearing or disappearing,
@@ -6485,13 +6833,12 @@ async function daemon() {
         // homebrew's current core bottle has no drawtext. Without it the region
         // is still sped up but carries no label, so it reads as a jump cut - the
         // agent should know that BEFORE it builds a demo around the effect.
-        let badgeWarning = "";
         if (factor > 1 && !badgeWarned && (!hasDrawtext() || !findFontFile())) {
           badgeWarned = true;
-          badgeWarning = "\nnote: this ffmpeg has no drawtext filter, so the 'Nx' badge won't render - the sped-up stretch will look like a jump cut. Consider a 'browse toast' before it, or install an ffmpeg built with libfreetype.";
+          aside("note: this ffmpeg has no drawtext filter, so the 'Nx' badge won't render - the sped-up stretch will look like a jump cut. Consider a 'browse toast' before it, or install an ffmpeg built with libfreetype.");
         }
         return factor > 1
-          ? `speed: ${factor}x from ${t.toFixed(1)}s${badgeWarning}`
+          ? `speed: ${factor}x from ${t.toFixed(1)}s`
           : `speed: back to real time at ${t.toFixed(1)}s`;
       }
       case "target": {
@@ -6524,7 +6871,7 @@ async function daemon() {
           return `tab ${activeIdx}: recording ${args[1]} from now; ${args[1] === "on" ? "included while active" : "time on this tab is cut"}`;
         }
         if (a === "top") {
-          activeFrame = null; activeFrameSel = null;
+          setFrameScope([]);
           return `back to the top frame - ${await brief()}`;
         }
         if (a === "new") {
@@ -6536,7 +6883,8 @@ async function daemon() {
           try { p = await context.newPage(); } // context.on("page") wires + activates it
           finally { openingTab = false; }
           if (args[1]) await p.goto(args[1], { waitUntil: "domcontentloaded", timeout: 20000 });
-          return `tab ${pages.indexOf(p)} - ${await brief()}\nnote: ${VIDEO_ON ? "this deliberate tab is recorded while active" : "video is off for this session"}`;
+          aside(`note: ${VIDEO_ON ? "this deliberate tab is recorded while active" : "video is off for this session"}`);
+          return `tab ${pages.indexOf(p)} - ${await brief()}`;
         }
         if (a === "close") {
           // Two ways this ends a session by accident: the last page tears the
@@ -6557,11 +6905,36 @@ async function daemon() {
         // Anything else is an iframe selector. A FrameLocator's boundingBox() is
         // still in MAIN-frame coordinates, so the cursor keeps gliding to the
         // right spot on screen with no extra work.
-        const fl = page.frameLocator(a);
+        // Inside a scope, an iframe that is IN that frame nests; anything else
+        // is looked up from the top document, so switching between sibling
+        // frames needs no 'target top' first.
+        let chain = [a];
+        if (activeFrame) {
+          let inner = 0;
+          try { inner = await activeFrame.locator(a).count(); } catch { /* not a selector there */ }
+          if (inner) chain = [...activeFrameChain, a];
+        }
+        const parent = chain.slice(0, -1).reduce((scope, sel) => scope.frameLocator(sel), page);
+        let n = 0;
+        try { n = await parent.locator(a).count(); } catch { /* bad selector: the wait below says so */ }
+        // A FrameLocator is strict, so a selector matching several iframes
+        // would fail every later command. Name them instead.
+        if (n > 1) {
+          let rows = [];
+          try {
+            rows = await parent.locator(a).evaluateAll((els, sel) => els.slice(0, 6).map((el, i) => {
+              const q = (v) => JSON.stringify(v);
+              const t = el.getAttribute("title"), nm = el.getAttribute("name");
+              return el.id ? `iframe#${el.id}` : t ? `iframe[title=${q(t)}]` : nm ? `iframe[name=${q(nm)}]` : `${sel} >> nth=${i}`;
+            }), a);
+          } catch { /* the list is a bonus */ }
+          throw new Error(`target: '${a}' matches ${n} iframes; a frame scope needs exactly one${rows.length ? `:\n  ${rows.join("\n  ")}` : ""}`);
+        }
+        const fl = parent.frameLocator(a);
         try { await fl.locator("body").first().waitFor({ state: "attached", timeout: 8000 }); }
         catch (e) { throw await withSelectorHint(e, a); }
-        activeFrame = fl; activeFrameSel = a;
-        return `scoped into ${a} - selectors now resolve inside it ('browse target top' to leave)`;
+        setFrameScope(chain);
+        return `scoped into ${activeFrameSel} - selectors now resolve inside it ('browse target top' to leave)`;
       }
       case "emulate": {
         // Everything the page can be lied to about, in one verb. Context options
@@ -6759,7 +7132,7 @@ async function daemon() {
             // origin was never opened, so none of its localStorage came along.
             const seen = new Set(origins.map((o) => { try { return new URL(o.origin).host; } catch { return o.origin; } }));
             const authy = [...domains].filter((d) => /(^|\.)(clerk|auth0|okta|accounts|login|auth)\./.test(d) && !seen.has(d));
-            if (authy.length) inv += `\n  note: cookies for ${authy.slice(0, 3).join(", ")} but no localStorage from ${authy.length > 1 ? "those origins" : "that origin"} - this session never opened ${authy.length > 1 ? "them" : "it"}. Fine for an OAuth handoff; not enough if the app keeps its session in localStorage there.`;
+            if (authy.length) aside(`note: cookies for ${authy.slice(0, 3).join(", ")} but no localStorage from ${authy.length > 1 ? "those origins" : "that origin"} - this session never opened ${authy.length > 1 ? "them" : "it"}. Fine for an OAuth handoff; not enough if the app keeps its session in localStorage there.`);
           } catch { /* the file is written either way - the inventory is a bonus */ }
           return `saved ${inv || "cookies + localStorage"} → ${path}` + (REMOTE_SIDE
             ? " (on the REMOTE - that is where the browser is. `browse box pull <box> <path>` brings it here)" : "");
@@ -6848,8 +7221,9 @@ async function daemon() {
             }
           } catch { /* context going away: the count is a bonus */ }
         }
-        return `loaded ${st.cookies?.length || 0} cookies + ${origins.length} origin(s) from ${path}${clean ? " (cleared first)" : " (merged onto what was there)"} - ${await brief()}` +
-          (lost ? `\nnote: the page replaced or dropped ${lost} of them on reload - if the login did not carry, re-run with --clean (a merge leaves the old session's keys underneath for the app to prefer)` : "");
+        const loaded = `loaded ${st.cookies?.length || 0} cookies + ${origins.length} origin(s) from ${path}${clean ? " (cleared first)" : " (merged onto what was there)"} - ${await brief()}`;
+        if (lost) aside(`note: the page replaced or dropped ${lost} of them on reload - if the login did not carry, re-run with --clean (a merge leaves the old session's keys underneath for the app to prefer)`);
+        return loaded;
       }
       case "middleware": {
         const mw = parseMiddleware(args);
@@ -6969,9 +7343,10 @@ async function daemon() {
         // Only worth saying when there IS a loaded page it will miss. On a fresh
         // session (about:blank) "reload to apply it" is advice about nothing.
         const loaded = !/^about:blank$/i.test(page.url()) && page.url() !== "";
-        return `init +#${initSeq}${label ? ` ${label}` : ""} - runs before page scripts on every document from the NEXT navigation` +
-          `${initScripts.length > 1 ? ` (${initScripts.length} scripts, in the order added)` : ""}` +
-          `${loaded ? "\nnote: the page you are on now was already loaded - 'browse reload' (or 'goto') to apply it" : ""}`;
+        const registered = `init +#${initSeq}${label ? ` ${label}` : ""} - runs before page scripts on every document from the NEXT navigation` +
+          `${initScripts.length > 1 ? ` (${initScripts.length} scripts, in the order added)` : ""}`;
+        if (loaded) aside("note: the page you are on now was already loaded - 'browse reload' (or 'goto') to apply it");
+        return registered;
       }
       case "dir": return OUT;
       default:
@@ -6981,12 +7356,51 @@ async function daemon() {
     }
   }
 
+  /** How this browser was actually STARTED, in the same env-var spelling the
+   *  launch flags map to, so a client can accept a flag that matches the live
+   *  session and name the one that does not. The CDP endpoint is hashed: it can
+   *  carry credentials and /health is not a place for them. */
+  function launchConfig() {
+    return {
+      BROWSE_ENGINE: engine, BROWSE_HEADFUL: HEADFUL ? "1" : "0",
+      BROWSE_VIEWPORT: `${VIEWPORT.width}x${VIEWPORT.height}`,
+      BROWSE_DEVICE_SCALE: CDP_ENDPOINT ? "" : String(engine === "chromium" ? DEVICE_SCALE : 1),
+      BROWSE_CURSOR: CURSOR ? "1" : "0", BROWSE_KEYLOG: KEYLOG ? "1" : "0", BROWSE_POPUPS: POPUPS ? "1" : "0",
+      BROWSE_NET: NET.on ? "1" : "0", BROWSE_VIDEO: VIDEO_ON ? "1" : "0",
+      BROWSE_TYPE_DELAY: String(TYPE_DELAY), BROWSE_IDLE_MS: String(IDLE_MS),
+      BROWSE_CDP: CDP_ENDPOINT ? netHash(CDP_ENDPOINT) : "", profile: PROFILE || null,
+    };
+  }
+
+  /** Nothing has happened in this browser yet: one blank tab, no request ever
+   *  made (a failed or slow `open` keeps its session, and its network log, for
+   *  diagnosis), nothing registered. */
+  let requestsSeen = 0, requested = false;
+  context.on("request", () => { requested = true; });
+  const pristine = () => !CDP_ENDPOINT && !requested && pages.length === 1 && page.url() === "about:blank"
+    && !initScripts.length && !middleware.length && !stateOrigins;
+  /** Close without finalizing, and remove the artifacts this daemon created. The
+   *  run file goes FIRST, so the next command spawns a fresh browser instead of
+   *  attaching to this dying one. */
+  async function discardSession() {
+    closing = true;
+    clearTimeout(idleT);
+    try { if (JSON.parse(readFileSync(runFile(SESSION), "utf8")).pid === process.pid) rmSync(runFile(SESSION), { force: true }); } catch { /* gone */ }
+    try { await context.close(); } catch { /* already gone */ }
+    try { if (browser) await browser.close(); } catch { /* already gone */ }
+    for (const f of ["video", "shots", "downloads", "transcript.md", "browsed.log", "console.jsonl", "network.jsonl"]) {
+      if (OUT_BEFORE.has(f)) continue; // a reused BROWSE_OUT keeps what an earlier run left
+      try { rmSync(join(OUT, f), { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    try { if (!readdirSync(OUT).length) rmSync(OUT, { recursive: true, force: true }); } catch { /* keep it */ }
+  }
+
   const server = http.createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
       // `home` is what lets a remote client recognise this dir in a reply that
       // ran it through tildePath, and rewrite it to where it mirrored the files.
       res.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir(), build: buildId(), phase: closeReply ? "finalized" : closing ? "closing" : "live" }));
+        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir(), build: buildId(), phase: closeReply ? "finalized" : closing ? "closing" : "live", launch: launchConfig() }));
       return;
     }
     if (req.method === "GET" && req.url === "/manifest") {
@@ -7038,6 +7452,8 @@ async function daemon() {
       try { ({ cmd, args = [], hold = false, ai } = JSON.parse(body)); } catch { /* ignore */ }
       const send = (obj) => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obj)); };
       let ownsTask = false, ownsCommand = false, taskTimer;
+      const asides = [];
+      const firstRequest = requestsSeen++ === 0;
       try {
         if (activeTask) throw new Error("an AI task is running; cancel its invoking command before issuing another browser command");
         // Timestamped BEFORE the command so the chapter lands on the moment the
@@ -7057,7 +7473,7 @@ async function daemon() {
           res.on("close", () => { if (!res.writableEnded) controller.abort(); });
         }
         const stepAt = now();
-        const out = await dispatch(cmd, args, ai, activeTask?.signal);
+        const out = await asideStore.run(asides, () => dispatch(cmd, args, ai, activeTask?.signal));
         const aiReadOnly = cmd === "ai" && (task || args[0] === "assert" || parseAI(args).dryRun);
         if (!CHAPTERLESS.has(cmd) && !aiReadOnly) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
         // Collapse any middleware faults raised since the last command into the
@@ -7104,9 +7520,14 @@ async function daemon() {
           }, 100);
           return;
         }
+        step++;
         let shot = null;
         if (MUTATING.has(cmd) || cmd === "open" || cmd === "scroll" || (cmd === "ai" && !aiReadOnly)) shot = await autoShot(cmd, cmd === "ai" ? [args[0]] : args);
-        let result = shot ? `${out}\n[${shot}]` : out;
+        const result = out;
+        // Everything that is not the answer rides in `notes`, which the client
+        // prints on stderr: the step shot, the command's own remarks, new page
+        // errors, and the queued events (dialogs, downloads, popups).
+        const side = [...(shot ? [`[${shot}]`] : []), ...asides];
         // Surface any NEW console/page errors inline so a runtime fault (e.g. a
         // Next.js error overlay) can't slip by just because the caller didn't run
         // `browse errors`. `errors` already lists them all, so we skip the append
@@ -7116,15 +7537,13 @@ async function daemon() {
         reportedErrors = consoleSeq;
         const machineConsole = ["console", "errors"].includes(cmd) && args.includes("--json");
         if (cmd !== "errors" && !machineConsole && freshErrors.length) {
-          result = `${result}\n⚠️ new page errors (${freshErrors.length}):\n${clipForRead(groupMessages(freshErrors).map((e) => "  " + e.text + (e.count > 1 ? ` (${e.count} repeats)` : "")).join("\n"), "errors", "browse errors --since " + (freshErrors[0].i - 1), 4000)}`;
+          side.push(`⚠️ new page errors (${freshErrors.length}):\n${clipForRead(groupMessages(freshErrors).map((e) => "  " + e.text + (e.count > 1 ? ` (${e.count} repeats)` : "")).join("\n"), "errors", "browse errors --since " + (freshErrors[0].i - 1), 4000)}`);
         }
         // Same idea for things nothing asked for: a dialog we answered, a file
         // that downloaded, a popup we switched to. Drained, so each is said once.
-        if (notes.length && !machineConsole) {
-          result = `${result}\n${notes.splice(0).map((n) => "  " + n).join("\n")}`;
-        }
-        logTranscript(`### ${step || "·"} · \`${logLabel(cmd, args)}\`\n${transcriptBody(result)}\n\n`);
-        send({ ok: true, result });
+        if (notes.length) side.push(...notes.splice(0).map((n) => "  " + n));
+        logTranscript(`### ${step} · \`${logLabel(cmd, args)}\`\n${transcriptBody([result, ...side].filter((l) => l !== "" && l != null).join("\n"))}\n\n`);
+        send({ ok: true, result, ...(side.length ? { notes: side.join("\n") } : {}) });
       } catch (e) {
         let msg = stripAnsi(e && e.message ? e.message : String(e));
         // A popup that closes itself mid-command takes the page out from under
@@ -7141,8 +7560,20 @@ async function daemon() {
         // dialog we answered, belongs to the command that caused it - held back,
         // it resurfaces later attached to something unrelated and misleads.
         mwFlushThrows();
+        if (asides.length) msg = `${msg}\n${asides.join("\n")}`;
         if (notes.length) msg = `${msg}\n${notes.splice(0).map((n) => "  " + n).join("\n")}`;
-        logTranscript(`### · \`${logLabel(cmd, args)}\`\n- ❌ ${msg.split("\n")[0]}\n\n`);
+        // The command that STARTED this browser failed before anything happened
+        // in it (a bad flag, a selector on a blank tab): take the browser down
+        // again. Left up, it was a live blank session that the next command
+        // silently reused, screenshotting about:blank.
+        if (firstRequest && commandCount === 1 && !closing && pristine()) {
+          await discardSession();
+          send({ ok: false, error: `${msg}\n(no session was left running: the browser this command started was closed again)`, discarded: true });
+          setTimeout(() => process.exit(0), 50);
+          return;
+        }
+        step++;
+        logTranscript(`### ${step} · \`${logLabel(cmd, args)}\`\n- ❌ ${msg.split("\n")[0]}\n\n`);
         send({ ok: false, error: msg });
       } finally {
         if (ownsCommand) commandCount--;

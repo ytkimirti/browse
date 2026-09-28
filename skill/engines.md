@@ -29,7 +29,9 @@ A Firefox profile and a Chromium user-data dir are incompatible formats, so `-p 
 stores two separate logins. A login made under one engine is invisible to the
 other, and reads as the profile simply having lost it. `browse profiles` shows
 which engine(s) each name has stored data under, so you can see which half
-you are missing.
+you are missing. A local session with no engine named reopens a profile on its
+last-used half, so name the engine when both halves exist and the older one
+holds the login.
 
 ## Setup (one time)
 

@@ -50,9 +50,9 @@ try {
   r = b('rect', '#surface', '--bogus');
   check('rect rejects extra arguments', r.code === 1, r.err);
   r = b('screenshot', 'covered', '--sel', '#surface');
-  check('element screenshot calls out overlap', r.code === 0 && /covered by div#cover/.test(r.out), r.out + r.err);
+  check('element screenshot calls out overlap', r.code === 0 && /covered by div#cover/.test(r.err), r.out + r.err);
   r = b('screenshot', 'uncovered', '--sel', '#surface', '--hide', '#cover');
-  check('screenshot hiding is disclosed', r.code === 0 && /hidden for this screenshot: #cover/.test(r.out), r.out + r.err);
+  check('screenshot hiding is disclosed', r.code === 0 && /hidden for this screenshot: #cover/.test(r.err), r.out + r.err);
   // Read the saved image through the browser's PNG decoder. It must contain the
   // blue target pixels, and the real page must still have its red overlay.
   const png = readFileSync(join(OUT, 'uncovered.png')).toString('base64');

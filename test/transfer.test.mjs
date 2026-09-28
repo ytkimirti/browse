@@ -43,6 +43,11 @@ try {
     check(`${failure} transfer fails without false zero`, r.code === 1 && !/0 logged/.test(r.out), r.out + r.err);
     check(`${failure} transfer preserves last good copy and removes temporary file`, readFileSync(join(mirror, 'network.jsonl'), 'utf8') === good && !readdirSync(mirror).some(f => f.endsWith('.part')));
   }
+  // Notes ride apart from the result: both are mirrored, the result alone is stdout.
+  r = run('click', '#x');
+  check('remote notes go to stderr with their artifacts mirrored, stdout keeps the result',
+    r.code === 0 && r.out.trim() === 'ok - fixture' && /\[shots\/earlier\.png\]/.test(r.err)
+      && r.err.includes(`download: ${join(mirror, 'earlier.png')}`) && existsSync(join(mirror, 'shots', 'earlier.png')), r.out + r.err);
   r = run('close');
   check('failed close reports recoverable artifact failure', r.code === 1 && /artifact download incomplete/.test(r.err) && /retry/.test(r.err), r.out + r.err);
   check('failed close retains remote endpoint and run file', (await status()).byes === 0 && existsSync(runFile));

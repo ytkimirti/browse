@@ -122,8 +122,8 @@ try {
   // Read the shot's name off the reply rather than spelling it: the auto-shot is
   // named after the step AND its target, so hardcoding one couples this test to
   // a slug it does not care about.
-  const shotRel = (/\[(shots\/[^\]]+\.png)\]/.exec(r.out) || [])[1];
-  check("…and open named its auto-shot", !!shotRel, r.out);
+  const shotRel = (/\[(shots\/[^\]]+\.png)\]/.exec(r.err) || [])[1];
+  check("…and open named its auto-shot (on stderr)", !!shotRel, r.err);
 
   r = browseLive("whoami");
   const port = (/port (\d+)/.exec(r.out) || [])[1];
@@ -294,8 +294,8 @@ if (!REMOTE_HOST) {
     // is one nobody reads on the session where it is true.
     check("…with no build-skew note when the remote runs this same build",
       !/different browse build/.test(r.err), r.err);
-    const remoteShot = (/\[(shots\/[^\]]+\.png)\]/.exec(r.out) || [])[1];
-    check("…and names the step screenshot", !!remoteShot, r.out);
+    const remoteShot = (/\[(shots\/[^\]]+\.png)\]/.exec(r.err) || [])[1];
+    check("…and names the step screenshot (on stderr)", !!remoteShot, r.err);
 
     r = browseRemote("net", "--last", "1");
     check("a live remote net query copies the log before answering",
@@ -316,7 +316,7 @@ if (!REMOTE_HOST) {
     const dir = r.out.split("\n")[0].trim();
     check("dir prints a LOCAL mirror dir", r.code === 0 && existsSync(dir), `${r.code} ${r.out}`);
     check("…and still says where the browser's own copy is",
-      new RegExp(`remote:.*on ${REMOTE_HOST.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(r.out), r.out);
+      new RegExp(`remote:.*on ${REMOTE_HOST.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(r.err), r.err);
     check("the step screenshot was copied down",
       !!remoteShot && existsSync(join(dir, remoteShot)) && statSync(join(dir, remoteShot)).size > 1000,
       `nothing at ${join(dir, String(remoteShot))}`);
@@ -421,7 +421,7 @@ if (!REMOTE_HOST) {
     let r = browseRemote("-s", `${SESSION}-fb`, "open", "https://example.com");
     check("a default-engine remote session opens", r.code === 0, `${r.code} ${r.err}`);
     check("…having fallen back to chromium (no camoufox on a server)",
-      /camoufox not installed/.test(r.out), r.out);
+      /camoufox not installed/.test(r.err), r.err);
     r = browseRemote("-s", `${SESSION}-fb`, "eval", OVERLAYS);
     check("…and the fallback keeps the cursor AND keystroke overlays",
       r.code === 0 && /\[true,true\]/.test(r.out.replace(/\s/g, "")), `${r.code} ${r.out}`);

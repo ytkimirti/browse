@@ -307,13 +307,13 @@ try {
   // like the whole answer.
   console.log("\na read that matched more than one says so");
   const multi = browse("text", "button");
-  check("text names the match count", multi.code === 0 && /selector matched 5 - this is the first/.test(multi.out), multi.out);
+  check("text names the match count", multi.code === 0 && /selector matched 5 - this is the first/.test(multi.err) && multi.out === "click me", multi.out + multi.err);
   const one = browse("text", "#btn");
-  check("...and says nothing when the selector is unique", one.code === 0 && !/selector matched/.test(one.out), one.out);
+  check("...and says nothing when the selector is unique", one.code === 0 && !/selector matched/.test(one.out + one.err), one.out + one.err);
   const shotMulti = browse("screenshot", "multi", "--sel", "button");
-  check("screenshot --sel names it too", shotMulti.code === 0 && /selector matched 5/.test(shotMulti.out), shotMulti.out);
+  check("screenshot --sel names it too", shotMulti.code === 0 && /selector matched 5/.test(shotMulti.err), shotMulti.out + shotMulti.err);
   const shotOne = browse("screenshot", "one", "--sel", "#btn");
-  check("...and stays quiet for a unique one", shotOne.code === 0 && !/selector matched/.test(shotOne.out), shotOne.out);
+  check("...and stays quiet for a unique one", shotOne.code === 0 && !/selector matched/.test(shotOne.out + shotOne.err), shotOne.out + shotOne.err);
 
   /* ----------------------------------------------------------- emulate */
   // The worst kind of partial success: `emulate` applied each key as it walked
