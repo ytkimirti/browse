@@ -12,7 +12,7 @@ if (process.argv[2] === 'ssh') {
 }
 let mode = 'ok', byes = 0;
 const record = JSON.stringify({ i: 1, t: 0, method: 'GET', url: 'http://fixture.test/api', type: 'fetch', status: 200, ms: 12 }) + '\n';
-const files = { 'network.jsonl': record, 'console.jsonl': '', 'transcript.md': '# fixture\n', 'earlier.png': 'image fixture bytes' };
+const files = { 'network.jsonl': record, 'console.jsonl': '', 'transcript.md': '# fixture\n', 'earlier.png': 'image fixture bytes', 'shots/earlier.png': 'step shot bytes' };
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const json = (value) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(value));
@@ -38,6 +38,7 @@ http.createServer(async (req, res) => {
     let raw = ''; for await (const c of req) raw += c;
     const cmd = JSON.parse(raw).cmd;
     if (cmd === 'close') return json({ ok: true, result: 'closed - dir: /remote/session' });
+    if (cmd === 'click') return json({ ok: true, result: 'ok - fixture', notes: '[shots/earlier.png]\n  download: /remote/session/earlier.png' });
     return json({ ok: false, error: 'fixture only handles close' });
   }
   res.writeHead(404).end();

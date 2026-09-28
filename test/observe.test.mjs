@@ -105,12 +105,13 @@ try {
   console.log("auth wall");
   {
     let r = browse("goto", `${URL_BASE}/auth/sign-in`);
-    check("goto onto a sign-in url says so", r.code === 0 && /sign-in wall/.test(r.out), r.out + r.err);
-    check("and says this context has no saved login", /no saved login/.test(r.out), r.out);
-    check("…without claiming a login was checked", !/has no live login/.test(r.out), r.out);
+    // The note is on stderr; stdout stays the result line alone.
+    check("goto onto a sign-in url says so", r.code === 0 && /sign-in wall/.test(r.err) && /^ok - /.test(r.out) && !r.out.includes("\n"), r.out + r.err);
+    check("and says this context has no saved login", /no saved login/.test(r.err), r.err);
+    check("…without claiming a login was checked", !/has no live login/.test(r.err), r.err);
 
     r = browse("goto", `${URL_BASE}/ui`);
-    check("an ordinary page says nothing about auth", r.code === 0 && !/sign-in wall/.test(r.out), r.out);
+    check("an ordinary page says nothing about auth", r.code === 0 && !/sign-in wall/.test(r.out + r.err), r.out + r.err);
   }
 
   /* ── per-step screenshot names carry the target ─────────────────────────── */
@@ -327,7 +328,7 @@ try {
 
     r = browse("text", "#alwaysempty");
     check("a genuinely empty element says what browse waited for",
-      r.code === 0 && /still empty after waiting [\d.]+s for load \+ content/.test(r.out), r.out);
+      r.code === 0 && /still empty after waiting [\d.]+s for load \+ content/.test(r.err), r.out + r.err);
 
     // The case the settle exists for: 'load' never fires inside the budget. A
     // shared deadline let waitForLoadState eat all of it and re-read zero times.
@@ -379,7 +380,7 @@ try {
     // The alarm surface (errors + the inline append) must show the same text.
     r = browse("eval", 'console.error("boom", {code: 42}); "ok"');
     check("a console error's object argument is resolved inline too",
-      /"code":42/.test(r.out) && !/JSHandle@/.test(r.out), r.out);
+      /"code":42/.test(r.err) && !/JSHandle@/.test(r.err) && r.out === "ok", r.out + r.err);
     r = browse("errors");
     check("…and in browse errors", r.code === 0 && /"code":42/.test(r.out) && !/JSHandle@/.test(r.out), r.out.slice(-300));
   }
@@ -474,7 +475,7 @@ try {
       check("sqlite3 available to build the cookie fixture", false, made.stderr || "no sqlite3 on PATH");
     } else {
       let r = local("profiles");
-      check("the table counts unexpired cookie hosts", r.code === 0 && /seeded\s+chromium.*1 host with unexpired cookies/.test(r.out), r.out);
+      check("the table counts unexpired cookie hosts", r.code === 0 && /seeded\s+chromium.*cookies from 1 site/.test(r.out) && /not which are signed in/.test(r.out), r.out);
 
       r = local("profiles", "seeded");
       check("the detail view lists the live host", r.code === 0 && /live\.example\.com\s+expires in 30d/.test(r.out), r.out);

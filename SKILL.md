@@ -22,8 +22,9 @@ For individual commands, act, read the result and decide the next action. For a
 delegated multistep goal, use task mode as described below; browse owns that loop
 and returns the recorded steps and outcome.
 
-1. **Act**, then read the output closely. New console/page errors, answered
-   dialogs and saved downloads are appended inline to the next command's result.
+1. **Act**, then read the output closely, stderr included. New console/page
+   errors, answered dialogs, saved downloads and tips arrive on stderr with the
+   next command; stdout holds only the result, so piping or capturing it is safe.
 2. **Observe with `snapshot`, not `eval`.** `snapshot` is your check step: it
    shows what a user can see and act on. Scope it to the relevant region when a
    long feed or unrelated content crowds out the controls. Keep `eval` for state
@@ -86,19 +87,21 @@ is not blank, connection-refused, or a framework error overlay.
 - **`-p <name>`, on every command**, when you need to stay logged in across
   `close` → `open`. Log in by hand once under `--headful`, `close`, then reuse it.
   A profile is stored per engine, so log in on the engine you will drive with
-  (`skill/engines.md`). Cookie metadata is an inventory, not proof of login.
+  (`skill/engines.md`). The first command's `started session` line names the
+  engine and profile you got. Cookie metadata is an inventory, not proof of login.
   For an authenticated task, read [authentication](skill/auth.md) and establish
   access to the exact target before the capture pass.
 - **Launch flags** (`--headful`, `--chromium`, `--viewport`, …) only on the
   command that STARTS the session — which is whichever one you run first, so an
   `init` or `middleware` registered before `open` is the one that carries them.
-  On a live session browse refuses rather than ignoring them, so a wrong frame
-  size means close and re-open.
+  Repeating matching flags on later commands is fine; one that differs from the
+  live session is refused, so a wrong frame size means close and re-open.
 
 ## Recording
 
 For a quick check ("does X work?"), a `screenshot` plus `errors` is enough; the
-recording need not be the deliverable. When the user wants a demo, or the moving
+recording need not be the deliverable. A shot you only need to look at can be
+1x (`--scale css`, see help) instead of Retina; step shots already are. When the user wants a demo, or the moving
 interaction is the point, read `skill/recording.md` BEFORE the session starts,
 since the frame size is fixed the moment the browser spawns.
 

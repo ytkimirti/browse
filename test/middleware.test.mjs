@@ -329,7 +329,7 @@ try {
   console.log("\nhandler faults");
   r = browse("middleware", "**/api/other", "route => { throw new Error('boom in handler'); }");
   check("a throwing handler registers", r.code === 0, `${r.code} ${r.out}${r.err}`);
-  let said = reloadPage() + browse("url").out;
+  let said = reloadPage() + (({ out, err }) => `${out}\n${err}`)(browse("url"));
   check("the throw is reported on the next command",
     /middleware '\*\*\/api\/other' threw.*boom in handler/.test(said), said);
   check("...and says the request was aborted", /request aborted/.test(said), said);
@@ -343,14 +343,14 @@ try {
   // Many throws must collapse into ONE line: 50 near-identical notes would bury
   // the command's actual result and silently evict dialog/download notes.
   browse("middleware", "**/api/**", "route => { throw new Error('boom everywhere'); }");
-  said = reloadPage() + browse("url").out;
+  said = reloadPage() + (({ out, err }) => `${out}\n${err}`)(browse("url"));
   check("many throws collapse into one counted line",
     /threw on \d+ requests — last,/.test(said) && (said.match(/boom everywhere/g) || []).length <= 2, said);
   browse("middleware", "**/api/**", "--remove");
 
   // Throwing AFTER answering must not claim the request was aborted.
   browse("middleware", "**/api/user", "async route => { await route.fulfill({json: {id: 5}}); throw new Error('late boom'); }");
-  said = reloadPage() + browse("url").out;
+  said = reloadPage() + (({ out, err }) => `${out}\n${err}`)(browse("url"));
   check("a throw after answering does not claim an abort",
     /late boom/.test(said) && /NOT aborted/.test(said), said);
   check("...and the mock it already sent still stands",
@@ -361,7 +361,7 @@ try {
   // it must fall through and say so instead.
   r = browse("middleware", "**/api/other", "route => { /* answers nothing */ }");
   check("a no-op handler registers", r.code === 0, `${r.code} ${r.out}${r.err}`);
-  said = reloadPage() + browse("url").out;
+  said = reloadPage() + (({ out, err }) => `${out}\n${err}`)(browse("url"));
   check("a no-op handler is reported as a pass-through",
     /returned without calling fulfill\/abort\/continue\/fallback/.test(said), said);
   check("its request went through rather than hanging",
