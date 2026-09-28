@@ -147,6 +147,27 @@ try {
   check("…so the retry's launch flags are accepted, not refused", r.code === 0 && !/only applies when the browser starts/.test(r.err), `${r.code} ${r.err}`);
   remote({}, "-s", fresh, "close");
 
+  console.log("\na refused first command over --remote");
+  const gone = `${SESSION}-gone`;
+  const runDir = join(CLIENT_HOME, "run");
+  const leftovers = () => (existsSync(runDir) ? readdirSync(runDir) : []).filter((f) => f.includes(`~${gone}.`));
+  r = remote({}, "-s", gone, "text", "h1");
+  check("exits 1 and says no session was left running", r.code === 1 && /no session was left running/.test(r.err), `${r.code} ${r.err}`);
+  check("…and leaves no run file or ssh control socket here", leftovers().length === 0, leftovers().join(","));
+
+  console.log("\nreattaching to a live remote daemon whose run file is gone");
+  const re = `${SESSION}-re`;
+  r = remote({}, "-s", re, "open", "about:blank");
+  check("the session starts", r.code === 0 && /started session/.test(r.err), `${r.code} ${r.err}`);
+  const reRun = () => (existsSync(runDir) ? readdirSync(runDir) : []).filter((f) => f.endsWith(`~${re}.json`)).forEach((f) => rmSync(join(runDir, f)));
+  reRun();
+  r = remote({}, "-s", re, "url");
+  check("a reattach does not claim it started the session", r.code === 0 && !/started session/.test(r.err), `${r.code} ${r.err}`);
+  reRun();
+  r = remote({}, "-s", re, "--headful", "url");
+  check("…and refuses launch flags that differ from the live daemon", r.code === 1 && /different launch settings: --headful/.test(r.err), `${r.code} ${r.err}`);
+  remote({}, "-s", re, "close");
+
   console.log("\na remote daemon that dies at start-up");
   r = remote({ BROWSE_REMOTE_BIN: BROKEN }, "-s", `${SESSION}-broken`, "open", "about:blank");
   check("fails with exit 1", r.code === 1, `${r.code} ${r.out}\n${r.err}`);

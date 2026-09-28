@@ -219,6 +219,16 @@ try {
   check('--scale rejects anything but css|device', r.code === 1 && /--scale wants css or device/.test(r.err), show(r));
   run(s4, ['close']);
 
+  /* ------------------------------------- D: close carries queued notes on stderr */
+  console.log('\nclose');
+  const s6 = `out-close-${process.pid}`;
+  run(s6, ['open', `${BASE}/plain`]);
+  run(s6, ['eval', 'setTimeout(() => alert("hey"), 100); 1']);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+  r = run(s6, ['close']);
+  check('a dialog answered after the last command is said by close, on stderr',
+    r.code === 0 && /dialog\(alert\): "hey"/.test(r.err) && !/dialog/.test(r.out) && /^closed/.test(r.out), show(r));
+
   /* ------------------------------------- H: profile engine + profiles text */
   console.log('\nprofiles');
   const prof = `p${process.pid}`;

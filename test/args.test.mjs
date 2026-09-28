@@ -395,8 +395,9 @@ try {
     `exit ${hugeFlag.code} · ${hugeFlag.err || hugeFlag.out}`);
   check("...with no node warning either", !/TimeoutOverflowWarning/.test(hugeFlag.err + hugeFlag.out), hugeFlag.err);
   works("an ordinary pause still works", ["wait", "300"], /^waited 300ms$/m);
-  works("a guess-length pause points at condition waits", ["wait", "1000"],
-    /^waited 1000ms - a fixed pause asserts nothing; prefer wait <selector> \[--text <s>\] or wait --url <pattern>$/m);
+  const guess = browse("wait", "1000");
+  check("a guess-length pause points at condition waits, on stderr", guess.code === 0 && /^waited 1000ms$/.test(guess.out.trim())
+    && /tip: a fixed pause asserts nothing; prefer wait <selector> \[--text <s>\] or wait --url <pattern>/.test(guess.err), `exit ${guess.code} · ${guess.out} · ${guess.err}`);
   works("an ordinary --timeout still works", ["wait", "#btn", "--timeout", "2000"], /visible: #btn/);
   // The same 32-bit hole was open in every navigation verb, where Node clamps the
   // timer and the navigation fails at once claiming the full duration elapsed.

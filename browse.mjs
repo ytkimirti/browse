@@ -2672,7 +2672,7 @@ async function ensureRemoteDaemon() {
   const probe = await probePort(local);
   if (probe.kind === "browse" && probe.health.session === SESSION) {
     warnBuildSkew(probe.health);
-    return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...probe.health });
+    return { ...saveRemoteRun({ port: local, remotePort, host: REMOTE, ...probe.health }), reattached: true };
   }
   // Anything ELSE on that port means a daemon spawned now would fail to bind, so
   // say so here rather than wait out the whole start-up poll to report a browser
@@ -3677,20 +3677,21 @@ async function client(argv) {
   // not is refused rather than ignored: `browse --headful click …` against a
   // headless session would otherwise report success with the window still
   // hidden, and nothing on screen would say why.
-  const live = await findDaemon();
-  if (live && (launchSeen.length || profileSeen)) {
+  const refuseLaunch = (live) => {
+    if (!(launchSeen.length || profileSeen)) return false;
     const s = SESSION === "default" ? "" : ` -s ${SESSION}`;
     const differ = live.launch ? launchMismatch(live.launch, launchSeen, profileSeen) : launchSeen;
-    if (differ.length) {
-      process.stderr.write(live.launch
-        ? `browse: session '${SESSION}' is already live with different launch settings: ${differ.join(", ")}.\n` +
-          `        Launch flags only apply when the browser starts. Drop them, or run \`browse${s} close\` and re-open with them (or use another -s <name>).\n`
-        : `browse: ${launchSeen.join(" ")} only applies when the browser starts, and session '${SESSION}' is already live.\n` +
-          `        The FIRST command of a session starts it (an 'init' or a 'middleware' before 'open' counts),\n` +
-          `        so the flag belongs on that one. Run \`browse${s} close\` and re-open with it, or use -s <name>.\n`);
-      return 1;
-    }
-  }
+    if (!differ.length) return false;
+    process.stderr.write(live.launch
+      ? `browse: session '${SESSION}' is already live with different launch settings: ${differ.join(", ")}.\n` +
+        `        Launch flags only apply when the browser starts. Drop them, or run \`browse${s} close\` and re-open with them (or use another -s <name>).\n`
+      : `browse: ${launchSeen.join(" ")} only applies when the browser starts, and session '${SESSION}' is already live.\n` +
+        `        The FIRST command of a session starts it (an 'init' or a 'middleware' before 'open' counts),\n` +
+        `        so the flag belongs on that one. Run \`browse${s} close\` and re-open with it, or use -s <name>.\n`);
+    return true;
+  };
+  const live = await findDaemon();
+  if (live && refuseLaunch(live)) return 1;
   if ((cmd === "console" || cmd === "errors") && !(await findDaemon()))
     throw new Error(`no live session '${SESSION}'; read saved evidence with '${cmd} --dir <session-dir>'`);
   let ai;
@@ -3713,6 +3714,9 @@ async function client(argv) {
   const inferred = live ? null : inferEngine();
   if (inferred) LAUNCH_ENV.BROWSE_ENGINE = inferred;
   const d = await ensureDaemon();
+  // A remote daemon found by probing its port (its run file was gone) is as live
+  // as one findDaemon saw, so the same launch-flag check applies.
+  if (d.reattached && refuseLaunch(d)) return 1;
   // The path only labels the script in the transcript; its source travels as
   // initSource. Absolute, so the label names the file the caller meant.
   const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
@@ -3720,7 +3724,9 @@ async function client(argv) {
   const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}), ...(initSource != null ? { initSource } : {}) }, postTimeout(cmd, args));
   // Which browser and which login this session got, said once, when it starts.
   // Landing signed out on the wrong engine's half of a profile was invisible.
-  if (!live && !res.discarded) {
+  // A discarded remote session still holds this side's tunnel and run file.
+  if (res.discarded && REMOTE) { stopTunnel(); rmSync(runFile(SESSION), { force: true }); }
+  if (!live && !d.reattached && !res.discarded) {
     const engine = d.launch?.BROWSE_ENGINE || d.engine || "?";
     const prof = d.launch ? d.launch.profile : PROFILE;
     process.stderr.write(`started session '${SESSION}': ${engine}, ${prof ? `profile '${prof}'${inferred ? ` (its last-used engine)` : ""}` : "no profile"}\n`);
@@ -7058,9 +7064,8 @@ async function daemon() {
           // Real sessions slept on guessed durations dozens of times a run. A
           // pause long enough to be a guess gets one line pointing at the waits
           // that actually assert something; a short settle stays quiet.
-          return Number(sel) >= 1000
-            ? `waited ${sel}ms - a fixed pause asserts nothing; prefer wait <selector> [--text <s>] or wait --url <pattern>`
-            : `waited ${sel}ms`;
+          if (Number(sel) >= 1000) aside("tip: a fixed pause asserts nothing; prefer wait <selector> [--text <s>] or wait --url <pattern>");
+          return `waited ${sel}ms`;
         }
         if (!sel) throw new Error("wait: needs a selector, a number of ms, or --url <pattern>");
         try { await L(sel).first().waitFor({ state: gone ? "hidden" : "visible", timeout }); }
@@ -7847,7 +7852,7 @@ async function daemon() {
             : "";
           // A note queued by the very last interception would otherwise die with
           // the process: this is its only chance to be said.
-          const lastNotes = notes.length ? `\n${notes.splice(0).map((n) => "  " + n).join("\n")}` : "";
+          const lastNotes = notes.splice(0).map((n) => "  " + n).join("\n");
           closeReply = {
             ok: true,
             result: (saved && (saved.mp4 || saved.webm)
@@ -7857,7 +7862,8 @@ async function daemon() {
                 // Not a failure, and it must not read as one: the caller asked
                 // for this with --no-video. Name what IS there instead - and keep
                 // the mock disclosure, which is about the SCREENSHOTS too.
-                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`) + lastNotes,
+                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`),
+            ...(lastNotes ? { notes: lastNotes } : {}),
           };
           send(closeReply);
           // The gif is a two-pass encode that can outlast the client's 120s
