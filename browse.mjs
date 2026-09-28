@@ -2900,6 +2900,7 @@ async function ensureDaemon(attempt = 0) {
   }
   try {
     if (spawner) {
+      const madeOut = !existsSync(OUT);
       mkdirSync(OUT, { recursive: true });
       const child = spawn(process.execPath, [SELF, "__serve"], {
         detached: true,
@@ -2907,8 +2908,8 @@ async function ensureDaemon(attempt = 0) {
         env: {
         ...process.env,
         BROWSE_OUT: OUT,
-        // Only a dir browse made up may be removed by a discarded start.
-        BROWSE_OUT_GENERATED: process.env.BROWSE_OUT ? "0" : "1",
+        // Only a dir this start created may be removed by a discarded start.
+        BROWSE_OUT_GENERATED: madeOut ? "1" : "0",
         BROWSE_SESSION: SESSION,
         ...(PROFILE ? { BROWSE_PROFILE: PROFILE } : {}),
         // Launch flags win over an inherited env var: the flag is on THIS
