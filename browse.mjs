@@ -2515,10 +2515,13 @@ function upstashBox() {
  *
  *  Probe the executable through the same mechanism used to spawn it, then
  *  wait for /health to establish that browser startup completed. */
-async function spawnRemoteDaemon(remotePort) {
+async function spawnRemoteDaemon(remotePort, spawnId) {
   const env = {
     ...forwardedEnv(),
     BROWSE_SESSION: SESSION, BROWSE_PORT: String(remotePort), BROWSE_REMOTE_SIDE: "1",
+    // Echoed by /health, so of two clients racing to start one session, only the
+    // one whose daemon won counts as having started it.
+    BROWSE_SPAWN_ID: spawnId,
     // A forward into a CONTAINER arrives on its external interface, not its
     // loopback, so a loopback-only daemon there is unreachable through the very
     // tunnel that started it. On an ordinary host the forward target resolves on
@@ -2686,13 +2689,14 @@ async function ensureRemoteDaemon() {
       `  Re-run with BROWSE_PORT=<a free port there>, or use a different -s name.`);
   }
   let log;
-  try { log = await spawnRemoteDaemon(remotePort); }
+  const spawnId = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  try { log = await spawnRemoteDaemon(remotePort, spawnId); }
   catch (e) { stopTunnel(); throw e; }
   // A cold remote installs Playwright + a browser on this first command, which
   // is minutes, not seconds — so this waits far longer than the local spawn. A
   // daemon that DIED is not slow, though: its spawn log says so within a second,
   // and that log carries the real error.
-  let h = null, lostRace = false;
+  let h = null;
   for (let i = 0; i < 300; i++) {
     h = await healthInfo(local);
     if (h && h.session === SESSION) break;
@@ -2701,7 +2705,7 @@ async function ensureRemoteDaemon() {
       const dead = await remoteSpawnExit(log);
       // Asked again first: a daemon that lost a start-up race to another client
       // exits 0 while the winner serves this very session.
-      if (dead && (h = await healthInfo(local)) && h.session === SESSION) { lostRace = true; break; }
+      if (dead && (h = await healthInfo(local)) && h.session === SESSION) break;
       h = null;
       if (dead) {
         stopTunnel();
@@ -2722,7 +2726,7 @@ async function ensureRemoteDaemon() {
   }
   warnBuildSkew(h);
   const rec = saveRemoteRun({ port: local, remotePort, host: REMOTE, ...h });
-  return lostRace ? rec : { ...rec, spawned: true };
+  return h.spawnId === spawnId ? { ...rec, spawned: true } : rec;
 }
 
 /** GET one artifact out of the remote session dir into `dest`. Returns false
@@ -2867,7 +2871,7 @@ function pidAlive(pid) {
 }
 
 /** Spawn this session's detached daemon (if not up) and wait for its run file. */
-async function ensureDaemon() {
+async function ensureDaemon(attempt = 0) {
   if (REMOTE) return ensureRemoteDaemon();
   let d = await findDaemon();
   if (d) return d;
@@ -2918,6 +2922,9 @@ async function ensureDaemon() {
       // `spawned`: this client started the browser, so its first command may
       // discard it and prints the start line; any other client just attached.
       if ((d = await findDaemon())) return spawnedChild ? { ...d, spawned: true } : d;
+      // The spawner is done (its lock is gone) yet no daemon is up: its first
+      // command failed and discarded the browser. Start one for this command.
+      if (!spawner && i > 0 && !existsSync(lock) && attempt < 2) return ensureDaemon(attempt + 1);
       if (spawnedChild && (spawnedChild.exitCode !== null || spawnedChild.signalCode !== null)) {
         let detail = "";
         try { detail = readFileSync(DAEMON_LOG, "utf8").slice(-3000); } catch { /* no log yet */ }
@@ -7770,7 +7777,7 @@ async function daemon() {
       // `home` is what lets a remote client recognise this dir in a reply that
       // ran it through tildePath, and rewrite it to where it mirrored the files.
       res.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir(), build: buildId(), phase: closeReply ? "finalized" : closing ? "closing" : "live", launch: launchConfig() }));
+        .end(JSON.stringify({ ok: true, session: SESSION, out: OUT, home: homedir(), build: buildId(), phase: closeReply ? "finalized" : closing ? "closing" : "live", launch: launchConfig(), spawnId: process.env.BROWSE_SPAWN_ID || null }));
       return;
     }
     if (req.method === "GET" && req.url === "/manifest") {

@@ -256,6 +256,14 @@ try {
     a.code === 0 && /started session/.test(a.err) && r.code === 1 && /different launch settings: --viewport/.test(r.err) && !/started session/.test(r.err),
     `A: ${show(a)}\nB: ${show(r)}`);
   run(s8, ['close']);
+  const s9 = `out-race3-${process.pid}`;
+  first = runBg(s9, ['eval', 'throw new Error("bad")']);
+  pause(300);
+  r = run(s9, ['open', `${BASE}/plain`]);
+  a = await first;
+  check('a client waiting on a start whose first command was discarded starts its own browser',
+    a.code === 1 && r.code === 0 && r.ms < 30000 && /started session/.test(r.err), `A: ${show(a)}\nB: ${show(r)} (${r.ms}ms)`);
+  run(s9, ['close']);
   const userOut = join(HOME, 'user-out');
   mkdirSync(userOut);
   r = run(`out-uo-${process.pid}`, ['text', 'h1'], { BROWSE_OUT: userOut });
