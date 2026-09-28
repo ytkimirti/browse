@@ -2272,8 +2272,10 @@ async function spawnRemoteDaemon(remotePort) {
   // only place that failure is written down at all.
   // The exit line is what lets the client stop waiting as soon as the daemon dies.
   const serve = `env ${assigns} ${REMOTE_BIN} __serve; echo "${SERVE_EXIT} $?"`;
+  // rm first, synchronously: the background job opens the log after this shell
+  // returns, and a previous run's exit line must never be read as this one's.
   const remoteCmd =
-    `mkdir -p ~/.browse && nohup setsid sh -c ${shq(serve)} ` +
+    `mkdir -p ~/.browse && rm -f ${spawnLog()} && nohup setsid sh -c ${shq(serve)} ` +
     `>${spawnLog()} 2>&1 </dev/null &`;
 
   if (process.env.BROWSE_REMOTE_SPAWN) {
