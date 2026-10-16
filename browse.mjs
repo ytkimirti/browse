@@ -7781,6 +7781,13 @@ async function daemon() {
   }
 
   const server = http.createServer((req, res) => {
+    // Every client is this CLI, which never sends these. A web page reaching
+    // loopback (CSRF, DNS rebinding) always does, and must not drive the browser
+    // or read its recordings.
+    if (req.headers.origin !== undefined || req.headers["sec-fetch-mode"] !== undefined) {
+      res.writeHead(403).end("browser requests are refused");
+      return;
+    }
     if (req.method === "GET" && req.url === "/health") {
       // `home` is what lets a remote client recognise this dir in a reply that
       // ran it through tildePath, and rewrite it to where it mirrored the files.
