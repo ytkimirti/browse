@@ -7791,10 +7791,13 @@ async function daemon() {
   }
 
   const server = http.createServer((req, res) => {
-    // Every client is this CLI, which never sends these. A web page reaching
-    // loopback (CSRF, DNS rebinding) always does, and must not drive the browser
+    // Every client is this CLI, which never sends these and always addresses
+    // loopback. A web page reaching this port sends Origin or Sec-Fetch-Site
+    // (CSRF), or a foreign Host (DNS rebinding), and must not drive the browser
     // or read its recordings.
-    if (req.headers.origin !== undefined || req.headers["sec-fetch-site"] !== undefined) {
+    const host = String(req.headers.host ?? "");
+    if (req.headers.origin !== undefined || req.headers["sec-fetch-site"] !== undefined ||
+        !/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)) {
       res.writeHead(403).end("browser requests are refused");
       return;
     }
