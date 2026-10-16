@@ -5518,6 +5518,16 @@ async function daemon() {
     }, IDLE_MS);
   }
 
+  // A borrowed browser can go away under us: restarted, crashed, or the endpoint
+  // dropped this client. Every later command would fail on the dead connection,
+  // so end the session instead and let the next command attach afresh.
+  if (CDP_ENDPOINT) browser.on("disconnected", async () => {
+    if (closing) return;
+    logDaemon("CDP browser disconnected — closing session");
+    await Promise.race([closeSession("cdp disconnected").catch(() => {}), new Promise((r) => setTimeout(r, 10000))]);
+    process.exit(0);
+  });
+
   /** A short, filename-safe tag for the step shot: where a goto landed, which
    *  selector a click hit. Without it a session with eight navigations writes
    *  eight `step-NN-goto.png` files you cannot tell apart without opening each.
