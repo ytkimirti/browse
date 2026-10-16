@@ -7784,7 +7784,7 @@ async function daemon() {
     // Every client is this CLI, which never sends these. A web page reaching
     // loopback (CSRF, DNS rebinding) always does, and must not drive the browser
     // or read its recordings.
-    if (req.headers.origin !== undefined || req.headers["sec-fetch-mode"] !== undefined) {
+    if (req.headers.origin !== undefined || req.headers["sec-fetch-site"] !== undefined) {
       res.writeHead(403).end("browser requests are refused");
       return;
     }
