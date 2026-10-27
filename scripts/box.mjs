@@ -33,7 +33,8 @@
  *     `POST /v2/box` is silently ignored: you get an empty box and no error.
  */
 
-import { readFile, writeFile, mkdir, readdir, stat, chmod, rename } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, stat, chmod, rename, open, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { createWriteStream, createReadStream } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -238,15 +239,20 @@ async function runScript(id, script, label) {
 // multi-hundred-MB form that the API rejected as malformed - the size was the
 // real reason, and nothing said so.
 const NEVER_PUSH = new Set([".git", "node_modules", ".next"]);
-// What the Box upload API accepts in one request. Enforced HERE because the
-// server's answer to a request over it is `400 {"error":"Invalid multipart
-// form"}` - which reads as a bug in browse, arrives only after the whole tree
-// has been read into memory and uploaded, and says nothing about what to do.
-const PUSH_LIMIT = 100 * 1024 * 1024;
+// What the Box upload API accepts in one request: 10 MiB of BODY, measured
+// against the live API (10,485,000 bytes of file land, 10,486,000 do not). Its
+// refusal still says "file exceeds maximum size of 100 MB", which sent agents
+// splitting archives into 30 MB parts that were refused all over again. So push
+// never asks the API for more than this: files are batched into requests under
+// it, and a file over it goes up in PARTS that are joined and checksummed on
+// the box.
+const REQUEST_LIMIT = 10 * 1024 * 1024;
+// Headroom under the cap for the multipart framing, so a full batch or a full
+// part never lands on the line.
+const BATCH_LIMIT = REQUEST_LIMIT - 256 * 1024;
+const PART_SIZE = 8 * 1024 * 1024;
 // Each file costs two multipart parts (its `paths` field and the file itself),
-// each with a boundary line, headers and a filename. Counting only the file
-// bytes let a tree of many small files measure under the cap here and still come
-// back as the opaque 400 this check exists to preempt.
+// each with a boundary line, headers and a filename.
 const PART_OVERHEAD = 260;
 const mb = (n) => `${(n / 1024 / 1024).toFixed(1)}MB`;
 
@@ -273,64 +279,89 @@ async function filesUnder(path) {
   return out;
 }
 
-/** The way to move something bigger than one request: tar it, push the archive,
- *  unpack it there. Printed with the caller's real arguments so it can be run as
- *  written. */
 const quote = (s) => "'" + String(s).replace(/'/g, "'\"'\"'") + "'";
-const isArchive = (file) => /\.(?:tgz|gz|bz2|xz|zip|zst|7z|tar)$/i.test(file);
-const splitAdvice = (file) => `Split ${quote(file)} into parts smaller than the rejected payload (for example 32 MB), upload each part separately, then concatenate them in filename order on the Box. Verify the reassembled SHA-256 before extracting or using the file.`;
-const tarRecipe = (id, paths, dest) => {
-  // `-C <parent> <name>` per path, so the archive holds `<name>/…` and unpacks to
-  // <dest>/<name>, the same layout `push` would have produced. Works for a file
-  // and a directory alike, which a `-C <path> .` form does not.
-  const entries = paths.map((p) => {
-    const abs = resolvePath(p);
-    return `-C ${quote(join(abs, ".."))} ${quote(basename(abs))}`;
-  }).join(" ");
-  return `  tar --exclude=node_modules --exclude=.next --exclude=.git -czf /tmp/push.tgz ${entries}\n` +
-    `  browse box push ${quote(id)} /tmp/push.tgz --to ${quote(dest)}\n` +
-    `  browse box exec ${quote(id)} ${quote(`tar -xzf ${quote(dest + "/push.tgz")} -C ${quote(dest)}`)}`;
-};
 
-async function push(id, paths, dest) {
-  // Walk and MEASURE first: everything below reads each file into memory, and a
-  // tree that cannot land is better refused in a second than uploaded for eight
-  // and rejected as a malformed form.
-  const files = [];
-  for (const p of paths) files.push(...await filesUnder(p).catch(() => die(`no such file: ${p}`)));
-  if (!files.length) die("nothing to push");
-  const total = files.reduce((n, f) => n + (f.size || 0) + PART_OVERHEAD + 2 * f.rel.length, 0);
-  const big = files.find((f) => (f.size || 0) > PUSH_LIMIT);
-  if (big) {
-    die(`${big.rel} is ${mb(big.size)} - the box upload API caps one file at ${mb(PUSH_LIMIT)}.\n` +
-        `     ${isArchive(big.rel) ? splitAdvice(big.abs) : `Split it, or send it compressed:\n${tarRecipe(id, paths, dest)}`}`);
-  }
-  if (total > PUSH_LIMIT) {
-    die(`${files.length} files, ${mb(total)} - this client limits one upload request to ${mb(PUSH_LIMIT)}.\n` +
-        `     ${NEVER_PUSH.size} directory names are skipped already (${[...NEVER_PUSH].join(", ")}); the rest is real payload.\n` +
-        `     Upload fewer files per request, or reduce a source tree with an archive. Already compressed files should be split into smaller parts.`);
-  }
+/** One upload request: `items` are { path (on the box), body }. */
+async function upload(id, items) {
   const form = new FormData();
-  let n = 0;
-  for (const f of files) {
-    const body = await readFile(f.abs).catch((e) => die(`cannot read ${f.abs}: ${e.code || e.message}`));
-    form.append("paths", `${dest}/${f.rel}`);
-    form.append("files", new Blob([body]), f.rel);
-    n++;
+  for (const it of items) {
+    form.append("paths", it.path);
+    form.append("files", new Blob([it.body]), basename(it.path));
   }
   const res = await fetch(`${BASE}/v2/box/${id}/files/upload`, {
     method: "POST", headers: { "X-Box-Api-Key": await apiKey() }, body: form,
-    signal: AbortSignal.timeout(600000),
+    signal: AbortSignal.timeout(180000),
   }).catch((e) => die(`upload: ${e.message}`));
-  // The API rejects an oversized or otherwise unacceptable form with a message
-  // about the FORM, not about the files in it. Keep its words, and add what this
-  // side knows: how much was sent, and the way to send more than that.
-  if (!res.ok) {
-    die(`upload → ${res.status} ${clip(await res.text(), 200)}\n` +
-        `     (${n} file${n > 1 ? "s" : ""}, ${mb(total)} in one request)` +
-        `${res.status === 400 || res.status === 413 ? `\n     The service rejected this payload; its reported limit may differ from the local byte count.\n     Reduce the source tree (exclude generated assets and caches), or split large files into smaller parts and reassemble on the box.\n     An existing archive should be split, not archived again. Check the destination before retrying: earlier files may already have landed.` : ""}`);
+  if (!res.ok) die(`upload → ${res.status} ${clip(await res.text(), 200)}`);
+}
+
+async function readSlice(abs, offset, length) {
+  const fh = await open(abs, "r").catch((e) => die(`cannot read ${abs}: ${e.code || e.message}`));
+  try {
+    const buf = Buffer.alloc(length);
+    const { bytesRead } = await fh.read(buf, 0, length, offset);
+    return buf.subarray(0, bytesRead);
+  } finally { await fh.close(); }
+}
+
+async function push(id, paths, dest) {
+  // Walk and MEASURE first, so a missing path fails before anything is sent.
+  const files = [];
+  for (const p of paths) files.push(...await filesUnder(p).catch(() => die(`no such file: ${p}`)));
+  if (!files.length) die("nothing to push");
+  const cost = (f, size = f.size) => size + PART_OVERHEAD + 2 * f.rel.length;
+  // Requests are planned as lists of slices; only one request's bytes are ever
+  // in memory, so a multi-GB push does not hold the tree.
+  const requests = [];
+  let batch = [], used = 0;
+  const flush = () => { if (batch.length) requests.push(batch); batch = []; used = 0; };
+  const joins = [];
+  for (const f of files) {
+    const path = `${dest}/${f.rel}`;
+    if (cost(f) <= BATCH_LIMIT) {
+      if (used + cost(f) > BATCH_LIMIT) flush();
+      batch.push({ path, abs: f.abs, offset: 0, length: f.size });
+      used += cost(f);
+      continue;
+    }
+    const n = Math.ceil(f.size / PART_SIZE);
+    for (let i = 0; i < n; i++) {
+      flush();
+      const offset = i * PART_SIZE;
+      batch.push({ path: `${path}.part-${String(i).padStart(5, "0")}`, abs: f.abs, offset, length: Math.min(PART_SIZE, f.size - offset) });
+      flush();
+    }
+    joins.push({ path, abs: f.abs });
   }
-  say(`pushed ${n} file${n > 1 ? "s" : ""} to ${dest}/ on ${id}`);
+  flush();
+  const total = files.reduce((n, f) => n + f.size, 0);
+  // Parts left by an earlier push that died partway would join into this file.
+  if (joins.length) await exec(id, `rm -f ${joins.map((j) => `${quote(j.path)}.part-*`).join(" ")}`);
+  let sent = 0;
+  for (const [i, req] of requests.entries()) {
+    const items = [];
+    for (const s of req) items.push({ path: s.path, body: await readSlice(s.abs, s.offset, s.length) });
+    try { await upload(id, items); }
+    catch (e) {
+      if (!(e instanceof BoxError)) throw e;
+      die(`${e.message}\n     (request ${i + 1} of ${requests.length}, ${mb(items.reduce((n, it) => n + it.body.length, 0))}; ` +
+          `${mb(sent)} of ${mb(total)} had landed before it)`);
+    }
+    sent += items.reduce((n, it) => n + it.body.length, 0);
+  }
+  for (const j of joins) {
+    const want = createHash("sha256");
+    await new Promise((ok, no) => createReadStream(j.abs).on("data", (c) => want.update(c)).on("end", ok).on("error", no));
+    const q = quote(j.path);
+    const run = await exec(id, `cat ${q}.part-* > ${q} && rm -f ${q}.part-* && sha256sum ${q}`, 600000);
+    const got = /^([0-9a-f]{64})\b/.exec(run.output || "")?.[1];
+    const hex = want.digest("hex");
+    if (run.exit_code !== 0 || got !== hex) {
+      die(`${j.path} did not reassemble on ${id}: ${got ? `sha256 ${got.slice(0, 12)}…, expected ${hex.slice(0, 12)}…` : clip(run.output || run.error || `exit ${run.exit_code}`, 200)}`);
+    }
+  }
+  const n = files.length;
+  say(`pushed ${n} file${n > 1 ? "s" : ""} (${mb(total)}${requests.length > 1 ? ` in ${requests.length} requests` : ""}) to ${dest}/ on ${id}`);
   // Uploads arrive without their exec bit, which is silent until something tries
   // to run one and gets "Permission denied" with no other clue.
   await exec(id, `find ${dest} -maxdepth 3 -name '*.sh' -o -path '*/bin/*' -type f | xargs -r chmod +x`);
@@ -340,7 +371,8 @@ async function pull(id, remote, dest) {
   const url = `${BASE}/v2/box/${id}/files/download?folder=${encodeURIComponent(remote)}`;
   const res = await fetch(url, { headers: { "X-Box-Api-Key": await apiKey() }, signal: AbortSignal.timeout(600000) })
     .catch((e) => die(`download: ${e.message}`));
-  if (!res.ok) die(`download ${remote} → ${res.status}`);
+  if (res.status === 404) die(`no such file on ${id}: ${remote}`);
+  if (!res.ok) die(`download ${remote} → ${res.status} ${clip(await res.text(), 200)}`);
   const out = dest || `./${basename(remote)}`;
   await new Promise((ok, no) => {
     const w = createWriteStream(out);
@@ -348,6 +380,21 @@ async function pull(id, remote, dest) {
     res.body.pipeTo(new WritableStream({ write: (c) => void w.write(c), close: () => w.end() })).catch(no);
   });
   process.stdout.write(`${out}\n`);
+}
+
+/** End the `--remote` sessions this machine still holds open to a box that is
+ *  gone: each is an ssh master (`<box>~<session>.ctl`) plus its run file. Left
+ *  alone, the master outlives the box by days, one idle ssh per session, and the
+ *  run file points the next `--remote` at a daemon that no longer exists. */
+async function dropTunnels(id) {
+  const run = join(dirname(STATE), "run");
+  const mine = (await readdir(run).catch(() => [])).filter((f) => f.startsWith(`${id}~`));
+  for (const f of mine) {
+    if (f.endsWith(".ctl")) {
+      spawnSync("ssh", ["-S", join(run, f), "-O", "exit", sshHost(id)], { stdio: "ignore", timeout: 10000 });
+    }
+    await rm(join(run, f), { force: true });
+  }
 }
 
 /** Every box on the account, flattened out of the two shapes the API answers in. */
@@ -471,9 +518,8 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
                               exec's OWN shell (the pattern is in its command line) and kills
                               the command that is doing the killing — go by port or pid file
   push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}; skips .git, node_modules
-                              and .next). Local preflight limits a file or request to 100 MiB;
-                              service acceptance can be lower. Rejection reports the local byte count.
-                              Reduce source trees; split an existing archive instead of archiving again.
+                              and .next). Sent in requests under the API's 10 MiB cap; a bigger
+                              file goes in parts, joined and sha256-checked on the box.
   pull <box> <remote> [local]       copy one file out
   url <box> <port>            public https URL for a port, to hand someone who wants to click
                               around the app themselves. The server must be listening on
@@ -706,6 +752,7 @@ switch (cmd) {
       gone = true;
     });
     if (boxId((await readState()).box) === id) await writeState({ box: null });
+    await dropTunnels(id);
     say(`${id} ${gone ? "was already gone (expired or deleted)" : "deleted"}${why}`);
     break;
   }

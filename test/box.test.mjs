@@ -17,8 +17,9 @@
 // the API was actually asked to delete.
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, readdirSync, rmSync, openSync, ftruncateSync, closeSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -125,6 +126,18 @@ try {
   check("an explicit box is deleted even with two up",
     d2.code === 0 && (await deletedIds()) === "fakebox-1",
     `exit ${d2.code} · deleted ${await deletedIds()} · ${d2.err}`);
+  // `--remote` sessions leave an ssh master and a run file per session; a box
+  // going down takes its own with it and leaves every other box's alone.
+  await reset();
+  box(["up"]); box(["up"]);
+  const RUN = join(HOME, "run");
+  mkdirSync(RUN, { recursive: true });
+  for (const f of ["fakebox-1~a.ctl", "fakebox-1~a.json", "fakebox-1~b.json", "fakebox-2~a.ctl", "fakebox-2~a.json"]) writeFileSync(join(RUN, f), "");
+  const dT = box(["down", "fakebox-1"]);
+  const left = readdirSync(RUN).sort().join(",");
+  check("down ends the box's local sessions and no other box's", dT.code === 0 && left === "fakebox-2~a.ctl,fakebox-2~a.json",
+    `exit ${dT.code} · left ${left} · ${dT.err}`);
+  rmSync(RUN, { recursive: true, force: true });
 
   /* ------------------------------------------------------ the actual bug */
   console.log("\ndown does not delete another agent's box");
@@ -319,26 +332,55 @@ try {
   check("...and NOT the build output that made one push a 400", !sent.paths.some((p) => p.includes(".next")),
     JSON.stringify(sent.paths));
 
-  // 101MB, sparse: nothing is written and nothing is read, because the refusal
-  // has to happen off the file SIZE, before the tree is pulled into memory.
-  const BIG = join(SRC, "huge.bin");
-  const fd = openSync(BIG, "w");
-  ftruncateSync(fd, 101 * 1024 * 1024);
-  closeSync(fd);
-  await reset();
-  box(["up"]);
-  const tooBig = box(["push", "fakebox-1", BIG]);
-  check("a file over the API's cap is refused here, exit 1", tooBig.code === 1 && /caps one file at 100.0MB/.test(tooBig.err),
-    `exit ${tooBig.code} · ${tooBig.err}`);
-  check("...with the tar-and-unpack recipe, not just the limit",
-    /tar --exclude=node_modules.*\n.*browse box push 'fakebox-1' \/tmp\/push.tgz/.test(tooBig.err), tooBig.err);
-  check("...and nothing was uploaded at all", (await log()).uploads.length === 0,
-    JSON.stringify((await log()).uploads));
-  const archive = join(SRC, "already.tgz");
-  writeFileSync(archive, "compressed fixture");
-  await fetch(`${BASE}/__reset`, { method: "POST", body: JSON.stringify({ boxes: [{ id: "fakebox-1", status: "running" }], uploadStatus: 413 }) });
-  const rejected = box(["push", "fakebox-1", archive]);
-  check("service rejection preserves status, size and useful archive advice", rejected.code === 1 && /upload → 413/.test(rejected.err) && /0.0MB/.test(rejected.err) && /already landed|may already have landed/.test(rejected.err) && /should be split/.test(rejected.err) && !/tar --exclude/.test(rejected.err), rejected.err);
+  // The live API refuses any request body over 10 MiB (while saying "100 MB"),
+  // so the fake enforces the same cap and push has to stay under it.
+  const CAP = 10 * 1024 * 1024;
+  const fresh1 = (extra = {}) => fetch(`${BASE}/__reset`, { method: "POST",
+    body: JSON.stringify({ boxes: [{ id: "fakebox-1", status: "running" }], uploadCap: CAP, ...extra }) });
+  // 20 MiB with a different byte per MiB, so parts joined out of order show.
+  const BIG = join(SRC, "big.bin");
+  writeFileSync(BIG, Buffer.concat(Array.from({ length: 20 }, (_, i) => Buffer.alloc(1024 * 1024, i))));
+  const bigSha = createHash("sha256").update(readFileSync(BIG)).digest("hex");
+  await fresh1();
+  const parts = box(["push", "fakebox-1", BIG]);
+  const partsLog = await log();
+  check("a file over the API's cap goes up anyway, exit 0", parts.code === 0 && /pushed 1 file \(20\.0MB in 3 requests\)/.test(parts.err),
+    `exit ${parts.code} · ${parts.err}`);
+  check("...with no request over the cap", partsLog.uploads.length === 3 && partsLog.uploads.every((u) => u.bytes <= CAP),
+    JSON.stringify(partsLog.uploads.map((u) => u.bytes)));
+  check("...joined on the box byte for byte, with no parts left behind",
+    partsLog.files["/workspace/home/big.bin"]?.sha256 === bigSha && !Object.keys(partsLog.files).some((k) => k.includes(".part-")),
+    JSON.stringify(partsLog.files));
+  check("...after clearing parts an earlier push left", partsLog.execs.some((c) => /rm -f '\/workspace\/home\/big\.bin'\.part-\*$/.test(c)),
+    JSON.stringify(partsLog.execs));
+
+  const MANY = mkdtempSync(join(tmpdir(), "browse-many-"));
+  for (let i = 0; i < 30; i++) writeFileSync(join(MANY, `f${i}.bin`), Buffer.alloc(1024 * 1024, i));
+  await fresh1();
+  const many = box(["push", "fakebox-1", MANY]);
+  const manyLog = await log();
+  check("a tree over the cap is split across requests, exit 0", many.code === 0 && manyLog.uploads.length > 1 && manyLog.uploads.every((u) => u.bytes <= CAP),
+    `exit ${many.code} · ${JSON.stringify(manyLog.uploads.map((u) => u.bytes))} · ${many.err}`);
+  check("...and every file landed", manyLog.uploads.flatMap((u) => u.paths).length === 30, JSON.stringify(manyLog.uploads.map((u) => u.paths.length)));
+  rmSync(MANY, { recursive: true, force: true });
+
+  await fresh1({ corrupt: true });
+  const bad = box(["push", "fakebox-1", BIG]);
+  check("a join whose sha256 differs fails, exit 1", bad.code === 1 && /big\.bin did not reassemble on fakebox-1: sha256/.test(bad.err),
+    `exit ${bad.code} · ${bad.err}`);
+
+  await fresh1({ uploadStatus: 413 });
+  const rejected = box(["push", "fakebox-1", BIG]);
+  check("a refused request fails with its status and how far the push got, exit 1",
+    rejected.code === 1 && /upload → 413/.test(rejected.err) && /request 1 of 3/.test(rejected.err) && /0\.0MB of 20\.0MB had landed/.test(rejected.err),
+    `exit ${rejected.code} · ${rejected.err}`);
+
+  /* ------------------------------------------------------------------ pull */
+  console.log("\npull");
+  await fresh1();
+  const missing = box(["pull", "fakebox-1", "/workspace/home/nope.json", join(SRC, "nope.json")]);
+  check("pulling a file the box does not have says so, exit 1",
+    missing.code === 1 && /no such file on fakebox-1: \/workspace\/home\/nope\.json/.test(missing.err), `exit ${missing.code} · ${missing.err}`);
   const listing = spawnSync(join(ROOT, "bin", "browse"), ["box", "ls"], { encoding: "utf8", timeout: 10000,
     env: { ...process.env, BROWSE_HOME: HOME, BROWSE_REMOTE: `fakebox-1@${new URL(BASE).host}`, UPSTASH_BOX_URL: BASE, UPSTASH_BOX_API_KEY: "" } });
   check("ambient remote allows Box management and ls provides usable host", listing.status === 0 && listing.stdout.includes(`fakebox-1@${new URL(BASE).host}`), listing.stdout + listing.stderr);

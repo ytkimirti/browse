@@ -12,9 +12,13 @@
 // is the collision two agents at once used to hit.
 
 import http from "node:http";
+import { createHash } from "node:crypto";
 
 const KEY = "box_faketestkey";
 let boxes = [], created = [], deleted = [], execs = [], uploads = [], seq = 0;
+// What landed, path → bytes, so a file pushed in parts can be joined the way
+// the box would, and refused the way the real API refuses a body over its cap.
+let files = new Map(), uploadCap = Infinity, corrupt = false;
 // What a box's `browse version` answers, and whether the git refresh works
 // there. Both are set per case: a box carrying a browse too old to name its
 // build, and a box that cannot reach the repo, are the two the CLI has to
@@ -41,10 +45,11 @@ const server = http.createServer(async (req, res) => {
     boxes = b.boxes || []; created = []; deleted = []; execs = []; uploads = []; seq = 0;
     version = b.version ?? "browse 0.1.0 (build deadbeef)";
     refreshFails = !!b.refreshFails; uploadStatus = b.uploadStatus || 200;
+    files = new Map(); uploadCap = b.uploadCap || Infinity; corrupt = !!b.corrupt;
     readyFails = !!b.readyFails; readyBroken = !!b.readyBroken; script = "";
     return send(200, { ok: true });
   }
-  if (url === "/__log") return send(200, { boxes, created, deleted, execs, uploads, script });
+  if (url === "/__log") return send(200, { boxes, created, deleted, execs, uploads, script, files: Object.fromEntries([...files].map(([k, v]) => [k, { size: v.length, sha256: createHash("sha256").update(v).digest("hex") }])) });
 
   if (req.headers["x-box-api-key"] !== KEY) return send(401, { error: "bad key" });
 
@@ -67,6 +72,16 @@ const server = http.createServer(async (req, res) => {
     if (!boxes.some((b) => b.id === exec[1])) return send(404, { error: "Box has been deleted" });
     const cmd = String(((await body()).command || []).join(" "));
     execs.push(cmd);
+    // push joining a file it sent in parts: cat the parts in name order, as the
+    // shell glob would, and answer with the joined file's sha256.
+    const join = /^sh -c cat '([^']+)'\.part-\* > '\1' && rm -f '\1'\.part-\* && sha256sum '\1'$/.exec(cmd);
+    if (join) {
+      const parts = [...files.keys()].filter((k) => k.startsWith(`${join[1]}.part-`)).sort();
+      const whole = Buffer.concat(parts.map((k) => files.get(k)));
+      for (const k of parts) files.delete(k);
+      files.set(join[1], corrupt ? Buffer.concat([whole, Buffer.from("x")]) : whole);
+      return send(200, { exit_code: 0, output: `${createHash("sha256").update(files.get(join[1])).digest("hex")}  ${join[1]}\n` });
+    }
     // install: the script runs detached, and its log is what gets polled.
     const detached = /echo (\S+) \| base64 -d \| sh/.exec(cmd);
     if (detached) { script = Buffer.from(detached[1], "base64").toString(); return send(200, { exit_code: 0, output: "" }); }
@@ -96,11 +111,15 @@ const server = http.createServer(async (req, res) => {
   const upload = /^\/v2\/box\/([^/]+)\/files\/upload$/.exec(url);
   if (req.method === "POST" && upload) {
     if (!boxes.some((b) => b.id === upload[1])) return send(404, { error: "Box has been deleted" });
-    let raw = "", n = 0;
-    for await (const c of req) { n += c.length; raw += c.toString("latin1"); }
-    // The destination of each part, out of the multipart body: one `paths` field
-    // per file, in order, each its own part with an empty header block.
-    const paths = [...raw.matchAll(/name="paths"\r\n\r\n([^\r]*)\r\n/g)].map((m) => m[1]);
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const raw = Buffer.concat(chunks), n = raw.length;
+    // The live API refuses a body over its cap with this same misleading text.
+    if (n > uploadCap) return send(400, { error: "file exceeds maximum size of 100 MB" });
+    const form = await new Response(raw, { headers: { "content-type": req.headers["content-type"] } }).formData();
+    const paths = form.getAll("paths").map(String);
+    const blobs = form.getAll("files");
+    for (const [i, p] of paths.entries()) files.set(p, Buffer.from(await blobs[i].arrayBuffer()));
     uploads.push({ box: upload[1], bytes: n, paths });
     return send(uploadStatus, uploadStatus === 200 ? { ok: true } : { error: "file exceeds maximum size of 100 MB" });
   }
