@@ -132,14 +132,14 @@ try {
   // that will or will not exit.
   const STUB = mkdtempSync(join(tmpdir(), "browse-ssh-"));
   const SSHLOG = join(STUB, "calls");
-  writeFileSync(join(STUB, "ssh"), `#!/bin/sh\necho "$*" >> ${SSHLOG}\ncase "$*" in *"-O exit"*) exit $SSH_EXIT;; *"-O check"*) exit 0;; esac\nexit 1\n`, { mode: 0o755 });
+  writeFileSync(join(STUB, "ssh"), `#!/bin/sh\necho "$*" >> ${SSHLOG}\ncase "$*" in *"-O exit"*) exit $SSH_EXIT;; *"-O check"*) exit $SSH_CHECK;; esac\nexit 1\n`, { mode: 0o755 });
   const RUN = join(HOME, "run");
   const seed = () => {
     rmSync(RUN, { recursive: true, force: true }); mkdirSync(RUN, { recursive: true });
     for (const f of ["fakebox-1~a.ctl", "fakebox-1~a.json", "fakebox-1~b.json", "fakebox-10~a.ctl", "fakebox-2~a.ctl", "fakebox-2~a.json"]) writeFileSync(join(RUN, f), "");
     rmSync(SSHLOG, { force: true });
   };
-  const sshEnv = (code) => ({ PATH: `${STUB}:${process.env.PATH}`, SSH_EXIT: String(code) });
+  const sshEnv = (exit, check = 0) => ({ PATH: `${STUB}:${process.env.PATH}`, SSH_EXIT: String(exit), SSH_CHECK: String(check) });
   await reset();
   box(["up"]); box(["up"]);
   seed();
@@ -154,6 +154,11 @@ try {
   check("a master that will not exit keeps its socket, and down says how to stop it",
     dK.code === 0 && readdirSync(RUN).includes("fakebox-2~a.ctl") && !readdirSync(RUN).includes("fakebox-2~a.json") && /would not exit; stop it with ssh -S/.test(dK.err),
     `exit ${dK.code} · ${readdirSync(RUN).join(",")} · ${dK.err}`);
+  seed();
+  const dD = box(["down", "fakebox-2"], sshEnv(1, 1));
+  check("a master that is already dead has its socket removed",
+    dD.code === 0 && !readdirSync(RUN).some((f) => f.startsWith("fakebox-2~")) && !/would not exit/.test(dD.err),
+    `exit ${dD.code} · ${readdirSync(RUN).join(",")} · ${dD.err}`);
   rmSync(STUB, { recursive: true, force: true });
   rmSync(RUN, { recursive: true, force: true });
 
@@ -360,17 +365,22 @@ try {
   writeFileSync(BIG, Buffer.concat(Array.from({ length: 20 }, (_, i) => Buffer.alloc(1024 * 1024, i))));
   const bigSha = createHash("sha256").update(readFileSync(BIG)).digest("hex");
   await fresh1();
+  // A part an earlier, interrupted push left behind, which must not be joined in.
+  const STALE = mkdtempSync(join(tmpdir(), "browse-stale-"));
+  writeFileSync(join(STALE, "big.bin.part-00005"), "stale");
+  box(["push", "fakebox-1", join(STALE, "big.bin.part-00005")]);
+  rmSync(STALE, { recursive: true, force: true });
   const parts = box(["push", "fakebox-1", BIG]);
   const partsLog = await log();
   check("a file over the API's cap goes up anyway, exit 0", parts.code === 0 && /pushed 1 file \(20\.0MB in 3 requests\)/.test(parts.err),
     `exit ${parts.code} · ${parts.err}`);
-  check("...with no request over the cap", partsLog.uploads.length === 3 && partsLog.uploads.every((u) => u.bytes <= CAP),
+  check("...with no request over the cap", partsLog.uploads.length === 4 && partsLog.uploads.every((u) => u.bytes <= CAP),
     JSON.stringify(partsLog.uploads.map((u) => u.bytes)));
   check("...joined on the box byte for byte, with no parts left behind",
     partsLog.files["/workspace/home/big.bin"]?.sha256 === bigSha && !Object.keys(partsLog.files).some((k) => k.includes(".part-")),
     JSON.stringify(partsLog.files));
-  check("...after clearing parts an earlier push left", partsLog.execs.some((c) => /rm -f '\/workspace\/home\/big\.bin'\.part-\[0-9\]\[0-9\]\[0-9\]\[0-9\]\[0-9\]$/.test(c)),
-    JSON.stringify(partsLog.execs));
+  // The sha check above is what proves the stale part was cleared BEFORE the
+  // upload: cleared after, it takes the fresh parts with it and the join fails.
 
   const MANY = mkdtempSync(join(tmpdir(), "browse-many-"));
   for (let i = 0; i < 30; i++) writeFileSync(join(MANY, `f${i}.bin`), Buffer.alloc(1024 * 1024, i));
@@ -395,6 +405,19 @@ try {
     `exit ${tiny.code} · ${JSON.stringify(tinyLog.uploads.map((u) => [u.bytes, u.paths.length]))} · ${tiny.err}`);
   rmSync(TINY, { recursive: true, force: true });
 
+  // Long box paths and files just small enough that a cost ignoring the path
+  // would pack 470 of them into one request the API refuses.
+  const WIDE = mkdtempSync(join(tmpdir(), "browse-wide-"));
+  for (let i = 0; i < 470; i++) writeFileSync(join(WIDE, `w${i}.bin`), Buffer.alloc(21400, 98));
+  await fresh1();
+  const deepTo = "/workspace/home/" + Array.from({ length: 12 }, (_, i) => `${i}`.padEnd(99, "d")).join("/");
+  const wide = box(["push", "fakebox-1", WIDE, "--to", deepTo]);
+  const wideLog = await log();
+  check("files with long box paths are costed by those paths, exit 0",
+    wide.code === 0 && wideLog.uploads.length === 2 && wideLog.uploads.every((u) => u.bytes <= CAP),
+    `exit ${wide.code} · ${JSON.stringify(wideLog.uploads.map((u) => [u.bytes, u.paths.length]))} · ${wide.err}`);
+  rmSync(WIDE, { recursive: true, force: true });
+
   const EMPTY = mkdtempSync(join(tmpdir(), "browse-empty-"));
   for (let i = 0; i < 600; i++) writeFileSync(join(EMPTY, `e${i}`), "");
   await fresh1();
@@ -412,6 +435,14 @@ try {
     twin.code === 1 && /would both land at \/workspace\/home\/data\.bin/.test(twin.err) && (await log()).uploads.length === 0,
     `exit ${twin.code} · ${twin.err}`);
   rmSync(TWIN, { recursive: true, force: true });
+
+  const LOOK = mkdtempSync(join(tmpdir(), "browse-look-"));
+  writeFileSync(join(LOOK, "big.bin.part-00000"), "mine");
+  await fresh1();
+  const look = box(["push", "fakebox-1", join(LOOK, "big.bin.part-00000"), BIG]);
+  check("a file named like a part of a file going up in parts is refused before upload, exit 1",
+    look.code === 1 && /named like a part of/.test(look.err) && (await log()).uploads.length === 0, `exit ${look.code} · ${look.err}`);
+  rmSync(LOOK, { recursive: true, force: true });
 
   await fresh1({ corrupt: true });
   const bad = box(["push", "fakebox-1", BIG]);

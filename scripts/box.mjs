@@ -315,6 +315,7 @@ async function push(id, paths, dest) {
   const files = [];
   for (const p of paths) files.push(...await filesUnder(p).catch(() => die(`no such file: ${p}`)));
   if (!files.length) die("nothing to push");
+  const cost = (path, size) => size + PART_OVERHEAD + Buffer.byteLength(path) + Buffer.byteLength(basename(path));
   // Two local files landing on one box path would overwrite each other, and a
   // split one would join the other's parts.
   const seen = new Map();
@@ -323,7 +324,13 @@ async function push(id, paths, dest) {
     if (seen.has(path)) die(`${seen.get(path)} and ${f.abs} would both land at ${path}; push them separately with different --to`);
     seen.set(path, f.abs);
   }
-  const cost = (path, size) => size + PART_OVERHEAD + Buffer.byteLength(path) + Buffer.byteLength(basename(path));
+  // A file over the cap goes up as `<path>.part-NNNNN`; a real file of that name
+  // in the same push would be overwritten by a part and then joined away.
+  for (const [path, abs] of seen) {
+    const m = /^(.*)\.part-\d{5}$/.exec(path);
+    const whole = m && files.find((f) => `${dest}/${f.rel}` === m[1]);
+    if (whole && cost(m[1], whole.size) > BATCH_LIMIT) die(`${abs} is named like a part of ${whole.abs}, which goes up in parts; rename it or push it separately`);
+  }
   // Requests are planned as lists of slices; only one request's bytes are ever
   // in memory, so a multi-GB push does not hold the tree.
   const requests = [];
