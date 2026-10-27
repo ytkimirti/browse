@@ -96,6 +96,10 @@ What a box changes on top of `--remote`:
 - **`browse box url`** is worth offering alongside the video when the user will
   want to click around the app themselves. Say plainly that the link dies with
   the box.
+- **Wait on a detached box job by polling its log, not by sleeping.** One
+  `until browse box exec <box> 'grep -q DONE /tmp/job.log'; do sleep 10; done`
+  run in the background replaces a guessed `sleep N` before each check, which
+  agent harnesses often refuse outright.
 - **Diagnose an ssh error before replacing the Box.** Check its status,
   credentials and noninteractive executable path. An existing Box may still
   hold recoverable artifacts. A deleted or expired Box has lost its recording.
