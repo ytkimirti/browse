@@ -74,15 +74,9 @@ const server = http.createServer(async (req, res) => {
     execs.push(cmd);
     // push joining a file it sent in parts: cat the parts in name order, as the
     // shell glob would, and answer with the joined file's sha256.
-    // push clearing parts an earlier push left: the glob, run against what landed.
-    const clear = /^sh -c rm -f '([^']+)'\.part-\[0-9\]\[0-9\]\[0-9\]\[0-9\]\[0-9\]$/.exec(cmd);
-    if (clear) {
-      for (const k of [...files.keys()]) if (k.startsWith(`${clear[1]}.part-`) && /\.part-\d{5}$/.test(k)) files.delete(k);
-      return send(200, { exit_code: 0, output: "" });
-    }
-    const join = /^sh -c : > '([^']+)' && for p in '\1'\.part-\[0-9\]\[0-9\]\[0-9\]\[0-9\]\[0-9\]; do cat "\$p" >> '\1' && rm -f "\$p" \|\| exit 1; done && sha256sum < '\1'$/.exec(cmd);
+    const join = /^sh -c : > '([^']+)' && for p in '\1'\.browse-part-([a-z0-9]+)-\[0-9\]\[0-9\]\[0-9\]\[0-9\]\[0-9\]; do cat "\$p" >> '\1' && rm -f "\$p" \|\| exit 1; done && sha256sum < '\1'$/.exec(cmd);
     if (join) {
-      const parts = [...files.keys()].filter((k) => k.startsWith(`${join[1]}.part-`) && /\.part-\d{5}$/.test(k)).sort();
+      const parts = [...files.keys()].filter((k) => k.startsWith(`${join[1]}.browse-part-${join[2]}-`) && /-\d{5}$/.test(k)).sort();
       const whole = Buffer.concat(parts.map((k) => files.get(k)));
       for (const k of parts) files.delete(k);
       files.set(join[1], corrupt ? Buffer.concat([whole, Buffer.from("x")]) : whole);

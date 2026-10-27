@@ -257,9 +257,10 @@ const FILES_PER_REQUEST = 480;
 // Each file costs two multipart parts (its `paths` field and the file itself),
 // each with a boundary line and headers, plus its box path and its filename.
 const PART_OVERHEAD = 260;
-// Five digits, so the glob that joins them sorts them in order in any locale,
-// and matches only parts, never a real file that happens to be named `x.part-y`.
-const PART_GLOB = ".part-[0-9][0-9][0-9][0-9][0-9]";
+// Parts are `<path>.browse-part-<nonce>-NNNNN`: the nonce is this push's own,
+// so neither a real file nor another push's parts can match the join's glob,
+// and five digits sort in order in any locale.
+const PART_DIGITS = "[0-9][0-9][0-9][0-9][0-9]";
 const mb = (n) => `${(n / 1024 / 1024).toFixed(1)}MB`;
 
 async function filesUnder(path) {
@@ -305,8 +306,13 @@ async function readSlice(abs, offset, length) {
   const fh = await open(abs, "r").catch((e) => die(`cannot read ${abs}: ${e.code || e.message}`));
   try {
     const buf = Buffer.alloc(length);
-    const { bytesRead } = await fh.read(buf, 0, length, offset);
-    return buf.subarray(0, bytesRead);
+    let got = 0;
+    while (got < length) {
+      const { bytesRead } = await fh.read(buf, got, length - got, offset + got);
+      if (!bytesRead) die(`${abs} shrank while it was being pushed; push it again once nothing is writing it`);
+      got += bytesRead;
+    }
+    return buf;
   } finally { await fh.close(); }
 }
 
@@ -316,21 +322,19 @@ async function push(id, paths, dest) {
   for (const p of paths) files.push(...await filesUnder(p).catch(() => die(`no such file: ${p}`)));
   if (!files.length) die("nothing to push");
   const cost = (path, size) => size + PART_OVERHEAD + Buffer.byteLength(path) + Buffer.byteLength(basename(path));
-  // Two local files landing on one box path would overwrite each other, and a
-  // split one would join the other's parts.
+  // Two DIFFERENT local files landing on one box path would overwrite each
+  // other; the same file named twice (`./app app`) is simply pushed once.
   const seen = new Map();
-  for (const f of files) {
+  for (const f of files.splice(0)) {
     const path = `${dest}/${f.rel}`;
-    if (seen.has(path)) die(`${seen.get(path)} and ${f.abs} would both land at ${path}; push them separately with different --to`);
-    seen.set(path, f.abs);
+    if (seen.has(path)) {
+      if (seen.get(path).abs === f.abs) continue;
+      die(`${seen.get(path).abs} and ${f.abs} would both land at ${path}; push them separately with different --to`);
+    }
+    seen.set(path, f);
+    files.push(f);
   }
-  // A file over the cap goes up as `<path>.part-NNNNN`; a real file of that name
-  // in the same push would be overwritten by a part and then joined away.
-  for (const [path, abs] of seen) {
-    const m = /^(.*)\.part-\d{5}$/.exec(path);
-    const whole = m && files.find((f) => `${dest}/${f.rel}` === m[1]);
-    if (whole && cost(m[1], whole.size) > BATCH_LIMIT) die(`${abs} is named like a part of ${whole.abs}, which goes up in parts; rename it or push it separately`);
-  }
+  const nonce = Math.random().toString(36).slice(2, 10);
   // Requests are planned as lists of slices; only one request's bytes are ever
   // in memory, so a multi-GB push does not hold the tree.
   const requests = [];
@@ -349,15 +353,14 @@ async function push(id, paths, dest) {
     for (let i = 0; i < n; i++) {
       flush();
       const offset = i * PART_SIZE;
-      batch.push({ path: `${path}.part-${String(i).padStart(5, "0")}`, abs: f.abs, offset, length: Math.min(PART_SIZE, f.size - offset) });
+      batch.push({ path: `${path}.browse-part-${nonce}-${String(i).padStart(5, "0")}`, abs: f.abs, offset, length: Math.min(PART_SIZE, f.size - offset) });
       flush();
     }
     joins.push({ path, abs: f.abs });
   }
   flush();
   const total = files.reduce((n, f) => n + f.size, 0);
-  // Parts left by an earlier push that died partway would join into this file.
-  if (joins.length) await exec(id, `rm -f ${joins.map((j) => `${quote(j.path)}${PART_GLOB}`).join(" ")}`);
+  const partGlob = (j) => `${quote(j.path)}.browse-part-${nonce}-${PART_DIGITS}`;
   let sent = 0;
   for (const [i, req] of requests.entries()) {
     const items = [];
@@ -365,6 +368,8 @@ async function push(id, paths, dest) {
     try { await upload(id, items); }
     catch (e) {
       if (!(e instanceof BoxError)) throw e;
+      // Parts that did land are no use to anyone; best effort, the push failed.
+      if (joins.length) await exec(id, `rm -f ${joins.map(partGlob).join(" ")}`).catch(() => {});
       die(`${e.message}\n     (request ${i + 1} of ${requests.length}, ${mb(items.reduce((n, it) => n + it.body.length, 0))}; ` +
           `${mb(sent)} of ${mb(total)} had landed before it)`);
     }
@@ -377,7 +382,7 @@ async function push(id, paths, dest) {
     // Appended and deleted one part at a time, so the join needs the file's size
     // in free disk, not twice it. sha256sum reads stdin: given a NAME, GNU
     // prefixes the line with `\` when the name holds a backslash or newline.
-    const run = await exec(id, `: > ${q} && for p in ${q}${PART_GLOB}; do cat "$p" >> ${q} && rm -f "$p" || exit 1; done && sha256sum < ${q}`, 600000);
+    const run = await exec(id, `: > ${q} && for p in ${partGlob(j)}; do cat "$p" >> ${q} && rm -f "$p" || exit 1; done && sha256sum < ${q}`, 600000);
     const got = /^([0-9a-f]{64})\b/.exec(run.output || "")?.[1];
     const hex = want.digest("hex");
     if (run.exit_code !== 0 || got !== hex) {
@@ -831,7 +836,9 @@ switch (cmd) {
     const id = boxId(rest[0]) || die("push needs a box");
     const paths = rest.slice(1);
     if (!paths.length) die("push needs at least one path");
-    await push(id, paths, dest.replace(/\/$/, ""));
+    // Relative to the box home, as for pull, so the upload and the join's shell
+    // resolve it the same way.
+    await push(id, paths, (dest.startsWith("/") ? dest : `${WORK}/${dest}`).replace(/\/$/, ""));
     break;
   }
   case "pull": {

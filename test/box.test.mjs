@@ -365,10 +365,12 @@ try {
   writeFileSync(BIG, Buffer.concat(Array.from({ length: 20 }, (_, i) => Buffer.alloc(1024 * 1024, i))));
   const bigSha = createHash("sha256").update(readFileSync(BIG)).digest("hex");
   await fresh1();
-  // A part an earlier, interrupted push left behind, which must not be joined in.
+  // A real file named like a part, and parts an interrupted push left: the join
+  // must take neither, and must leave the real file where it is.
   const STALE = mkdtempSync(join(tmpdir(), "browse-stale-"));
-  writeFileSync(join(STALE, "big.bin.part-00005"), "stale");
-  box(["push", "fakebox-1", join(STALE, "big.bin.part-00005")]);
+  writeFileSync(join(STALE, "big.bin.part-00000"), "mine");
+  writeFileSync(join(STALE, "big.bin.browse-part-old00000-00005"), "stale");
+  box(["push", "fakebox-1", join(STALE, "big.bin.part-00000"), join(STALE, "big.bin.browse-part-old00000-00005")]);
   rmSync(STALE, { recursive: true, force: true });
   const parts = box(["push", "fakebox-1", BIG]);
   const partsLog = await log();
@@ -376,11 +378,11 @@ try {
     `exit ${parts.code} · ${parts.err}`);
   check("...with no request over the cap", partsLog.uploads.length === 4 && partsLog.uploads.every((u) => u.bytes <= CAP),
     JSON.stringify(partsLog.uploads.map((u) => u.bytes)));
-  check("...joined on the box byte for byte, with no parts left behind",
-    partsLog.files["/workspace/home/big.bin"]?.sha256 === bigSha && !Object.keys(partsLog.files).some((k) => k.includes(".part-")),
+  check("...joined on the box byte for byte, with no parts of its own left behind",
+    partsLog.files["/workspace/home/big.bin"]?.sha256 === bigSha && Object.keys(partsLog.files).filter((k) => k.includes("part-")).length === 2,
     JSON.stringify(partsLog.files));
-  // The sha check above is what proves the stale part was cleared BEFORE the
-  // upload: cleared after, it takes the fresh parts with it and the join fails.
+  check("...and a real file named like a part is untouched", partsLog.files["/workspace/home/big.bin.part-00000"]?.size === 4,
+    JSON.stringify(partsLog.files));
 
   const MANY = mkdtempSync(join(tmpdir(), "browse-many-"));
   for (let i = 0; i < 30; i++) writeFileSync(join(MANY, `f${i}.bin`), Buffer.alloc(1024 * 1024, i));
@@ -434,15 +436,13 @@ try {
   check("two files that would land on one box path are refused before upload, exit 1",
     twin.code === 1 && /would both land at \/workspace\/home\/data\.bin/.test(twin.err) && (await log()).uploads.length === 0,
     `exit ${twin.code} · ${twin.err}`);
+  await fresh1();
+  const same = box(["push", "fakebox-1", join(TWIN, "a", "data.bin"), join(TWIN, "a", "data.bin"), "--to", "rel/dir"]);
+  check("the same file named twice is pushed once, under a relative --to taken from the box home, exit 0",
+    same.code === 0 && JSON.stringify((await log()).uploads.flatMap((u) => u.paths)) === JSON.stringify(["/workspace/home/rel/dir/data.bin"]),
+    `exit ${same.code} · ${JSON.stringify((await log()).uploads)} · ${same.err}`);
   rmSync(TWIN, { recursive: true, force: true });
 
-  const LOOK = mkdtempSync(join(tmpdir(), "browse-look-"));
-  writeFileSync(join(LOOK, "big.bin.part-00000"), "mine");
-  await fresh1();
-  const look = box(["push", "fakebox-1", join(LOOK, "big.bin.part-00000"), BIG]);
-  check("a file named like a part of a file going up in parts is refused before upload, exit 1",
-    look.code === 1 && /named like a part of/.test(look.err) && (await log()).uploads.length === 0, `exit ${look.code} · ${look.err}`);
-  rmSync(LOOK, { recursive: true, force: true });
 
   await fresh1({ corrupt: true });
   const bad = box(["push", "fakebox-1", BIG]);
@@ -454,6 +454,8 @@ try {
   check("a refused request fails with its status and how far the push got, exit 1",
     rejected.code === 1 && /upload → 413/.test(rejected.err) && /request 1 of 3/.test(rejected.err) && /0\.0MB of 20\.0MB had landed/.test(rejected.err),
     `exit ${rejected.code} · ${rejected.err}`);
+  check("...and asks the box to drop the parts it did get", (await log()).execs.some((c) => /^sh -c rm -f '\/workspace\/home\/big\.bin'\.browse-part-[a-z0-9]+-\[0-9\]/.test(c)),
+    JSON.stringify((await log()).execs));
 
   /* ------------------------------------------------------------------ pull */
   console.log("\npull");
