@@ -251,9 +251,15 @@ const REQUEST_LIMIT = 10 * 1024 * 1024;
 // part never lands on the line.
 const BATCH_LIMIT = REQUEST_LIMIT - 256 * 1024;
 const PART_SIZE = 8 * 1024 * 1024;
+// The API also refuses a form of more than 1000 parts (`Invalid multipart
+// form`: 500 files land in one request, 600 do not), and each file is two.
+const FILES_PER_REQUEST = 480;
 // Each file costs two multipart parts (its `paths` field and the file itself),
-// each with a boundary line, headers and a filename.
+// each with a boundary line and headers, plus its box path and its filename.
 const PART_OVERHEAD = 260;
+// Five digits, so the glob that joins them sorts them in order in any locale,
+// and matches only parts, never a real file that happens to be named `x.part-y`.
+const PART_GLOB = ".part-[0-9][0-9][0-9][0-9][0-9]";
 const mb = (n) => `${(n / 1024 / 1024).toFixed(1)}MB`;
 
 async function filesUnder(path) {
@@ -309,7 +315,15 @@ async function push(id, paths, dest) {
   const files = [];
   for (const p of paths) files.push(...await filesUnder(p).catch(() => die(`no such file: ${p}`)));
   if (!files.length) die("nothing to push");
-  const cost = (f, size = f.size) => size + PART_OVERHEAD + 2 * f.rel.length;
+  // Two local files landing on one box path would overwrite each other, and a
+  // split one would join the other's parts.
+  const seen = new Map();
+  for (const f of files) {
+    const path = `${dest}/${f.rel}`;
+    if (seen.has(path)) die(`${seen.get(path)} and ${f.abs} would both land at ${path}; push them separately with different --to`);
+    seen.set(path, f.abs);
+  }
+  const cost = (path, size) => size + PART_OVERHEAD + Buffer.byteLength(path) + Buffer.byteLength(basename(path));
   // Requests are planned as lists of slices; only one request's bytes are ever
   // in memory, so a multi-GB push does not hold the tree.
   const requests = [];
@@ -318,10 +332,10 @@ async function push(id, paths, dest) {
   const joins = [];
   for (const f of files) {
     const path = `${dest}/${f.rel}`;
-    if (cost(f) <= BATCH_LIMIT) {
-      if (used + cost(f) > BATCH_LIMIT) flush();
+    if (cost(path, f.size) <= BATCH_LIMIT) {
+      if (used + cost(path, f.size) > BATCH_LIMIT || batch.length >= FILES_PER_REQUEST) flush();
       batch.push({ path, abs: f.abs, offset: 0, length: f.size });
-      used += cost(f);
+      used += cost(path, f.size);
       continue;
     }
     const n = Math.ceil(f.size / PART_SIZE);
@@ -336,7 +350,7 @@ async function push(id, paths, dest) {
   flush();
   const total = files.reduce((n, f) => n + f.size, 0);
   // Parts left by an earlier push that died partway would join into this file.
-  if (joins.length) await exec(id, `rm -f ${joins.map((j) => `${quote(j.path)}.part-*`).join(" ")}`);
+  if (joins.length) await exec(id, `rm -f ${joins.map((j) => `${quote(j.path)}${PART_GLOB}`).join(" ")}`);
   let sent = 0;
   for (const [i, req] of requests.entries()) {
     const items = [];
@@ -353,7 +367,10 @@ async function push(id, paths, dest) {
     const want = createHash("sha256");
     await new Promise((ok, no) => createReadStream(j.abs).on("data", (c) => want.update(c)).on("end", ok).on("error", no));
     const q = quote(j.path);
-    const run = await exec(id, `cat ${q}.part-* > ${q} && rm -f ${q}.part-* && sha256sum ${q}`, 600000);
+    // Appended and deleted one part at a time, so the join needs the file's size
+    // in free disk, not twice it. sha256sum reads stdin: given a NAME, GNU
+    // prefixes the line with `\` when the name holds a backslash or newline.
+    const run = await exec(id, `: > ${q} && for p in ${q}${PART_GLOB}; do cat "$p" >> ${q} && rm -f "$p" || exit 1; done && sha256sum < ${q}`, 600000);
     const got = /^([0-9a-f]{64})\b/.exec(run.output || "")?.[1];
     const hex = want.digest("hex");
     if (run.exit_code !== 0 || got !== hex) {
@@ -371,8 +388,13 @@ async function pull(id, remote, dest) {
   const url = `${BASE}/v2/box/${id}/files/download?folder=${encodeURIComponent(remote)}`;
   const res = await fetch(url, { headers: { "X-Box-Api-Key": await apiKey() }, signal: AbortSignal.timeout(600000) })
     .catch((e) => die(`download: ${e.message}`));
-  if (res.status === 404) die(`no such file on ${id}: ${remote}`);
-  if (!res.ok) die(`download ${remote} → ${res.status} ${clip(await res.text(), 200)}`);
+  if (!res.ok) {
+    const text = await res.text();
+    // The API answers 404 for a missing file AND for a box that is gone; only
+    // its body tells them apart.
+    if (res.status === 404 && /file not found/i.test(text)) die(`no such file on ${id}: ${remote}`);
+    die(`download ${remote} → ${res.status} ${clip(text, 200)}`);
+  }
   const out = dest || `./${basename(remote)}`;
   await new Promise((ok, no) => {
     const w = createWriteStream(out);
@@ -388,12 +410,18 @@ async function pull(id, remote, dest) {
  *  run file points the next `--remote` at a daemon that no longer exists. */
 async function dropTunnels(id) {
   const run = join(dirname(STATE), "run");
-  const mine = (await readdir(run).catch(() => [])).filter((f) => f.startsWith(`${id}~`));
+  // The same tag browse.mjs's remoteTag() files them under.
+  const tag = id.replace(/[^\w.-]+/g, "-").slice(0, 32);
+  const mine = (await readdir(run).catch(() => [])).filter((f) => f.startsWith(`${tag}~`));
   for (const f of mine) {
+    const ctl = join(run, f);
     if (f.endsWith(".ctl")) {
-      spawnSync("ssh", ["-S", join(run, f), "-O", "exit", sshHost(id)], { stdio: "ignore", timeout: 10000 });
+      const ssh = (op) => spawnSync("ssh", ["-S", ctl, "-O", op, sshHost(id)], { stdio: "ignore", timeout: 10000 }).status === 0;
+      // A master that refuses to exit but still answers is kept, socket and all:
+      // deleting the socket would leave it running with no handle to stop it.
+      if (!ssh("exit") && ssh("check")) { say(`  ${f}: its ssh master would not exit; stop it with ssh -S ${ctl} -O exit ${sshHost(id)}`); continue; }
     }
-    await rm(join(run, f), { force: true });
+    await rm(ctl, { force: true });
   }
 }
 

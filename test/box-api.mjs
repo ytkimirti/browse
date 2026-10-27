@@ -74,13 +74,13 @@ const server = http.createServer(async (req, res) => {
     execs.push(cmd);
     // push joining a file it sent in parts: cat the parts in name order, as the
     // shell glob would, and answer with the joined file's sha256.
-    const join = /^sh -c cat '([^']+)'\.part-\* > '\1' && rm -f '\1'\.part-\* && sha256sum '\1'$/.exec(cmd);
+    const join = /^sh -c : > '([^']+)' && for p in '\1'\.part-\[0-9\]\[0-9\]\[0-9\]\[0-9\]\[0-9\]; do cat "\$p" >> '\1' && rm -f "\$p" \|\| exit 1; done && sha256sum < '\1'$/.exec(cmd);
     if (join) {
-      const parts = [...files.keys()].filter((k) => k.startsWith(`${join[1]}.part-`)).sort();
+      const parts = [...files.keys()].filter((k) => k.startsWith(`${join[1]}.part-`) && /\.part-\d{5}$/.test(k)).sort();
       const whole = Buffer.concat(parts.map((k) => files.get(k)));
       for (const k of parts) files.delete(k);
       files.set(join[1], corrupt ? Buffer.concat([whole, Buffer.from("x")]) : whole);
-      return send(200, { exit_code: 0, output: `${createHash("sha256").update(files.get(join[1])).digest("hex")}  ${join[1]}\n` });
+      return send(200, { exit_code: 0, output: `${createHash("sha256").update(files.get(join[1])).digest("hex")}  -\n` });
     }
     // install: the script runs detached, and its log is what gets polled.
     const detached = /echo (\S+) \| base64 -d \| sh/.exec(cmd);
@@ -116,12 +116,21 @@ const server = http.createServer(async (req, res) => {
     const raw = Buffer.concat(chunks), n = raw.length;
     // The live API refuses a body over its cap with this same misleading text.
     if (n > uploadCap) return send(400, { error: "file exceeds maximum size of 100 MB" });
+    if ((raw.toString("latin1").match(/\r\nContent-Disposition: form-data;/g) || []).length > 1000) return send(400, { error: "Invalid multipart form" });
     const form = await new Response(raw, { headers: { "content-type": req.headers["content-type"] } }).formData();
     const paths = form.getAll("paths").map(String);
     const blobs = form.getAll("files");
     for (const [i, p] of paths.entries()) files.set(p, Buffer.from(await blobs[i].arrayBuffer()));
     uploads.push({ box: upload[1], bytes: n, paths });
     return send(uploadStatus, uploadStatus === 200 ? { ok: true } : { error: "file exceeds maximum size of 100 MB" });
+  }
+  const download = /^\/v2\/box\/([^/]+)\/files\/download$/.exec(url);
+  if (req.method === "GET" && download) {
+    if (!boxes.some((b) => b.id === download[1])) return send(404, { error: "Box has been deleted" });
+    const want = new URL(req.url, "http://x").searchParams.get("folder");
+    if (!files.has(want)) return send(404, { error: `file not found: ${want}` });
+    res.writeHead(200, { "content-type": "application/octet-stream" });
+    return res.end(files.get(want));
   }
   const one = /^\/v2\/box\/([^/]+)$/.exec(url);
   if (req.method === "DELETE" && one) {

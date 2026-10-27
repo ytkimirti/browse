@@ -127,16 +127,34 @@ try {
     d2.code === 0 && (await deletedIds()) === "fakebox-1",
     `exit ${d2.code} · deleted ${await deletedIds()} · ${d2.err}`);
   // `--remote` sessions leave an ssh master and a run file per session; a box
-  // going down takes its own with it and leaves every other box's alone.
+  // going down takes its own with it and leaves every other box's alone. A stub
+  // ssh on PATH records what `down` asked of each master, and plays a master
+  // that will or will not exit.
+  const STUB = mkdtempSync(join(tmpdir(), "browse-ssh-"));
+  const SSHLOG = join(STUB, "calls");
+  writeFileSync(join(STUB, "ssh"), `#!/bin/sh\necho "$*" >> ${SSHLOG}\ncase "$*" in *"-O exit"*) exit $SSH_EXIT;; *"-O check"*) exit 0;; esac\nexit 1\n`, { mode: 0o755 });
+  const RUN = join(HOME, "run");
+  const seed = () => {
+    rmSync(RUN, { recursive: true, force: true }); mkdirSync(RUN, { recursive: true });
+    for (const f of ["fakebox-1~a.ctl", "fakebox-1~a.json", "fakebox-1~b.json", "fakebox-10~a.ctl", "fakebox-2~a.ctl", "fakebox-2~a.json"]) writeFileSync(join(RUN, f), "");
+    rmSync(SSHLOG, { force: true });
+  };
+  const sshEnv = (code) => ({ PATH: `${STUB}:${process.env.PATH}`, SSH_EXIT: String(code) });
   await reset();
   box(["up"]); box(["up"]);
-  const RUN = join(HOME, "run");
-  mkdirSync(RUN, { recursive: true });
-  for (const f of ["fakebox-1~a.ctl", "fakebox-1~a.json", "fakebox-1~b.json", "fakebox-2~a.ctl", "fakebox-2~a.json"]) writeFileSync(join(RUN, f), "");
-  const dT = box(["down", "fakebox-1"]);
+  seed();
+  const dT = box(["down", "fakebox-1"], sshEnv(0));
   const left = readdirSync(RUN).sort().join(",");
-  check("down ends the box's local sessions and no other box's", dT.code === 0 && left === "fakebox-2~a.ctl,fakebox-2~a.json",
+  check("down ends the box's local sessions and no other box's", dT.code === 0 && left === "fakebox-10~a.ctl,fakebox-2~a.ctl,fakebox-2~a.json",
     `exit ${dT.code} · left ${left} · ${dT.err}`);
+  check("...by asking its ssh master to exit", readFileSync(SSHLOG, "utf8").trim() === `-S ${join(RUN, "fakebox-1~a.ctl")} -O exit fakebox-1@${new URL(BASE).host}`,
+    readFileSync(SSHLOG, "utf8"));
+  seed();
+  const dK = box(["down", "fakebox-2"], sshEnv(1));
+  check("a master that will not exit keeps its socket, and down says how to stop it",
+    dK.code === 0 && readdirSync(RUN).includes("fakebox-2~a.ctl") && !readdirSync(RUN).includes("fakebox-2~a.json") && /would not exit; stop it with ssh -S/.test(dK.err),
+    `exit ${dK.code} · ${readdirSync(RUN).join(",")} · ${dK.err}`);
+  rmSync(STUB, { recursive: true, force: true });
   rmSync(RUN, { recursive: true, force: true });
 
   /* ------------------------------------------------------ the actual bug */
@@ -351,7 +369,7 @@ try {
   check("...joined on the box byte for byte, with no parts left behind",
     partsLog.files["/workspace/home/big.bin"]?.sha256 === bigSha && !Object.keys(partsLog.files).some((k) => k.includes(".part-")),
     JSON.stringify(partsLog.files));
-  check("...after clearing parts an earlier push left", partsLog.execs.some((c) => /rm -f '\/workspace\/home\/big\.bin'\.part-\*$/.test(c)),
+  check("...after clearing parts an earlier push left", partsLog.execs.some((c) => /rm -f '\/workspace\/home\/big\.bin'\.part-\[0-9\]\[0-9\]\[0-9\]\[0-9\]\[0-9\]$/.test(c)),
     JSON.stringify(partsLog.execs));
 
   const MANY = mkdtempSync(join(tmpdir(), "browse-many-"));
@@ -363,6 +381,37 @@ try {
     `exit ${many.code} · ${JSON.stringify(manyLog.uploads.map((u) => u.bytes))} · ${many.err}`);
   check("...and every file landed", manyLog.uploads.flatMap((u) => u.paths).length === 30, JSON.stringify(manyLog.uploads.map((u) => u.paths.length)));
   rmSync(MANY, { recursive: true, force: true });
+
+  // Thousands of small files under a long --to: every file's box path is part of
+  // its cost, and the API also refuses a form of over 1000 parts.
+  const TINY = mkdtempSync(join(tmpdir(), "browse-tiny-"));
+  for (let i = 0; i < 5000; i++) writeFileSync(join(TINY, `i${i}.svg`), Buffer.alloc(2000, 97));
+  await fresh1();
+  const longTo = "/workspace/home/projects/customer-dashboard/apps/storefront/public/static/v2/assets/icons/generated";
+  const tiny = box(["push", "fakebox-1", TINY, "--to", longTo]);
+  const tinyLog = await log();
+  check("thousands of small files under a long --to stay under the byte and part caps, exit 0",
+    tiny.code === 0 && tinyLog.uploads.flatMap((u) => u.paths).length === 5000 && tinyLog.uploads.every((u) => u.bytes <= CAP),
+    `exit ${tiny.code} · ${JSON.stringify(tinyLog.uploads.map((u) => [u.bytes, u.paths.length]))} · ${tiny.err}`);
+  rmSync(TINY, { recursive: true, force: true });
+
+  const EMPTY = mkdtempSync(join(tmpdir(), "browse-empty-"));
+  for (let i = 0; i < 600; i++) writeFileSync(join(EMPTY, `e${i}`), "");
+  await fresh1();
+  const empty = box(["push", "fakebox-1", EMPTY]);
+  check("600 empty files go in more than one request, exit 0", empty.code === 0 && (await log()).uploads.length === 2,
+    `exit ${empty.code} · ${empty.err}`);
+  rmSync(EMPTY, { recursive: true, force: true });
+
+  const TWIN = mkdtempSync(join(tmpdir(), "browse-twin-"));
+  mkdirSync(join(TWIN, "a")); mkdirSync(join(TWIN, "b"));
+  writeFileSync(join(TWIN, "a", "data.bin"), "1"); writeFileSync(join(TWIN, "b", "data.bin"), "2");
+  await fresh1();
+  const twin = box(["push", "fakebox-1", join(TWIN, "a", "data.bin"), join(TWIN, "b", "data.bin")]);
+  check("two files that would land on one box path are refused before upload, exit 1",
+    twin.code === 1 && /would both land at \/workspace\/home\/data\.bin/.test(twin.err) && (await log()).uploads.length === 0,
+    `exit ${twin.code} · ${twin.err}`);
+  rmSync(TWIN, { recursive: true, force: true });
 
   await fresh1({ corrupt: true });
   const bad = box(["push", "fakebox-1", BIG]);
@@ -378,9 +427,16 @@ try {
   /* ------------------------------------------------------------------ pull */
   console.log("\npull");
   await fresh1();
+  box(["push", "fakebox-1", BIG]);
+  const got = box(["pull", "fakebox-1", "/workspace/home/big.bin", join(SRC, "back.bin")]);
+  check("a pushed file pulls back byte for byte, exit 0",
+    got.code === 0 && createHash("sha256").update(readFileSync(join(SRC, "back.bin"))).digest("hex") === bigSha, `exit ${got.code} · ${got.err}`);
   const missing = box(["pull", "fakebox-1", "/workspace/home/nope.json", join(SRC, "nope.json")]);
   check("pulling a file the box does not have says so, exit 1",
     missing.code === 1 && /no such file on fakebox-1: \/workspace\/home\/nope\.json/.test(missing.err), `exit ${missing.code} · ${missing.err}`);
+  const goneBox = box(["pull", "fakebox-404", "/workspace/home/big.bin", join(SRC, "gone.bin")]);
+  check("pulling from a box that is gone says the box is gone, not the file, exit 1",
+    goneBox.code === 1 && /Box has been deleted/.test(goneBox.err) && !/no such file/.test(goneBox.err), `exit ${goneBox.code} · ${goneBox.err}`);
   const listing = spawnSync(join(ROOT, "bin", "browse"), ["box", "ls"], { encoding: "utf8", timeout: 10000,
     env: { ...process.env, BROWSE_HOME: HOME, BROWSE_REMOTE: `fakebox-1@${new URL(BASE).host}`, UPSTASH_BOX_URL: BASE, UPSTASH_BOX_API_KEY: "" } });
   check("ambient remote allows Box management and ls provides usable host", listing.status === 0 && listing.stdout.includes(`fakebox-1@${new URL(BASE).host}`), listing.stdout + listing.stderr);
