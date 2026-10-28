@@ -1773,7 +1773,10 @@ Every launch flag is also an env var (a flag on the command WINS over the env):
 
 Env-only (set once in a shell profile — no flag):
   BROWSE_HOME              data home for profiles/sessions/deps (default ~/.browse)
-  BROWSE_OUT               override this session's artifacts dir (LOCAL sessions only — with
+  BROWSE_LOCAL=1           start a browser on this machine even though $BROWSE_HOME/no-local
+                           exists (that file makes browse refuse local browsers and point at
+                           'browse box'; --remote and BROWSE_CDP sessions are unaffected)
+  BROWSE_OUT             override this session's artifacts dir (LOCAL sessions only — with
                            --remote the browser writes on the remote and the copies land in a
                            mirror dir, which 'close' and 'dir' print)
   BROWSE_PORT              pin the control port (default: any free port — but with --remote it is
@@ -2877,6 +2880,15 @@ async function ensureDaemon(attempt = 0) {
   if (REMOTE) return ensureRemoteDaemon();
   let d = await findDaemon();
   if (d) return d;
+  // A machine that must not run browsers (too little RAM, or policy) says so
+  // with a file, since agents' shells do not reliably inherit a profile's env.
+  // A CDP session launches nothing here, so it stays allowed.
+  if (!CDP_ENDPOINT && process.env.BROWSE_LOCAL !== "1" && existsSync(join(BROWSE_HOME, "no-local"))) {
+    throw new Error(
+      `local browsers are off on this machine (${join(BROWSE_HOME, "no-local")} exists).\n` +
+      `  Run it in an Upstash Box instead: 'browse box up', then 'browse --remote <host> ...'\n` +
+      `  ('browse box help'). BROWSE_LOCAL=1 overrides this for one command.`);
+  }
   // One spawner per session: take an atomic lock; losing it means another
   // client is already spawning this session's browser — just wait for it.
   mkdirSync(RUN_DIR, { recursive: true });
