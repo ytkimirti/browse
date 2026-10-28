@@ -146,6 +146,14 @@ try {
   r = browse("net", "--grep");
   check("net --grep with no value still fails, exit 1", r.code === 1 && /needs a value/.test(r.err), `${r.code} ${r.err}`);
 
+  console.log("\ntranscript");
+  r = browse("goto", `${BASE}/?x-vercel-protection-bypass=TSECRET-bypass&page=KEEP-page`);
+  check("a goto whose url carries a secret works, exit 0", r.code === 0, `${r.code} ${r.err}`);
+  const transcript = readFileSync(join(OUT, "transcript.md"), "utf8");
+  check("the transcript hashes the secret param and keeps the rest",
+    !transcript.includes("TSECRET-bypass") && /x-vercel-protection-bypass=<sha256:[0-9a-f]{12} len:14>&page=KEEP-page/.test(transcript),
+    transcript.split("\n").filter((l) => /goto/.test(l)).join("\n"));
+
   console.log("\nBROWSE_NET_SECRETS=1: verbatim");
   r = raw("--no-video", "open", `${BASE}/`);
   check("open with secrets kept, exit 0", r.code === 0, `${r.code} ${r.err}`);
@@ -156,6 +164,8 @@ try {
   const missing = want.filter((k) => !rawLog.includes(k));
   check("every secret is kept verbatim", missing.length === 0, `missing: ${missing.join(", ")}`);
   check("…and nothing is hashed", !rawLog.includes("<sha256:"), "found a hash");
+  r = raw("goto", `${BASE}/?x-vercel-protection-bypass=TSECRET-raw`);
+  check("…and the transcript keeps a secret param verbatim too", r.code === 0 && readFileSync(join(OUT_RAW, "transcript.md"), "utf8").includes("TSECRET-raw"), `${r.code} ${r.err}`);
 } finally {
   cleanup();
 }

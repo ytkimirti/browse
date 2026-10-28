@@ -4565,8 +4565,11 @@ function finalizeRecording(webmPath, marks = {}) {
 
 /* ============================================================ daemon mode */
 
+/** Every transcript line goes through the network log's redaction: a goto whose
+ *  url carries ?x-vercel-protection-bypass=<secret> otherwise wrote that secret
+ *  verbatim into the proof artifact (and into its mirror on the caller's side). */
 function logTranscript(entry) {
-  try { appendFileSync(TRANSCRIPT, entry); } catch { /* best-effort */ }
+  try { appendFileSync(TRANSCRIPT, NET.secrets ? entry : netQuery(netShapes(entry))); } catch { /* best-effort */ }
 }
 /** The transcript is the PROOF artifact, so a cut result must show as cut: three
  *  silent lines turned a 45-line snapshot into something that read like the whole
