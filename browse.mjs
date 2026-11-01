@@ -115,9 +115,11 @@ import { mkdirSync, appendFileSync, statSync, readdirSync, readFileSync, writeFi
 // SyntaxError — it would take `browse help` down on a node this still supports,
 // for the sake of a diagnostic that only ever runs after a crash.
 import * as nodeFs from "node:fs";
-import { pipeline } from "node:stream";
+import { pipeline, Writable } from "node:stream";
+import { Console } from "node:console";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { inspect } from "node:util";
 import { homedir, freemem, totalmem } from "node:os";
 import { join, resolve, basename } from "node:path";
 
@@ -580,6 +582,97 @@ function initFileSource(file) {
   return src;
 }
 
+// `browse run` - Playwright code executed in the daemon against the live
+// session. The escape hatch for whatever no command covers (raw CDP, HAR
+// replay, WebSocket routes, multi-step logic in one call), so it hands over the
+// real objects rather than a wrapper.
+/** A `--dialog` value, as every command takes it (the daemon strips it). */
+const DIALOG_SPEC = /^(accept|dismiss)(:[\s\S]*)?$/i;
+const RUN_TRY = "try run '<code>' | --file <path> [--timeout <ms>]";
+const RUN_TIMEOUT = 60000;
+const RUN_PARAMS = ["page", "context", "browser", "frame", "cdp", "console", "require"];
+const AsyncFunction = (async () => {}).constructor;
+/** `require` for scripts (the daemon is an ES module, which has none), rooted
+ *  where the daemon's own Playwright resolves from. */
+const runRequire = createRequire(process.env.BROWSE_PW_BASE || SELF);
+/** JSON when the value is plain data (what `| jq` wants); anything JSON would
+ *  mangle (NaN, undefined, a Map, an Error, a class instance) prints inspected
+ *  instead. Playwright handles serialize as internal ids, so they print as
+ *  their type, e.g. "<Locator>", at any depth. */
+function runFormat(v) {
+  let plain = true;
+  let json;
+  try {
+    json = JSON.stringify(v, function (k, x) {
+      const o = this[k]; // before toJSON
+      const pw = playwrightType(o);
+      if (pw) return `<${pw}>`;
+      const proto = o !== null && typeof o === "object" ? Object.getPrototypeOf(o) : undefined;
+      if ((proto !== undefined && proto !== Object.prototype && proto !== Array.prototype && proto !== null && !(o instanceof Date))
+        || ["function", "symbol", "bigint"].includes(typeof o) || (o === undefined && k !== "")
+        || (typeof o === "number" && !Number.isFinite(o))) plain = false;
+      return x;
+    });
+  } catch { plain = false; /* a cycle, or a BigInt */ }
+  return plain && json !== undefined ? json : inspect(v, { depth: 3, breakLength: 120 });
+}
+/** The API type of a Playwright object, or null. */
+function playwrightType(v) {
+  if (!v || typeof v !== "object") return null;
+  if (typeof v._guid === "string" && typeof v._type === "string") return v._type; // Page, Response, Frame, …
+  if (typeof v._apiName === "string") return v._apiName; // Locator, APIResponse
+  return "_frameSelector" in v && "_frame" in v ? "FrameLocator" : null;
+}
+function parseRun(args) {
+  let src = null, file = null, timeout = RUN_TIMEOUT;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    // --dialog is every command's (the daemon strips it before dispatch).
+    if (a === "--dialog") {
+      if (!DIALOG_SPEC.test(String(args[++i] ?? ""))) throw new Error('run: --dialog needs a value: accept | dismiss | "accept:my answer"');
+      continue;
+    }
+    if (a === "--file" || a === "--timeout") {
+      const v = args[++i];
+      if (v == null || String(v).startsWith("--")) throw new Error(`run: ${a} needs a value - ${RUN_TRY}`);
+      if (a === "--file") file = v;
+      else {
+        timeout = Number(v);
+        if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("run: --timeout wants milliseconds, e.g. --timeout 120000");
+        if (timeout > MAX_TIMER_MS) throw new Error(`run: --timeout ${v}ms is longer than a timer can run (max ${MAX_TIMER_MS}) - check the digits`);
+      }
+    } else if (String(a).startsWith("--")) throw new Error(`run: unknown flag '${a}' - ${RUN_TRY}`);
+    else src = src == null ? a : `${src} ${a}`; // an unquoted multi-word snippet
+  }
+  if (file != null && src != null) throw new Error("run: pass code OR --file <path>, not both");
+  if (file == null && !String(src ?? "").trim()) throw new Error(`run: needs code, e.g. browse run 'await page.title()' - ${RUN_TRY}`);
+  return { src, file, timeout };
+}
+/** One expression is returned as-is (`await page.title()`), anything else runs
+ *  as an async function body that returns explicitly. Compiling never executes,
+ *  so the client checks the same way the daemon does, before a browser starts. */
+function compileRun(src) {
+  // A trailing `;` is reflex and would land inside `return (…)`; the newlines
+  // keep a trailing `// comment` from swallowing the closing paren.
+  const expr = String(src).replace(/[\s;]+$/, "");
+  try { return new AsyncFunction(...RUN_PARAMS, `"use strict"; return (\n${expr}\n);`); } catch { /* not one expression */ }
+  // A block, so the code may declare its own `cdp`, `frame`, … over ours.
+  try { return new AsyncFunction(...RUN_PARAMS, `"use strict";\n{\n${src}\n}`); }
+  catch (e) {
+    // V8 reports code that stops short as the wrapper's own closing brace.
+    const early = /Unexpected token '\}'/.test(e.message) && !String(src).trimEnd().endsWith("}");
+    throw new Error(`run: that code does not parse - ${early ? "it ends early (an unclosed bracket, or a dangling operator)" : e.message}`);
+  }
+}
+function runFileSource(file) {
+  let src;
+  try { src = readFileSync(resolve(file), "utf8"); }
+  catch (e) { throw new Error(`run: cannot read '${file}' (${e.code || e.message}; paths are resolved from the directory browse runs in, on this machine)`); }
+  if (!src.trim()) throw new Error(`run: '${file}' is empty`);
+  compileRun(src);
+  return src;
+}
+
 // Capture and output use the same cadence. The pinned recorder is adapted
 // in this daemon before Playwright loads; the shared install is unchanged.
 const OUTPUT_FPS = (() => {
@@ -933,6 +1026,11 @@ function logLabel(cmd, args) {
     if (flag === "--remove") return `init --remove ${args[args.indexOf("--remove") + 1] ?? ""}`.trim();
     if (flag) return `init ${flag}`;
     return args.length ? "init <script>" : "init";
+  }
+  // Same for run: its code is as likely as an init script to carry a token.
+  if (cmd === "run") {
+    try { const r = parseRun(args); return r.file != null ? `run --file ${r.file}` : "run <code>"; }
+    catch { return "run <?>"; }
   }
   if (cmd !== "middleware") return `${cmd}${args.length ? " " + args.join(" ") : ""}`;
   const m = parseMiddleware(args);
@@ -1635,6 +1733,41 @@ Run code BEFORE every page load (stub a global, pre-seed consent/localStorage, f
   Use it for what must exist before app JS runs (window.gtag stub, consent flag, feature toggle).
   Use 'middleware' when the thing to change is a REQUEST, not page state.
 
+Run Playwright code in the session (what no command covers: raw CDP, HAR replay, WebSockets, loops):
+  browse run '<code>' [--timeout <ms>] · browse run --file <path> [--timeout <ms>]
+                                    runs in the daemon, NOT the page (that is 'eval'), as an async
+                                    function with these in scope: page (active tab), context, browser
+                                    (null on a -p profile), frame (the 'target' iframe, else the main
+                                    frame), cdp(method, params) and cdp.session() (Chromium only; one
+                                    session per tab, shared with 'emulate'), console, require.
+                                    One expression prints its value; a body prints what it returns;
+                                    a function expression is called with page first. console.*
+                                    lines print before the value; nothing at all prints 'ok - <page>'.
+                                    Values print as JSON when they are plain data.
+                                    --timeout (default 60000) bounds the whole script; actions inside
+                                    keep Playwright's 12s (25s for navigation) unless the code passes
+                                    {timeout}. A script past it keeps running in the background.
+                                    Synchronous code (execSync, a busy loop) blocks the whole session
+                                    and no timeout can stop it. console.* from a listener that fires
+                                    after the run returned goes to browsed.log (unredacted);
+                                    globalThis keeps state between runs. --file is read on THIS
+                                    machine; the code runs where the browser does, where relative
+                                    paths resolve from the dir the session started in and require()
+                                    from browse's install, so give it absolute paths. Close tabs with
+                                    'target close' and the session with 'close', not from the code.
+                                    Dialogs are answered by browse (--dialog picks how), not by the
+                                    code. Detaching cdp.session() drops that tab's 'emulate'
+                                    overrides. On a borrowed --cdp browser, what the code changes
+                                    stays in it.
+    e.g.  browse run 'for (const a of await page.getByRole("link").all()) console.log(await a.getAttribute("href"))'
+          browse run 'await context.routeFromHAR("/tmp/api.har", {url: "**/api/**"})'
+          browse run 'await cdp("Network.enable"); await cdp("Network.setBlockedURLs", {urls: ["*.mp4"]})'
+          browse run 'globalThis.ws = []; (await cdp.session()).on("Network.webSocketFrameReceived", (e) => ws.push(e.response.payloadData)); await cdp("Network.enable")'
+          browse run 'ws.splice(0)'
+  Actions inside run get no cursor glide, ripple or key overlay; each run is one step (one
+  screenshot, one chapter) and its code never reaches the transcript. In a recording, prefer the
+  action commands; use run for what they cannot do.
+
 Misc:
   browse eval <js expression>       evaluate JS in the page, print the result
   browse toast <text…>              show a NOTE caption on the page (demo videos) — ONLY for context the
@@ -1836,7 +1969,8 @@ Env-only (set once in a shell profile — no flag):
 const HELP_SECTION_TOPICS = [
   ["Navigate", ["act", "navigate"]], ["AI tasks", ["ai"]], ["Observe", ["observe", "diagnose"]],
   ["Tabs", ["tabs", "frames", "emulation", "dialogs", "downloads"]], ["Network", ["net", "network"]],
-  ["Intercept", ["middleware", "intercept", "mock"]], ["Run code BEFORE", ["init"]], ["Misc", ["misc"]],
+  ["Intercept", ["middleware", "intercept", "mock"]], ["Run code BEFORE", ["init"]],
+  ["Run Playwright", ["run", "code", "playwright"]], ["Misc", ["misc"]],
   ["Parallel", ["parallel", "session"]], ["Run the browser on another", ["remote"]],
   ["Launch flags", ["launch", "flags"]], ["Persistent profile", ["profile"]],
   ["Artifacts", ["artifacts", "recording", "video"]],
@@ -3056,7 +3190,7 @@ const COMMAND_GUESSES = Object.assign(Object.create(null), {
   frame: "'target <iframe selector>'", iframe: "'target <iframe selector>'",
   back: "'goBack'", forward: "'goForward'", refresh: "'reload'",
   navigate: "'goto'", visit: "'goto'", go: "'goto'", exit: "'close'",
-  js: "'eval'", exec: "'eval'", run: "'eval'", html: "'content'", source: "'content'",
+  js: "'eval'", exec: "'run'", html: "'content'", source: "'content'",
   log: "'console'", logs: "'console'", select: "'selectOption'", upload: "'setInputFiles'",
   key: "'press'", keypress: "'press'", sleep: "'wait <ms>'", pause: "'wait <ms>'",
   tree: "'snapshot'", find: "'snapshot' or 'rect'", inspect: "'snapshot' or 'rect'", query: "'snapshot' or 'eval'",
@@ -3171,7 +3305,7 @@ const RETIRED = Object.assign(Object.create(null), {
  *  user-facing list and this is the machine one. */
 const DAEMON_COMMANDS = new Set([
   ...MUTATING, ...PAGE_METHODS, "ai", "open", "snapshot", "text", "title", "url",
-  "content", "errors", "console", "rect", "screenshot", "wait", "scroll", "eval", "toast", "speed", "init",
+  "content", "errors", "console", "rect", "screenshot", "wait", "scroll", "eval", "run", "toast", "speed", "init",
   "target", "emulate", "state", "middleware", "dir", "close",
 ]);
 /** Flags a command used to accept, refused in the CLIENT so a stale spelling
@@ -3733,14 +3867,19 @@ async function client(argv) {
     ai = aiConfig();
     if (!(await findDaemon())) throw new Error("ai: open a page in this session first");
   }
-  // `init` is checked, and its --file read, BEFORE a browser starts: as the first
+  // `init` and `run` are checked, and their --file read, BEFORE a browser starts: as the first
   // command it would otherwise launch the session and then fail, leaving a live
   // session that refuses the launch flags of the retry.
-  let initSource;
+  let fileSource;
   if (cmd === "init") {
     const p = parseInit(argv.slice(1));
-    if (p.file != null) initSource = initFileSource(p.file);
+    if (p.file != null) fileSource = initFileSource(p.file);
     else if (p.src != null) checkInitSource(p.src);
+  }
+  if (cmd === "run") {
+    const r = parseRun(argv.slice(1));
+    if (r.file != null) fileSource = runFileSource(r.file);
+    else compileRun(r.src);
   }
   let shotDest = null;
   if (cmd === "screenshot") ({ argv, shotDest } = screenshotDest(argv));
@@ -3752,10 +3891,10 @@ async function client(argv) {
   // so the same launch-flag check applies.
   if (!live && !d.spawned && refuseLaunch(d)) return 1;
   // The path only labels the script in the transcript; its source travels as
-  // initSource. Absolute, so the label names the file the caller meant.
-  const args = argv.slice(1).map((a, i, all) => (cmd === "init" && all[i - 1] === "--file" ? resolve(a) : a));
+  // fileSource. Absolute, so the label names the file the caller meant.
+  const args = argv.slice(1).map((a, i, all) => ((cmd === "init" || cmd === "run") && all[i - 1] === "--file" ? resolve(a) : a));
   if (CLOSERS.has(cmd)) writeFileSync(runFile(SESSION), JSON.stringify({ ...d, phase: "closing" }));
-  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}), ...(initSource != null ? { initSource } : {}), ...(d.spawned ? { starter: true } : {}) }, postTimeout(cmd, args));
+  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}), ...(fileSource != null ? { fileSource } : {}), ...(d.spawned ? { starter: true } : {}) }, postTimeout(cmd, args));
   // Which browser and which login this session got, said once, when it starts.
   // Landing signed out on the wrong engine's half of a profile was invisible.
   // A discarded remote session still holds this side's tunnel and run file.
@@ -5204,7 +5343,7 @@ async function daemon() {
    *  context and a FrameLocator has none. Resolved per call: the iframe element
    *  can be replaced between commands, and a stale handle would evaluate against
    *  a detached document. */
-  async function frameForEval() {
+  async function frameForEval(cmd = "eval") {
     // elementHandle THROWS a raw locator timeout when the iframe is gone, so the
     // guidance has to hang off the catch, not off a null check.
     let f = page.mainFrame();
@@ -5215,25 +5354,36 @@ async function daemon() {
       f = h && (await h.contentFrame());
       if (!f) break;
     }
-    if (!f) throw new Error(`eval: the frame scope '${activeFrameSel}' is no longer on the page - run 'browse target top' to leave it, or re-scope with 'browse target <iframe selector>'`);
+    if (!f) throw new Error(`${cmd}: the frame scope '${activeFrameSel}' is no longer on the page - run 'browse target top' to leave it, or re-scope with 'browse target <iframe selector>'`);
     return f;
   }
 
   // `browse emulate` overrides (timezone, locale, cpu, network) live on a CDP
   // session and die with it, so we keep ONE session per page rather than opening
   // a fresh one per call - detaching would quietly undo what was just set.
-  const emuSessions = new WeakMap(); // page → CDPSession
-  async function emuCdp() {
+  const emuSessions = new WeakMap(); // page → Promise<CDPSession>
+  async function emuCdp(what = "emulate", pg = page) {
     // CDP is Chromium-only. Under camoufox (Firefox) there is no equivalent, so
     // say so plainly instead of throwing Playwright's "newCDPSession is not a
     // function" at the agent.
     if (context.__engine !== "chromium")
       throw new Error(
-        `emulate needs CDP, which only Chromium has (engine: ${context.__engine}). ` +
+        `${what} needs CDP, which only Chromium has (engine: ${context.__engine}). ` +
         `Re-run this session with --chromium.`);
-    let s = emuSessions.get(page);
-    if (!s) { s = await context.newCDPSession(page); emuSessions.set(page, s); }
-    return s;
+    let p = emuSessions.get(pg);
+    if (!p) {
+      // The PROMISE is cached, so two first calls racing share one session.
+      p = context.newCDPSession(pg).then((s) => {
+        // `run` hands this session out; a script that detaches it must not
+        // leave a dead one cached for the next emulate or cdp() on this tab.
+        const detach = s.detach.bind(s);
+        s.detach = () => { if (emuSessions.get(pg) === p) emuSessions.delete(pg); return detach(); };
+        return s;
+      });
+      p.catch(() => { if (emuSessions.get(pg) === p) emuSessions.delete(pg); });
+      emuSessions.set(pg, p);
+    }
+    return p;
   }
 
   // Keep the caller snappy: a missing selector should fail in seconds (so it can
@@ -5517,9 +5667,9 @@ async function daemon() {
   });
 
   let idleT = null;
-  let activeTask = null, commandCount = 0;
+  let activeTask = null, commandCount = 0, runsActive = 0;
   function armIdle() {
-    if (!IDLE_MS || activeTask) return;
+    if (!IDLE_MS || activeTask || runsActive) return;
     clearTimeout(idleT);
     idleT = setTimeout(async () => {
       // A client-initiated close may already be running: closeSession() would
@@ -6366,7 +6516,6 @@ async function daemon() {
    *  It only counts as the flag when a well-formed value FOLLOWS it, so a literal
    *  `browse fill "#q" --dialog` types the word instead of silently arming a
    *  policy and clearing the field. */
-  const DIALOG_SPEC = /^(accept|dismiss)(:[\s\S]*)?$/i;
   function takeDialogFlag(args) {
     const i = args.indexOf("--dialog");
     if (i < 0 || !DIALOG_SPEC.test(String(args[i + 1] ?? ""))) return args;
@@ -6405,7 +6554,7 @@ async function daemon() {
   }
 
   /** Does this command resolve anything inside the frame scope? */
-  const usesFrame = (cmd, args) => ELEMENT_TARGETED.has(cmd) || ["snapshot", "text", "rect", "scroll", "eval", "ai"].includes(cmd)
+  const usesFrame = (cmd, args) => ELEMENT_TARGETED.has(cmd) || ["snapshot", "text", "rect", "scroll", "eval", "run", "ai"].includes(cmd)
     || (cmd === "wait" && !/^\d+$/.test(String(args[0] ?? "")) && !args.includes("--url"))
     || (cmd === "screenshot" && (args.includes("--sel") || args.includes("--after")));
   /** A scope persists until `target` changes it or its frame is gone. Gone is
@@ -6432,13 +6581,13 @@ async function daemon() {
   }
 
   let dispatchedCommands = 0;
-  async function dispatch(cmd, args, ai, signal, initSource) {
+  async function dispatch(cmd, args, ai, signal, fileSource) {
     const firstCommand = dispatchedCommands++ === 0;
     const stripped = takeDialogFlag(args);
     const armed = stripped !== args;
     try {
       if (activeFrameChain.length && usesFrame(cmd, stripped)) await checkFrameScope();
-      return await dispatchCmd(cmd, stripped, ai, signal, firstCommand, initSource);
+      return await dispatchCmd(cmd, stripped, ai, signal, firstCommand, fileSource);
     } catch (e) {
       throw withCrashCause(e);
     } finally {
@@ -6446,7 +6595,7 @@ async function daemon() {
     }
   }
 
-  async function dispatchCmd(cmd, args, ai, signal, firstCommand = false, initSource) {
+  async function dispatchCmd(cmd, args, ai, signal, firstCommand = false, fileSource) {
     if (CDP_ENDPOINT && (["init", "middleware", "emulate"].includes(cmd) || (cmd === "state" && args.includes("--load"))))
       throw new Error(`${cmd}: unavailable on a borrowed CDP context; launch a browse-owned session for persistent scripts, interception or emulation`);
     if (cmd === "ai") {
@@ -7740,8 +7889,8 @@ async function daemon() {
         // The client read the file (it may be on another machine); this side
         // never opens the path, which only labels the script.
         if (file != null) {
-          if (typeof initSource !== "string") throw new Error("init: --file arrived without its contents - the client reads the file, so update the client");
-          src = initSource;
+          if (typeof fileSource !== "string") throw new Error("init: --file arrived without its contents - the client reads the file, so update the client");
+          src = fileSource;
         }
         if (src == null) return `${initScripts.length} init script${initScripts.length === 1 ? "" : "s"} registered\n${list()}`;
         checkInitSource(src);
@@ -7755,6 +7904,69 @@ async function daemon() {
           `${initScripts.length > 1 ? ` (${initScripts.length} scripts, in the order added)` : ""}`;
         if (loaded) aside("note: the page you are on now was already loaded - 'browse reload' (or 'goto') to apply it");
         return registered;
+      }
+      case "run": {
+        const { src: inline, file, timeout } = parseRun(args);
+        // The client read the file (it may be on another machine).
+        if (file != null && typeof fileSource !== "string") throw new Error("run: --file arrived without its contents - the client reads the file, so update the client");
+        const fn = compileRun(file != null ? fileSource : inline);
+        const logs = [];
+        // A listener the script leaves behind logs after this reply is gone, so
+        // from then on console.* goes to the session log, as middleware's does.
+        let returned = false;
+        const sink = new Writable({
+          write(chunk, _enc, done) {
+            const line = String(chunk).replace(/\n$/, "");
+            if (returned) logDaemon(`run console: ${line}`);
+            else logs.push(line);
+            done();
+          },
+        });
+        const realConsole = new Console({ stdout: sink, stderr: sink, inspectOptions: { depth: 3, breakLength: 120 } });
+        const named = (x) => { const t = playwrightType(x); return t ? `<${t}>` : x; };
+        const runConsole = new Proxy(realConsole, {
+          get: (t, k) => (typeof t[k] === "function" ? (...a) => t[k](...a.map(named)) : t[k]),
+        });
+        // One CDP session per page, shared with `emulate`, so domains a script
+        // enables (Fetch, Network) stay enabled across runs.
+        // Bound to the tab the script was given, not whichever is active when a
+        // listener fires later.
+        const runPage = page;
+        const cdp = async (method, params) => (await emuCdp("cdp()", runPage)).send(method, params);
+        cdp.session = () => emuCdp("cdp()", runPage);
+        const frame = activeFrame ? await frameForEval("run") : page.mainFrame();
+        // A long run is not idleness: the idle timer must not close the session
+        // under it (ai task does the same).
+        clearTimeout(idleT);
+        runsActive++;
+        const ran = Promise.resolve().then(async () => {
+          const v = await fn(runPage, context, context.browser(), frame, cdp, runConsole, runRequire);
+          // `async (page) => {…}` is Playwright MCP's run-code shape; returning
+          // the function uncalled would print it and run nothing.
+          return typeof v === "function" ? v(runPage) : v;
+        });
+        // A timed-out script keeps running (JS cannot be cancelled), so its
+        // eventual rejection is adopted here instead of crashing the daemon.
+        let timer, out, timedOut = false;
+        ran.catch((e) => { if (timedOut) logDaemon(`run: a script that timed out failed later: ${e?.message ?? e}`); });
+        try {
+          out = await Promise.race([ran, new Promise((_r, reject) => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              reject(new Error(`run: still running after ${timeout}ms - it may finish in the background; ` +
+                `pass --timeout <ms> for a longer script, or 'browse close' to stop it`));
+            }, timeout);
+          })]);
+        } catch (e) {
+          const said = logs.length ? `\nconsole before it failed:\n${clipForRead(logs.join("\n"), "run", "log less", 4000)}` : "";
+          throw new Error(`${/^run: /.test(e?.message) ? "" : "run: "}${e?.message ?? e}${said}`);
+        } finally { clearTimeout(timer); returned = true; runsActive--; armIdle(); }
+        const pwType = playwrightType(out);
+        if (out !== undefined && !pwType) logs.push(out === "" ? '""' : typeof out === "string" ? out : runFormat(out));
+        // A script that only acted returns nothing (or a handle like page.goto's
+        // Response); say where it left the page, as every other action does.
+        if (!logs.length || pwType) logs.push(`ok - ${await brief()}${pwType ? ` (returned a ${pwType})` : ""}`);
+        return clipForRead(logs.join("\n"), "run", "return less (a count, one field, or .slice(0, 2000))");
       }
       case "dir": return OUT;
       default:
@@ -7868,8 +8080,8 @@ async function daemon() {
     req.setEncoding("utf8");
     req.on("data", (c) => (body += c));
     req.on("end", async () => {
-      let cmd = "?", args = [], hold = false, ai, initSource, starter = false;
-      try { ({ cmd, args = [], hold = false, ai, initSource, starter = false } = JSON.parse(body)); } catch { /* ignore */ }
+      let cmd = "?", args = [], hold = false, ai, fileSource, starter = false;
+      try { ({ cmd, args = [], hold = false, ai, fileSource, starter = false } = JSON.parse(body)); } catch { /* ignore */ }
       const send = (obj) => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obj)); };
       let ownsTask = false, ownsCommand = false, taskTimer;
       const asides = [];
@@ -7893,7 +8105,7 @@ async function daemon() {
           res.on("close", () => { if (!res.writableEnded) controller.abort(); });
         }
         const stepAt = now();
-        const out = await asideStore.run(asides, () => dispatch(cmd, args, ai, activeTask?.signal, initSource));
+        const out = await asideStore.run(asides, () => dispatch(cmd, args, ai, activeTask?.signal, fileSource));
         const aiReadOnly = cmd === "ai" && (task || args[0] === "assert" || parseAI(args).dryRun);
         if (!CHAPTERLESS.has(cmd) && !aiReadOnly) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
         // Collapse any middleware faults raised since the last command into the
@@ -7943,7 +8155,7 @@ async function daemon() {
         }
         step++;
         let shot = null;
-        if (MUTATING.has(cmd) || cmd === "open" || cmd === "scroll" || (cmd === "ai" && !aiReadOnly)) shot = await autoShot(cmd, cmd === "ai" ? [args[0]] : args);
+        if (MUTATING.has(cmd) || cmd === "open" || cmd === "scroll" || cmd === "run" || (cmd === "ai" && !aiReadOnly)) shot = await autoShot(cmd, cmd === "ai" ? [args[0]] : cmd === "run" ? [] : args);
         const result = out;
         // Everything that is not the answer rides in `notes`, which the client
         // prints on stderr: the step shot, the command's own remarks, new page

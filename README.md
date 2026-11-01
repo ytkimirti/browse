@@ -102,6 +102,8 @@ to exercise complete multistep goals.
 
 Stay logged in across sessions with a profile. Force an error path or an empty
 list with request middleware. Freeze the clock before the app's JS runs.
+Drop to Playwright code in the live session (raw CDP, HAR replay, WebSocket frames)
+with `browse run`.
 Scope accessibility snapshots to a region, keep controls with compact output,
 and use snapshot element references directly in actions. Deliberately opened
 tabs join the recording while active; popup footage stays excluded until selected.

@@ -46,6 +46,10 @@ and returns the recorded steps and outcome.
    registered, so set them up before `open`, or `reload` after. Never rewrite a
    dev server's HTML document with `middleware` to inject a script: on Next/Vite
    that produces an endless reload loop that reads exactly like an app bug.
+   Past what the commands cover (raw CDP, HAR replay, WebSocket frames, one
+   loop over many elements), drop to Playwright code with `run`. It is one
+   opaque step with no cursor overlay, so keep actions a viewer should watch on
+   the commands, and read the page with `eval`/`snapshot`, not `run`.
 6. **Finish the recording.** Wait for `close` to finish and verify the reported
    artifacts exist locally before handing them off or deleting the remote.
    A tool returning a running process handle is still working. Preserve the

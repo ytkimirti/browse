@@ -9,7 +9,7 @@ An explicit engine or a named profile must keep that identity; browse fails
 startup when it cannot. Check `browse help launch` for engine selection and `browse help setup` for setup.
 
 Reach for `--chromium` when you need `browse emulate tz= locale= cpu= net=`
-(CDP-only), a `.pdf`
+or `cdp()` inside `run` (both CDP-only), a `.pdf`
 (`page.pdf()` is Chromium-only), or **`goBack`/`goForward`** — this camoufox
 build ignores history navigation completely (even an in-page `history.back()`
 leaves the url where it was), so browse fails those commands there instead of
