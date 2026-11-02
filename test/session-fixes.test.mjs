@@ -38,6 +38,10 @@ const fixturePort = await new Promise((resolve, reject) => {
 try {
   let r = b('console');
   check('console with no live session fails without starting a browser', r.code === 1 && /--dir/.test(r.err) && !existsSync(OUT), r.err);
+  for (const cmd of [['url'], ['snapshot'], ['click', 'button'], ['screenshot', 'x']]) {
+    r = b(...cmd);
+    check(`${cmd[0]} with no live session fails without starting a browser`, r.code === 1 && /no live session .* never starts one/.test(r.err) && /Start it with 'open'/.test(r.err) && !existsSync(OUT) && !existsSync(join(STORE, 'run', SESSION + '.json')), r.out + r.err);
+  }
   const html = `<style>body{margin:0}#surface{position:absolute;left:30px;top:40px;width:200px;height:100px;background:blue}#cover{position:absolute;left:30px;top:40px;width:200px;height:100px;background:red;z-index:10}</style><div id="surface" role="button"></div><div id="cover"></div><script>document.querySelector('#surface').onpointermove=e=>e.currentTarget.dataset.hover=JSON.stringify([e.offsetX,e.offsetY]);document.querySelector('#surface').onclick=e=>e.currentTarget.dataset.point=JSON.stringify([e.offsetX,e.offsetY]);document.querySelector('#surface').oncontextmenu=e=>{e.preventDefault();e.currentTarget.dataset.right=JSON.stringify([e.offsetX,e.offsetY])}</script>`;
   r = b('open', 'data:text/html,' + encodeURIComponent(html));
   check('fixture opens on requested engine', r.code === 0, r.err);

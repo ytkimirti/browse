@@ -6,7 +6,7 @@ description: Drive a real, recorded browser step by step with the local `browse`
 # browse: recorded agentic browsing
 
 `browse` (on PATH; source `browse.mjs` in this repo) drives a persistent headless
-browser via a localhost daemon, one browser per session name. The first command
+browser via a localhost daemon, one browser per session name. Opening a session
 spawns the browser with recording already on; every later command drives the same
 live session.
 

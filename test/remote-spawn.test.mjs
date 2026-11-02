@@ -152,6 +152,9 @@ try {
   const runDir = join(CLIENT_HOME, "run");
   const leftovers = () => (existsSync(runDir) ? readdirSync(runDir) : []).filter((f) => f.includes(`~${gone}.`));
   r = remote({}, "-s", gone, "text", "h1");
+  check("a read with no live remote session is refused without starting one", r.code === 1 && /never starts one/.test(r.err), `${r.code} ${r.err}`);
+  check("…and leaves no ssh control socket here", leftovers().length === 0, leftovers().join(","));
+  r = remote({}, "-s", gone, "open", "about:blank", "--no-record");
   check("exits 1 and says no session was left running", r.code === 1 && /no session was left running/.test(r.err), `${r.code} ${r.err}`);
   check("…and leaves no run file or ssh control socket here", leftovers().length === 0, leftovers().join(","));
 

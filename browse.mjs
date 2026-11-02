@@ -1513,7 +1513,9 @@ click sequence is needed from the calling agent. Read the returned outcome:
 a stopped task is partial progress. Inspect its recorded steps before resuming.
 Use individual commands for a known selector, an exact assertion, debugging,
 or an interaction outside the task action set. The browser + recording start
-on your first command. TypeSafe credentials: see 'browse help --env'.
+on your first command; reads and in-page actions (url, text, snapshot, click…)
+never start one and fail with no live session, so open first. TypeSafe
+credentials: see 'browse help --env'.
 
 Navigate / act (selectors are Playwright strings: text=, role=button[name="…"], css, xpath=…):
   browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser + recording
@@ -2808,7 +2810,7 @@ function warnBuildSkew(h) {
     `${upstashBox() ? ", and 'browse box image' to bake it into the warm image" : ""}\n`);
 }
 
-async function ensureRemoteDaemon() {
+async function ensureRemoteDaemon(readCmd = null) {
   const found = await findRemoteDaemon();
   if (found) return found;
   const remotePort = remotePortFor(SESSION);
@@ -2820,6 +2822,11 @@ async function ensureRemoteDaemon() {
   if (probe.kind === "browse" && probe.health.session === SESSION) {
     warnBuildSkew(probe.health);
     return saveRemoteRun({ port: local, remotePort, host: REMOTE, ...probe.health });
+  }
+  if (probe.kind === "none" && readCmd) {
+    stopTunnel();
+    rmSync(runFile(SESSION), { force: true }); // its daemon is gone; spare the next read the ssh
+    throw noLiveSession(readCmd);
   }
   // Anything ELSE on that port means a daemon spawned now would fail to bind, so
   // say so here rather than wait out the whole start-up poll to report a browser
@@ -3015,15 +3022,36 @@ function pidAlive(pid) {
   catch (e) { return e && e.code === "EPERM"; }
 }
 
-/** Spawn this session's detached daemon (if not up) and wait for its run file. */
-async function ensureDaemon(attempt = 0) {
-  if (REMOTE) return ensureRemoteDaemon();
+/** The refusal for a read or in-page action (`readCmd`) when no session is live. */
+function noLiveSession(readCmd) {
+  const offHere = !REMOTE && !CDP_ENDPOINT && process.env.BROWSE_LOCAL !== "1" && existsSync(join(BROWSE_HOME, "no-local"));
+  return new Error(`no live session '${SESSION}', and '${readCmd}' never starts one. Start it with 'open', carrying the launch flags it should have.` +
+    (offHere ? ` Local browsers are off on this machine, so that means 'browse --remote <host> ...' ('browse box help').` : ""));
+}
+
+/** A spawn lock that still stands for a start under way: its holder is alive
+ *  and it is inside the 90s window. A client killed mid-spawn (the 120s
+ *  agent-tool timeout does exactly this) never runs its `finally`; locks from a
+ *  dead pid were still sitting in run/ twelve days later. */
+function lockLive(lock) {
+  try { return Date.now() - statSync(lock).mtimeMs <= 90_000 && pidAlive(Number(String(readFileSync(lock, "utf8")).trim())); }
+  catch { return false; }
+}
+
+/** Spawn this session's detached daemon (if not up) and wait for its run file.
+ *  `readCmd` set: attach only. Join a live session, or one another client is
+ *  starting right now, but never spawn one for a read or an in-page action. */
+async function ensureDaemon(attempt = 0, readCmd = null) {
+  if (REMOTE) return ensureRemoteDaemon(readCmd);
   let d = await findDaemon();
   if (d) return d;
+  // A read joins only a start under way.
+  if (readCmd && !lockLive(runFile(SESSION) + ".lock")) throw noLiveSession(readCmd);
   // A machine that must not run browsers (too little RAM, or policy) says so
   // with a file, since agents' shells do not reliably inherit a profile's env.
-  // A CDP session launches nothing here, so it stays allowed.
-  if (!CDP_ENDPOINT && process.env.BROWSE_LOCAL !== "1" && existsSync(join(BROWSE_HOME, "no-local"))) {
+  // A CDP session launches nothing here, so it stays allowed, and neither does
+  // a read that only joins a start under way.
+  if (!readCmd && !CDP_ENDPOINT && process.env.BROWSE_LOCAL !== "1" && existsSync(join(BROWSE_HOME, "no-local"))) {
     throw new Error(
       `local browsers are off on this machine (${join(BROWSE_HOME, "no-local")} exists).\n` +
       `  Run it in an Upstash Box instead: 'browse box up', then 'browse --remote <host> ...'\n` +
@@ -3034,16 +3062,10 @@ async function ensureDaemon(attempt = 0) {
   mkdirSync(RUN_DIR, { recursive: true });
   const lock = runFile(SESSION) + ".lock";
   let spawner = false, spawnedChild = null;
-  try { writeFileSync(lock, String(process.pid), { flag: "wx" }); spawner = true; }
+  if (!readCmd) try { writeFileSync(lock, String(process.pid), { flag: "wx" }); spawner = true; }
   catch {
     try {
-      // The holder's pid, not just the lock's age: a client killed mid-spawn (the
-      // 120s agent-tool timeout does exactly this) never runs its `finally`, and
-      // waiting out a 90s stale window for a process that is already gone turned
-      // one interrupted command into a minute and a half of dead time on the next
-      // one. Locks from a dead pid were still sitting in run/ twelve days later.
-      const holder = Number(String(readFileSync(lock, "utf8")).trim());
-      if (!pidAlive(holder) || Date.now() - statSync(lock).mtimeMs > 90_000) {
+      if (existsSync(lock) && !lockLive(lock)) {
         rmSync(lock, { force: true });
         writeFileSync(lock, String(process.pid), { flag: "wx" });
         spawner = true;
@@ -3082,6 +3104,8 @@ async function ensureDaemon(attempt = 0) {
       // Its own dir: the discarded one is named for the same second and may
       // still be being wiped.
       if (!spawner && i > 0 && !existsSync(lock) && attempt < 2) {
+        // The spawner may have finished between the findDaemon above and this.
+        if (readCmd) { if ((d = await findDaemon())) return d; throw noLiveSession(readCmd); }
         if (!process.env.BROWSE_OUT) setOut(`${defaultOut()}-${attempt + 2}`);
         return ensureDaemon(attempt + 1);
       }
@@ -3159,6 +3183,16 @@ function post(port, body, timeoutMs = 120000) {
 }
 
 const CLOSERS = new Set(["close"]);
+/** Commands that only make sense on a page that is already open: reads and
+ *  in-page actions. With no live session they are refused instead of starting a
+ *  browser. A login watcher polling `url` used to relaunch a session the moment
+ *  it was closed, with default launch flags, so the next `open --headful` was
+ *  refused for not matching it. */
+const NEEDS_PAGE = new Set([
+  ...[...PAGE_METHODS].filter((c) => c !== "goto"),
+  "snapshot", "text", "title", "url", "content", "rect", "screenshot", "scroll", "wait", "dir",
+  "eval", "toast", "target",
+]);
 
 /** "unknown command 'shot'" sent real sessions to `browse help` and back for a
  *  name that was one edit away. Levenshtein, capped at a third of the word so a
@@ -3891,7 +3925,7 @@ async function client(argv) {
   if (cmd === "screenshot") ({ argv, shotDest } = screenshotDest(argv));
   const inferred = live ? null : inferEngine();
   if (inferred) LAUNCH_ENV.BROWSE_ENGINE = inferred;
-  const d = await ensureDaemon();
+  const d = await ensureDaemon(0, NEEDS_PAGE.has(cmd) ? cmd : null);
   // A daemon this client did not start (another client won the start-up race,
   // or a remote one found by probing its port) is as live as one findDaemon saw,
   // so the same launch-flag check applies.

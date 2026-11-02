@@ -84,15 +84,14 @@ try {
   check('...so the session is not running', r.code === 0 && /not running/.test(r.out), show(r));
   check('...and its artifacts dir was removed', sessionDirs(s1).length === 0, sessionDirs(s1).join(', '));
   r = run(s1, ['screenshot']);
-  check('a screenshot on the fresh blank tab says it is about:blank', r.code === 0 && /^saved /.test(r.out) && /about:blank - nothing has been opened/.test(r.err), show(r));
+  check('a screenshot with no live session is refused instead of starting a blank tab', r.code === 1 && /no live session .* never starts one/.test(r.err) && sessionDirs(s1).length === 0, show(r));
   r = run(s1, ['text']);
-  check('...and so does text', r.code === 0 && r.out === '' && /about:blank/.test(r.err), show(r));
-  run(s1, ['close']);
+  check('...and so is text', r.code === 1 && r.out === '' && /never starts one/.test(r.err), show(r));
   // A reused BROWSE_OUT: a discarded start must not take an earlier run's files.
   const reused = join(HOME, 'reused');
   mkdirSync(reused);
   writeFileSync(join(reused, 'transcript.md'), 'earlier run');
-  r = run(`${s1}-b`, ['text', 'main'], { BROWSE_OUT: reused });
+  r = run(`${s1}-b`, ['open', `${BASE}/tall`, '--no-record'], { BROWSE_OUT: reused });
   check('a discarded start in a reused BROWSE_OUT keeps the earlier files',
     r.code === 1 && /no session was left running/.test(r.err) && readFileSync(join(reused, 'transcript.md'), 'utf8').startsWith('earlier run')
       && !existsSync(join(reused, 'shots')), `${show(r)}\n${readdirSync(reused).join(',')}`);
@@ -257,7 +256,7 @@ try {
     `A: ${show(a)}\nB: ${show(r)}`);
   run(s8, ['close']);
   const s9 = `out-race3-${process.pid}`;
-  first = runBg(s9, ['eval', 'throw new Error("bad")']);
+  first = runBg(s9, ['open', `${BASE}/plain`, '--no-record']);
   pause(100);
   r = run(s9, ['open', `${BASE}/plain`]);
   a = await first;
@@ -266,7 +265,7 @@ try {
   run(s9, ['close']);
   const userOut = join(HOME, 'user-out');
   mkdirSync(userOut);
-  r = run(`out-uo-${process.pid}`, ['text', 'h1'], { BROWSE_OUT: userOut });
+  r = run(`out-uo-${process.pid}`, ['open', `${BASE}/plain`, '--no-record'], { BROWSE_OUT: userOut });
   check('a discarded start keeps an empty BROWSE_OUT the user made', r.code === 1 && /no session was left running/.test(r.err) && existsSync(userOut), show(r));
 
   /* ------------------------------------- H: profile engine + profiles text */
