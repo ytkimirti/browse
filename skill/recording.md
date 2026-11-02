@@ -6,7 +6,7 @@ plus `errors` is enough.
 
 ## Frame size is fixed when the browser starts
 
-Default 1280x800. If the app's bottom is clipped, or you want a phone-shaped demo,
+Defaults are in `browse help` (a headed macOS window is screen-sized). If the app's bottom is clipped, or you want a phone-shaped demo,
 START the session with `--viewport 1280x900` / `--viewport 390x844`. That is the
 only way to record either, since `emulate viewport=` re-lays-out the page but
 leaves the rest of the frame grey. A `screenshot` right after `open` catches

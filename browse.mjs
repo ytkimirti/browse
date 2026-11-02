@@ -443,10 +443,12 @@ let VIEWPORT = (() => {
 /** A headed window is for a person to look at, so with no size asked for it
  *  fills the screen it opens on instead of a 1280x800 box (under half of a
  *  large display). macOS only: NSScreen.mainScreen is the screen with the key
- *  window, which is where a new browser window lands. The height leaves room
- *  for the browser's own toolbar (Playwright adds it to the viewport when it
- *  sizes a headed Chromium window). Null when it cannot tell. */
-function headfulScreenViewport() {
+ *  window, which is where a new browser window lands. Camoufox takes this as
+ *  its outer window size; Chromium's viewport leaves room for the toolbar
+ *  Playwright adds when it sizes a headed window (80px on macOS, 46 more for a
+ *  persistent context) and for the window's offset. Even sizes: the mp4
+ *  encoder refuses odd ones. */
+function headfulScreenViewport(engine, persistent) {
   if (process.platform !== "darwin") return null;
   if (["BROWSE_VIEWPORT", "BROWSE_WIDTH", "BROWSE_HEIGHT"].some((k) => process.env[k])) return null;
   try {
@@ -455,7 +457,10 @@ function headfulScreenViewport() {
       { encoding: "utf8", timeout: 5000 });
     const [w, h] = JSON.parse(r.stdout || "null") || [];
     if (!(w >= 800 && h >= 600)) return null;
-    return { width: Math.floor(w) - 2, height: Math.floor(h) - 130 };
+    // Chromium keeps the origin it picked (about 10pt in from the work area's
+    // corner), so leave that margin too or the window runs under the Dock.
+    const [dw, dh] = engine === "camoufox" ? [0, 0] : [2 + 20, 80 + (persistent ? 46 : 0) + 20];
+    return { width: (Math.floor(w) - dw) & ~1, height: (Math.floor(h) - dh) & ~1 };
   } catch { return null; }
 }
 // Locale the browser reports. Unset, chromium takes the HOST's, which makes two
@@ -1854,9 +1859,10 @@ naming each value that differs):
                                     Overlays are off; init, middleware, emulate and state --load are
                                     unavailable on a borrowed context. Screenshots and logs still work.
   --headful / --headless            show the browser window while driving it (still records).
-                                    Headed, the engine defaults to chromium and, on macOS, the
-                                    window fills the screen it opens on unless --viewport is given
-  --camoufox / --chromium           pick the engine (default camoufox headless, chromium headed — see below)
+                                    Headed with no profile, the engine defaults to chromium; on
+                                    macOS the window fills the screen it opens on unless --viewport
+                                    is given
+  --camoufox / --chromium           pick the engine (default camoufox; chromium headed — see below)
   --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
                                     use to RECORD phone-shaped; 'browse emulate viewport=' only
                                     resizes the page inside an already-fixed frame
@@ -3618,8 +3624,14 @@ async function client(argv) {
   }
   // A profile's two engine halves are separate logins: with no engine named,
   // a session starts on the half it was last used with rather than the default's.
-  const inferEngine = () => PROFILE && !REMOTE && !LAUNCH_ENV.BROWSE_ENGINE && !process.env.BROWSE_ENGINE
-    && !LAUNCH_ENV.BROWSE_CDP && !process.env.BROWSE_CDP ? profileEngine(PROFILE) : null;
+  // A headed window with no profile is for a person to look at, so it opens as
+  // Chromium; camoufox stays the headless default, where its fingerprinting
+  // earns its keep. A profile keeps its own rule: its login lives in one half.
+  const inferEngine = () => {
+    if (LAUNCH_ENV.BROWSE_ENGINE || process.env.BROWSE_ENGINE || LAUNCH_ENV.BROWSE_CDP || process.env.BROWSE_CDP) return null;
+    if (PROFILE) return REMOTE ? null : profileEngine(PROFILE);
+    return (LAUNCH_ENV.BROWSE_HEADFUL ?? process.env.BROWSE_HEADFUL) === "1" ? "chromium" : null;
+  };
   if (process.env.BROWSE_PREFLIGHT === "1") {
     // A live session is judged against how it really started (launchMismatch),
     // not against defaults it may not have started with.
@@ -3945,11 +3957,6 @@ async function client(argv) {
   if (cmd === "screenshot") ({ argv, shotDest } = screenshotDest(argv));
   const inferred = live ? null : inferEngine();
   if (inferred) LAUNCH_ENV.BROWSE_ENGINE = inferred;
-  // A headed window is for a person: it opens as Chromium unless an engine was
-  // named (or a profile's last-used one applies). Camoufox stays the headless
-  // default, where its fingerprinting earns its keep.
-  if (!live && !LAUNCH_ENV.BROWSE_ENGINE && !process.env.BROWSE_ENGINE && !CDP_ENDPOINT && !LAUNCH_ENV.BROWSE_CDP
-    && (LAUNCH_ENV.BROWSE_HEADFUL ?? process.env.BROWSE_HEADFUL) === "1") LAUNCH_ENV.BROWSE_ENGINE = "chromium";
   const d = await ensureDaemon(0, NEEDS_PAGE.has(cmd) ? cmd : null);
   // A daemon this client did not start (another client won the start-up race,
   // or a remote one found by probing its port) is as live as one findDaemon saw,
@@ -4991,11 +4998,11 @@ async function daemon() {
   const fallback = (note, detail) => { engineNote = note; logDaemon(detail ? `${note} :: ${detail}` : note); };
   validateCdpLaunch(process.env, PROFILE);
   validateDeviceScale(process.env);
+  let engine = CDP_ENDPOINT ? "chromium" : ENGINE, camouOpts = null;
   if (HEADFUL && !CDP_ENDPOINT) {
-    const fit = headfulScreenViewport();
+    const fit = headfulScreenViewport(engine, !!PROFILE);
     if (fit) { VIEWPORT = fit; logDaemon(`headed window sized to the screen: ${fit.width}x${fit.height}`); }
   }
-  let engine = CDP_ENDPOINT ? "chromium" : ENGINE, camouOpts = null;
   const requireEngine = !!PROFILE || !!process.env.BROWSE_ENGINE;
   if (engine === "camoufox") {
     camouOpts = camoufoxLaunchOptions();
