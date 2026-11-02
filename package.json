@@ -14,7 +14,8 @@
   "os": ["darwin", "linux"],
   "scripts": {
     "test:features": "node test/browser-features.test.mjs && node test/run.test.mjs && node test/cdp.test.mjs && node test/device-scale.test.mjs",
-    "test:package": "node test/packaging.test.mjs"
+    "test:package": "node test/packaging.test.mjs",
+    "test:setup": "node test/setup.test.mjs"
   },
   "private": false
 }

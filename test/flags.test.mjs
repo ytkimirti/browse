@@ -262,7 +262,9 @@ try {
 
   // Both overlays default ON on BOTH engines now - under camoufox they used to
   // default off, which recorded demos with no pointer and no keystrokes in them.
-  r = browseLive("eval", "JSON.stringify([!!window.__browseCursor, !!window.__browseKeys])");
+  // The overlays live in camoufox's isolated world, which is where page.evaluate
+  // runs (eval reads the page's own world).
+  r = browseLive("run", "await page.evaluate('JSON.stringify([!!window.__browseCursor, !!window.__browseKeys])')");
   check(`the cursor AND keystroke overlays are on by default on ${ENGINE}`,
     r.code === 0 && /\[true,true\]/.test(r.out.replace(/\s/g, "")), `${r.code} ${r.out}${r.err}`);
   r = browseLive("--no-cursor", "url");

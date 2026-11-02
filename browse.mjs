@@ -563,6 +563,9 @@ function parseInit(args) {
   }
   return { src, file, clear, remove, label };
 }
+/** Whether V8 parses `src` as a script body. The browser's own parse error
+ *  differs by engine and world (camoufox's main world drops "SyntaxError"). */
+function parses(src) { try { new Function(src); return true; } catch { return false; } }
 /** A script about to be registered. A syntax error would otherwise fail
  *  silently INSIDE the page on the next navigation, which reads as "the init
  *  script did nothing". */
@@ -1758,7 +1761,10 @@ Run Playwright code in the session (what no command covers: raw CDP, HAR replay,
                                     Dialogs are answered by browse (--dialog picks how), not by the
                                     code. Detaching cdp.session() drops that tab's 'emulate'
                                     overrides. On a borrowed --cdp browser, what the code changes
-                                    stays in it.
+                                    stays in it. On camoufox, page.evaluate runs in an isolated world
+                                    that cannot see the page's globals; prefix a string with 'mw:'
+                                    (page.evaluate("mw:window.app")) to read them. eval and init
+                                    already run in the page's world.
     e.g.  browse run 'for (const a of await page.getByRole("link").all()) console.log(await a.getAttribute("href"))'
           browse run 'await context.routeFromHAR("/tmp/api.har", {url: "**/api/**"})'
           browse run 'await cdp("Network.enable"); await cdp("Network.setBlockedURLs", {urls: ["*.mp4"]})'
@@ -4806,9 +4812,9 @@ function camoufoxLaunchOptions() {
   // The number caps that duration, so the path stays human and the page reacts
   // as the drawn pointer arrives.
   const script =
-    "import json,sys;from browserforge.fingerprints import Screen;" +
+    "import json,sys;from camoufox.fingerprints import Screen;" +
     "from camoufox.utils import launch_options;" +
-    `print(json.dumps(launch_options(headless=${HEADFUL ? "False" : "True"},humanize=0.5,config={'showcursor':False},` +
+    `print(json.dumps(launch_options(headless=${HEADFUL ? "False" : "True"},humanize=0.5,main_world_eval=True,config={'showcursor':False},` +
     `window=(${VIEWPORT.width},${VIEWPORT.height}),` +
     `screen=Screen(min_width=${VIEWPORT.width},min_height=${VIEWPORT.height}),i_know_what_im_doing=True)))`;
   // camoufox is a Python package but this skill is global, so a project venv is
@@ -4932,8 +4938,8 @@ async function daemon() {
     camouOpts = camoufoxLaunchOptions();
     if (!camouOpts) {
       if (requireEngine) throw new Error("camoufox is unavailable. Run 'browse setup' to install it. The requested engine/profile was preserved; start a separate session with --chromium only if you intend to use its separate profile.");
-      fallback("camoufox not installed — using chromium. Set it up with " +
-               "`uv tool install camoufox` then " +
+      fallback("camoufox not installed, older than 0.5.9, or not fetched — using chromium. " +
+               "Set it up with `uv tool install -U camoufox` then " +
                "`~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch`, " +
                "and re-run `browse setup`.");
       engine = "chromium";
@@ -6667,8 +6673,8 @@ async function daemon() {
         // it went back, and the step screenshot is identical to the last one.
         if (res === null && cmd !== "reload" && page.url() === wasAt) {
           throw new Error(`${cmd}: did not move - still on ${page.url()}. Either there is nothing to go ` +
-            `${cmd === "goBack" ? "back" : "forward"} to, or the engine refused (firefox/camoufox often ignores ` +
-            `history navigation) - navigate with 'browse goto <url>' instead.`);
+            `${cmd === "goBack" ? "back" : "forward"} to, or the engine refused ` +
+            `- navigate with 'browse goto <url>' instead.`);
         }
         return `ok - ${await brief()}${authWallNote(page.url())}`;
       }
@@ -7306,12 +7312,16 @@ async function daemon() {
         // through L(); eval bypassed it and silently ran in the TOP frame, so a
         // scoped session read the wrong document.
         const target = activeFrame ? await frameForEval() : page;
+        // Camoufox runs page.evaluate in an isolated world, where the page's own
+        // globals (window.store, a framework's state) read as undefined. eval
+        // exists to read the app, so it runs in the page's world like Chromium.
+        if (USING_CAMOUFOX) src = "mw:" + src;
         let out;
         try { out = await target.evaluate(src); }
         catch (e) {
           // The wrap only takes a single EXPRESSION, so `const r = await f(); r.x`
           // fails on a token the caller never typed. Say who rewrote it.
-          if (wrapped && /SyntaxError/.test(e.message)) {
+          if (wrapped && !parses(src)) {
             throw new Error(`${e.message}\nnote: browse wrapped this in an async IIFE so top-level 'await' works, which only accepts ONE expression. For statements, write it yourself: '(async () => { const r = await f(); return r.x })()'`);
           }
           throw e;
@@ -7894,7 +7904,12 @@ async function daemon() {
         }
         if (src == null) return `${initScripts.length} init script${initScripts.length === 1 ? "" : "s"} registered\n${list()}`;
         checkInitSource(src);
-        const disposable = await context.addInitScript({ content: src });
+        // Camoufox runs init scripts in its isolated world, where a stub patches
+        // nothing the page can see. Like eval, init means the page's world. It
+        // runs an `mw:` script bare at global scope, so keep Playwright's own
+        // function wrapper: a script's `const` must not collide with the page's
+        // or another init script's, and `return` must stay legal.
+        const disposable = await context.addInitScript({ content: USING_CAMOUFOX ? `mw:(() => {\n${src}\n})();` : src });
         if (!disposable || typeof disposable.dispose !== "function") throw new Error("init: this Playwright build does not return a Disposable from addInitScript, so a script could never be removed - upgrade it (browse setup)");
         initScripts.push({ i: ++initSeq, src, label: label || null, disposable });
         // Only worth saying when there IS a loaded page it will miss. On a fresh

@@ -250,8 +250,16 @@ try {
     r = browse("text", "#seed");
     check("scripts run in the order they were added", r.out === "from-file", r.out);
 
+    // Each script keeps its own function scope on every engine (camoufox runs
+    // page-world init scripts at global scope unless browse wraps them).
+    browse("init", "const scoped = 'a'; window.__scopeA = scoped");
+    browse("init", "const scoped = 'b'; window.__scopeB = scoped; return");
+    browse("goto", `${URL_BASE}/lab`);
+    r = browse("eval", "[window.__scopeA, window.__scopeB].join()");
+    check("each script keeps its own scope (a repeated const, a return)", r.out === "a,b", `code ${r.code} ${r.out} ${r.err}`);
+
     r = browse("init", "--clear");
-    check("--clear reports how many went", r.code === 0 && /cleared 2 init scripts/.test(r.out), `code ${r.code} ${r.out}`);
+    check("--clear reports how many went", r.code === 0 && /cleared 4 init scripts/.test(r.out), `code ${r.code} ${r.out}`);
     browse("goto", `${URL_BASE}/lab`);
     r = browse("text", "#seed");
     check("a cleared init script really stops running", r.out === "none", r.out);
@@ -294,23 +302,12 @@ try {
 
     // Deterministic history: /lab is entered from /ui, so back and forward both
     // have somewhere to go before the "nowhere to go" case is asked for.
-    // CAMOUFOX: this firefox build ignores history navigation entirely - even an
-    // in-page `history.back()` leaves the url where it was, with history.length
-    // 5 - so back/forward CANNOT work there and the command now says so instead
-    // of reporting a move that never happened.
     browse("goto", `${URL_BASE}/lab`);
-    if (ENGINE === "camoufox") {
-      r = browse("goBack");
-      check("camoufox: goBack fails loudly rather than claiming it moved",
-        r.code === 1 && /did not move/.test(r.err) && /goto/.test(r.err), `code ${r.code} ${r.out} ${r.err}`);
-      browse("goto", `${URL_BASE}/ui`);
-    } else {
-      r = browse("goBack");
-      check("goBack with somewhere to go works", r.code === 0 && /ok - /.test(r.out), `code ${r.code} ${r.out} ${r.err}`);
+    r = browse("goBack");
+    check("goBack with somewhere to go works", r.code === 0 && /ok - .*\/ui/.test(r.out), `code ${r.code} ${r.out} ${r.err}`);
 
-      r = browse("goForward");
-      check("goForward with somewhere to go works", r.code === 0 && /ok - /.test(r.out), `code ${r.code} ${r.out} ${r.err}`);
-    }
+    r = browse("goForward");
+    check("goForward with somewhere to go works", r.code === 0 && /ok - .*\/lab/.test(r.out), `code ${r.code} ${r.out} ${r.err}`);
 
     r = browse("goForward");
     check("goForward with nowhere to go FAILS instead of reporting ok",

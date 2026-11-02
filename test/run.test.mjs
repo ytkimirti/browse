@@ -154,6 +154,12 @@ try {
   r = browse("run", "JSON.parse(await page.locator('#out').textContent()).user.id");
   check("...and the page got the rewritten response", r.out === "42",
     `${show(r)}\nreload/wait: ${reloaded.map(show).join("\n")}\nnet: ${show(browse("net", "api/user", "--full"))}`);
+  // eval reads the page's own globals on either engine: camoufox evaluates in
+  // an isolated world unless the script carries its `mw:` prefix.
+  r = browse("eval", "window.__r.user.id");
+  check("eval reads a page global", r.code === 0 && r.out === "42", show(r));
+  r = browse("eval", "await Promise.resolve(window.__r.user.id + 1)");
+  check("...awaited too", r.code === 0 && r.out === "43", show(r));
   browse("run", "await context.unroute('**/api/user')");
 
   r = browse("run", "globalThis.__kept = 7");

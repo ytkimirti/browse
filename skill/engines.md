@@ -9,12 +9,8 @@ An explicit engine or a named profile must keep that identity; browse fails
 startup when it cannot. Check `browse help launch` for engine selection and `browse help setup` for setup.
 
 Reach for `--chromium` when you need `browse emulate tz= locale= cpu= net=`
-or `cdp()` inside `run` (both CDP-only), a `.pdf`
-(`page.pdf()` is Chromium-only), or **`goBack`/`goForward`** — this camoufox
-build ignores history navigation completely (even an in-page `history.back()`
-leaves the url where it was), so browse fails those commands there instead of
-reporting a move that never happened. Navigate with `goto <url>` under camoufox.
-All of these raise a clear error rather than a Playwright stack trace.
+or `cdp()` inside `run` (both CDP-only), or a `.pdf` (`page.pdf()` is
+Chromium-only). These raise a clear error rather than a Playwright stack trace.
 
 The cursor and keystroke overlays are on under camoufox too, so a demo records
 the same on either engine. They are scripts injected into every page, though, and
@@ -22,6 +18,12 @@ on a bot-walled site that is the difference between clearing the challenge and
 sitting on it forever: on a stealth run pass `--no-cursor --no-keylog`. (Camoufox
 paints its own red debug pointer; browse turns that off, since it draws the real
 macOS one itself.)
+
+`eval` and `init` run in the page's own world on camoufox, as on Chromium, so
+they see and patch what the site sees. A page that hooks built-ins can watch
+that code run; on a stealth run prefer commands, and `snapshot`/`text` for
+reads. browse's own overlays stay in camoufox's isolated world, which is where
+`page.evaluate` inside `run` lands (`browse help run`).
 
 ## Log in on the engine you will drive with
 
@@ -35,12 +37,12 @@ holds the login.
 
 ## Setup (one time)
 
-`uv tool install camoufox`, then
+`uv tool install -U camoufox` (0.5.9 or newer), then
 `~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch`, then
 `browse setup`.
 
-Camoufox is built against a specific Playwright (0.5.4 → 1.60.0) and its Firefox
-speaks that exact protocol, so browse loads Firefox from a pinned
+Camoufox's Firefox speaks the protocol of one specific Playwright (1.60.0, still
+true of 0.5.9's build), so browse loads Firefox from a pinned
 `playwright-core@1.60.0` in `~/.browse/camoufox-pw` rather than the newer one it
 uses for Chromium. That third step installs the pinned copy (the launcher also
 installs it on its own the first time it sees camoufox).

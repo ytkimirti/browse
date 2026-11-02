@@ -17,9 +17,10 @@ try{
   const html='<body style="margin:0;background:navy"><canvas id="c" width="640" height="480"></canvas><button id="target" style="position:fixed;right:0;bottom:0">Target</button><script>let n=0;function frame(){const x=c.getContext("2d");x.fillStyle="navy";x.fillRect(0,0,640,480);x.fillStyle="white";x.font="80px monospace";x.fillText(String(n++),50,100);window.animation=requestAnimationFrame(frame)}frame()</script>';
   let r=b('--viewport','640x480','open','data:text/html,'+encodeURIComponent(html));check('recorded browser starts',r.code===0,r.err);if(r.code)throw Error(r.err);
   r=b('eval','new Promise(resolve => setTimeout(resolve, 2200))');check('animation advances in real time',r.code===0,r.err);
-  r=b('eval','window.__realMove=window.__browseCursor.moveTo;window.__browseCursor.moveTo=(x,y,ms)=>{window.__moveMs=ms;return window.__realMove(x,y,ms)}');
+  // The cursor overlay lives in camoufox's isolated world, where page.evaluate runs.
+  r=b('run','await page.evaluate("window.__realMove=window.__browseCursor.moveTo;window.__browseCursor.moveTo=(x,y,ms)=>{window.__moveMs=ms;return window.__realMove(x,y,ms)}")');
   r=b('click','#target');check('cursor action succeeds',r.code===0,r.err);
-  check('cursor glide uses faster 120ms default',b('eval','window.__moveMs').out.trim()==='120');
+  check('cursor glide uses faster 120ms default',b('run','await page.evaluate("window.__moveMs")').out.trim()==='120');
   r=b('speed','10');check('real-time recording rejects speed edits',r.code===1&&r.err.includes('real-time'),r.err);
   r=b('eval','cancelAnimationFrame(window.animation);new Promise(resolve=>setTimeout(resolve,3100))');check('static interval completes',r.code===0,r.err);
   r=b('eval','document.body.innerHTML="";document.body.style.background="white";new Promise(resolve=>setTimeout(resolve,3100))');check('blank tail completes',r.code===0,r.err);

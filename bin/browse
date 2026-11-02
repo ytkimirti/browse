@@ -115,6 +115,12 @@ if [[ "$CMD" == "setup" && ( -n "$REMOTE_SEEN" || -n "${BROWSE_REMOTE:-}" ) ]]; 
 fi
 
 # Is camoufox (the optional stealth engine) actually installed on this machine?
+# The same pythons browse.mjs launches it through, in its order.
+camoufox_pythons() {
+  [[ -n "${BROWSE_CAMOUFOX_PYTHON:-}" ]] && echo "$BROWSE_CAMOUFOX_PYTHON"
+  echo "$HOME/.local/share/uv/tools/camoufox/bin/python"
+  echo python3
+}
 have_camoufox() {
   [[ -x "$HOME/.local/share/uv/tools/camoufox/bin/python" ]] && return 0
   python3 -c 'import camoufox' >/dev/null 2>&1
@@ -284,7 +290,21 @@ if [[ "$CMD" == "setup" ]]; then
     install_main
     echo "browse: ✓ playwright $PW_VERSION + chromium"
   fi
-  if have_camoufox; then
+  # Before 0.5.9 camoufox drew fingerprints with browserforge and had no
+  # camoufox.fingerprints.Screen, which browse launches with: an older install
+  # cannot start.
+  camou_py=""
+  while read -r py; do
+    "$py" -c 'import camoufox' >/dev/null 2>&1 || continue
+    [[ -z "$camou_py" ]] && camou_py="$py"
+    "$py" -c 'from camoufox.fingerprints import Screen' >/dev/null 2>&1 && { camou_py=""; break; }
+  done < <(camoufox_pythons)
+  if [[ -n "$camou_py" ]]; then
+    echo "browse: ! camoufox in $camou_py is older than 0.5.9, which browse needs. Upgrade it"
+    echo "browse:   (uv tool install -U camoufox, or pip install -U camoufox for that python), then:"
+    echo "browse:     $camou_py -m camoufox fetch"
+    echo "browse:   and re-run 'browse setup'."
+  elif have_camoufox; then
     if camoufox_pw_ready; then
       echo "browse: ✓ camoufox stealth engine ready (video recording patched in)"
     else
@@ -301,7 +321,7 @@ if [[ "$CMD" == "setup" ]]; then
   else
     echo "browse: • camoufox not installed — the default engine will be chromium."
     echo "browse:   For headless bot-wall bypass:"
-    echo "browse:     uv tool install camoufox"
+    echo "browse:     uv tool install -U camoufox"
     echo "browse:     ~/.local/share/uv/tools/camoufox/bin/python -m camoufox fetch"
     echo "browse:   then re-run 'browse setup' to link it."
   fi

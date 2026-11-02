@@ -248,6 +248,10 @@ http.createServer((req, res) => {
     res.writeHead(200, { "content-type": "text/html" });
     return res.end(n < 10 ? `<script>setTimeout(()=>location.replace('/auth-cycle?n=${n + 1}'),100)</script>` : "<p id=cycle-done>Stopped</p>");
   }
+  // The test reads these with fetch between spawnSync calls, which block its
+  // event loop past this server's keep-alive timeout: a pooled socket would be
+  // reused after this side closed it ("other side closed"). Never pool them.
+  if (url === "/__hits" || url === "/__reset") res.setHeader("connection", "close");
   if (url === "/__hits") return json(res, hits);
   if (url === "/__reset") { for (const k of Object.keys(hits)) hits[k] = 0; return json(res, hits); }
   if (url === "/api/user") { hits.user++; return json(res, { id: 99, name: "real-user" }); }

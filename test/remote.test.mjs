@@ -422,7 +422,7 @@ if (!REMOTE_HOST) {
     check("a default-engine remote session opens", r.code === 0, `${r.code} ${r.err}`);
     check("…having fallen back to chromium (no camoufox on a server)",
       /camoufox not installed/.test(r.err), r.err);
-    r = browseRemote("-s", `${SESSION}-fb`, "eval", OVERLAYS);
+    r = browseRemote("-s", `${SESSION}-fb`, "run", `await page.evaluate('${OVERLAYS}')`);
     check("…and the fallback keeps the cursor AND keystroke overlays",
       r.code === 0 && /\[true,true\]/.test(r.out.replace(/\s/g, "")), `${r.code} ${r.out}`);
   } finally {
@@ -438,7 +438,7 @@ if (!REMOTE_HOST) {
     let r = browseRemoteEnv({ BROWSE_CURSOR: "0", BROWSE_VIEWPORT: "640x480" },
       "-s", `${SESSION}-env`, "open", "https://example.com");
     check("a remote session carrying env-only knobs opens", r.code === 0, `${r.code} ${r.err}`);
-    r = browseRemote("-s", `${SESSION}-env`, "eval", OVERLAYS);
+    r = browseRemote("-s", `${SESSION}-env`, "run", `await page.evaluate('${OVERLAYS}')`);
     check("BROWSE_CURSOR=0 reaches the remote daemon",
       r.code === 0 && /\[false,true\]/.test(r.out.replace(/\s/g, "")), `${r.code} ${r.out}`);
     r = browseRemote("-s", `${SESSION}-env`, "eval", "[innerWidth, innerHeight].join('x')");
