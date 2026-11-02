@@ -430,7 +430,7 @@ const APP_DEFAULT = process.env.BROWSE_APP_URL || "http://127.0.0.1:3000";
 // Recording viewport. Defaults to 1280x800 (16:10) — taller than 16:9 so dev
 // dashboards with a fixed-height body don't clip off the bottom of the frame.
 // Override with BROWSE_VIEWPORT="WxH", or BROWSE_WIDTH / BROWSE_HEIGHT.
-const VIEWPORT = (() => {
+let VIEWPORT = (() => {
   const combined = /^\s*(\d+)\s*[x×,]\s*(\d+)\s*$/.exec(process.env.BROWSE_VIEWPORT || "");
   const base = combined ? { width: +combined[1], height: +combined[2] } : { width: 1280, height: 800 };
   const w = Number(process.env.BROWSE_WIDTH);
@@ -440,6 +440,24 @@ const VIEWPORT = (() => {
     height: Number.isFinite(h) && h > 0 ? h : base.height,
   };
 })();
+/** A headed window is for a person to look at, so with no size asked for it
+ *  fills the screen it opens on instead of a 1280x800 box (under half of a
+ *  large display). macOS only: NSScreen.mainScreen is the screen with the key
+ *  window, which is where a new browser window lands. The height leaves room
+ *  for the browser's own toolbar (Playwright adds it to the viewport when it
+ *  sizes a headed Chromium window). Null when it cannot tell. */
+function headfulScreenViewport() {
+  if (process.platform !== "darwin") return null;
+  if (["BROWSE_VIEWPORT", "BROWSE_WIDTH", "BROWSE_HEIGHT"].some((k) => process.env[k])) return null;
+  try {
+    const r = spawnSync("osascript", ["-l", "JavaScript", "-e",
+      'ObjC.import("AppKit"); var f = $.NSScreen.mainScreen.visibleFrame; JSON.stringify([f.size.width, f.size.height])'],
+      { encoding: "utf8", timeout: 5000 });
+    const [w, h] = JSON.parse(r.stdout || "null") || [];
+    if (!(w >= 800 && h >= 600)) return null;
+    return { width: Math.floor(w) - 2, height: Math.floor(h) - 130 };
+  } catch { return null; }
+}
 // Locale the browser reports. Unset, chromium takes the HOST's, which makes two
 // problems: the same page records different date and number formatting depending
 // on which machine drove it, and a host with only a POSIX locale (a bare Linux
@@ -1835,8 +1853,10 @@ naming each value that differs):
                                     the current page. close disconnects, retaining browser and tabs.
                                     Overlays are off; init, middleware, emulate and state --load are
                                     unavailable on a borrowed context. Screenshots and logs still work.
-  --headful / --headless            show the browser window while driving it (still records)
-  --camoufox / --chromium           pick the engine (default camoufox — see below)
+  --headful / --headless            show the browser window while driving it (still records).
+                                    Headed, the engine defaults to chromium and, on macOS, the
+                                    window fills the screen it opens on unless --viewport is given
+  --camoufox / --chromium           pick the engine (default camoufox headless, chromium headed — see below)
   --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
                                     use to RECORD phone-shaped; 'browse emulate viewport=' only
                                     resizes the page inside an already-fixed frame
@@ -3925,6 +3945,11 @@ async function client(argv) {
   if (cmd === "screenshot") ({ argv, shotDest } = screenshotDest(argv));
   const inferred = live ? null : inferEngine();
   if (inferred) LAUNCH_ENV.BROWSE_ENGINE = inferred;
+  // A headed window is for a person: it opens as Chromium unless an engine was
+  // named (or a profile's last-used one applies). Camoufox stays the headless
+  // default, where its fingerprinting earns its keep.
+  if (!live && !LAUNCH_ENV.BROWSE_ENGINE && !process.env.BROWSE_ENGINE && !CDP_ENDPOINT && !LAUNCH_ENV.BROWSE_CDP
+    && (LAUNCH_ENV.BROWSE_HEADFUL ?? process.env.BROWSE_HEADFUL) === "1") LAUNCH_ENV.BROWSE_ENGINE = "chromium";
   const d = await ensureDaemon(0, NEEDS_PAGE.has(cmd) ? cmd : null);
   // A daemon this client did not start (another client won the start-up race,
   // or a remote one found by probing its port) is as live as one findDaemon saw,
@@ -4966,6 +4991,10 @@ async function daemon() {
   const fallback = (note, detail) => { engineNote = note; logDaemon(detail ? `${note} :: ${detail}` : note); };
   validateCdpLaunch(process.env, PROFILE);
   validateDeviceScale(process.env);
+  if (HEADFUL && !CDP_ENDPOINT) {
+    const fit = headfulScreenViewport();
+    if (fit) { VIEWPORT = fit; logDaemon(`headed window sized to the screen: ${fit.width}x${fit.height}`); }
+  }
   let engine = CDP_ENDPOINT ? "chromium" : ENGINE, camouOpts = null;
   const requireEngine = !!PROFILE || !!process.env.BROWSE_ENGINE;
   if (engine === "camoufox") {

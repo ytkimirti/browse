@@ -1,6 +1,7 @@
 # Engines
 
-`--camoufox` is the **default**. Camoufox is a Firefox build with fingerprint
+`--camoufox` is the **default** for headless sessions; a `--headful` window
+opens as Chromium unless you name an engine, since a person is driving it. Camoufox is a Firefox build with fingerprint
 patches applied in C++; it clears Cloudflare's JS managed challenge *headlessly*,
 which Chromium cannot do at all: its new-headless is handed an unsolved
 `cf_clearance`, and headed Chrome can't be hidden on macOS because
