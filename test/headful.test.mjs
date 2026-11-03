@@ -17,12 +17,11 @@ symlinkSync(join(homedir(), ".browse", "camoufox-pw"), join(HOME, "camoufox-pw")
 const SESSION = `headful-${process.pid}`;
 const BASE_ENV = { ...process.env, BROWSE_HOME: HOME, BROWSE_PW_BASE: join(homedir(), ".browse", "package.json"), BROWSE_HEADFUL: "1", BROWSE_VIDEO: "0" };
 delete BASE_ENV.BROWSE_ENGINE; delete BASE_ENV.BROWSE_VIEWPORT; delete BASE_ENV.BROWSE_WIDTH; delete BASE_ENV.BROWSE_HEIGHT; delete BASE_ENV.BROWSE_PROFILE;
-// The camoufox check pins 1280x800: unpinned, a headed window on macOS fills the screen.
 const runAs = (session, env, ...args) => {
   const r = spawnSync(process.execPath, [BIN, "-s", session, ...args], { encoding: "utf8", timeout: 180000, env: { ...BASE_ENV, ...env } });
   return { code: r.status, out: (r.stdout || "").trim(), err: (r.stderr || "").trim() };
 };
-const run = (...args) => runAs(SESSION, { BROWSE_ENGINE: "camoufox", BROWSE_VIEWPORT: "1280x800" }, ...args);
+const run = (...args) => runAs(SESSION, { BROWSE_ENGINE: "camoufox" }, ...args);
 const CHROME = `${SESSION}-chromium`;
 let failed = 0;
 const check = (name, ok, detail = "") => {
@@ -48,11 +47,7 @@ try {
   r = runAs(CHROME, {}, "eval", "JSON.stringify([innerWidth,innerHeight])");
   g = null;
   try { g = JSON.parse(r.out); } catch { /* assertion below names output */ }
-  // macOS: sized from the screen (every current Mac's is wider than 1280 points), even for the encoder.
-  check(process.platform === "darwin" ? "the viewport is sized from the screen, not 1280x800" : "the window holds the default viewport",
-    r.code === 0 && (process.platform === "darwin"
-      ? g?.[0] > 1280 && g[0] % 2 === 0 && g[1] % 2 === 0
-      : g?.[0] === 1280 && g?.[1] === 800), r.out || r.err);
+  check("the window holds the default viewport", r.code === 0 && g?.[0] === 1280 && g?.[1] === 800, r.out || r.err);
   r = runAs(CHROME, {}, "close");
   check("close succeeds, exit 0", r.code === 0, `${r.code} ${r.err}`);
 } finally {

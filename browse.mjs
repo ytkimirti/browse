@@ -430,7 +430,7 @@ const APP_DEFAULT = process.env.BROWSE_APP_URL || "http://127.0.0.1:3000";
 // Recording viewport. Defaults to 1280x800 (16:10) — taller than 16:9 so dev
 // dashboards with a fixed-height body don't clip off the bottom of the frame.
 // Override with BROWSE_VIEWPORT="WxH", or BROWSE_WIDTH / BROWSE_HEIGHT.
-let VIEWPORT = (() => {
+const VIEWPORT = (() => {
   const combined = /^\s*(\d+)\s*[x×,]\s*(\d+)\s*$/.exec(process.env.BROWSE_VIEWPORT || "");
   const base = combined ? { width: +combined[1], height: +combined[2] } : { width: 1280, height: 800 };
   const w = Number(process.env.BROWSE_WIDTH);
@@ -440,29 +440,6 @@ let VIEWPORT = (() => {
     height: Number.isFinite(h) && h > 0 ? h : base.height,
   };
 })();
-/** A headed window is for a person to look at, so with no size asked for it
- *  fills the screen it opens on instead of a 1280x800 box (under half of a
- *  large display). macOS only: NSScreen.mainScreen is the screen with the key
- *  window, which is where a new browser window lands. Camoufox takes this as
- *  its outer window size; Chromium's viewport leaves room for the toolbar
- *  Playwright adds when it sizes a headed window (80px on macOS, 46 more for a
- *  persistent context) and for the window's offset. Even sizes: the mp4
- *  encoder refuses odd ones. */
-function headfulScreenViewport(engine, persistent) {
-  if (process.platform !== "darwin") return null;
-  if (["BROWSE_VIEWPORT", "BROWSE_WIDTH", "BROWSE_HEIGHT"].some((k) => process.env[k])) return null;
-  try {
-    const r = spawnSync("osascript", ["-l", "JavaScript", "-e",
-      'ObjC.import("AppKit"); var f = $.NSScreen.mainScreen.visibleFrame; JSON.stringify([f.size.width, f.size.height])'],
-      { encoding: "utf8", timeout: 5000 });
-    const [w, h] = JSON.parse(r.stdout || "null") || [];
-    if (!(w >= 800 && h >= 600)) return null;
-    // Chromium keeps the origin it picked (about 10pt in from the work area's
-    // corner), so leave that margin too or the window runs under the Dock.
-    const [dw, dh] = engine === "camoufox" ? [0, 0] : [2 + 20, 80 + (persistent ? 46 : 0) + 20];
-    return { width: (Math.floor(w) - dw) & ~1, height: (Math.floor(h) - dh) & ~1 };
-  } catch { return null; }
-}
 // Locale the browser reports. Unset, chromium takes the HOST's, which makes two
 // problems: the same page records different date and number formatting depending
 // on which machine drove it, and a host with only a POSIX locale (a bare Linux
@@ -1859,9 +1836,7 @@ naming each value that differs):
                                     Overlays are off; init, middleware, emulate and state --load are
                                     unavailable on a borrowed context. Screenshots and logs still work.
   --headful / --headless            show the browser window while driving it (still records).
-                                    Headed with no profile, the engine defaults to chromium; on
-                                    macOS the window fills the screen it opens on unless --viewport
-                                    is given
+                                    Headed with no profile, the engine defaults to chromium
   --camoufox / --chromium           pick the engine (default camoufox; chromium headed — see below)
   --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
                                     use to RECORD phone-shaped; 'browse emulate viewport=' only
@@ -4999,10 +4974,6 @@ async function daemon() {
   validateCdpLaunch(process.env, PROFILE);
   validateDeviceScale(process.env);
   let engine = CDP_ENDPOINT ? "chromium" : ENGINE, camouOpts = null;
-  if (HEADFUL && !CDP_ENDPOINT) {
-    const fit = headfulScreenViewport(engine, !!PROFILE);
-    if (fit) { VIEWPORT = fit; logDaemon(`headed window sized to the screen: ${fit.width}x${fit.height}`); }
-  }
   const requireEngine = !!PROFILE || !!process.env.BROWSE_ENGINE;
   if (engine === "camoufox") {
     camouOpts = camoufoxLaunchOptions();
