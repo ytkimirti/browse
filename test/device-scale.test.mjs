@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const out = mkdtempSync(join(tmpdir(), 'browse-density-'));
 const session = `density-${process.pid}`;
-const env = { ...process.env, BROWSE_OUT: out, BROWSE_ENGINE: 'chromium', BROWSE_HEADFUL: '0' };
+const env = { ...process.env, BROWSE_OUT: out, BROWSE_ENGINE: 'chromium', BROWSE_HEADFUL: '0', BROWSE_VIDEO: '1' };
 delete env.BROWSE_DEVICE_SCALE;
 const run = (args, extra = {}) => spawnSync(join(root, 'bin/browse'), ['-s', session, ...args], {
   env: { ...env, ...extra }, encoding: 'utf8', timeout: 60000,

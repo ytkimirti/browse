@@ -12,7 +12,7 @@ let failures = 0, checks = 0;
 function check(name, ok, detail = '') { checks++; console.log(`${ok ? 'ok' : 'FAIL'} ${name}${!ok ? `: ${detail}` : ''}`); if (!ok) failures++; }
 function browse(...args) {
   const r = spawnSync(join(root, 'bin/browse'), ['-s', session, ...args], { encoding: 'utf8', timeout: 180000,
-    env: { ...process.env, BROWSE_ENGINE: engine, BROWSE_OUT: out, BROWSE_IDLE_MS: '120000', BROWSE_TYPE_DELAY: '0', BROWSE_IDLE_MODE: 'keep' } });
+    env: { ...process.env, BROWSE_ENGINE: engine, BROWSE_OUT: out, BROWSE_IDLE_MS: '120000', BROWSE_TYPE_DELAY: '0', BROWSE_IDLE_MODE: 'keep', BROWSE_VIDEO: '1' } });
   return { code: r.status, text: `${r.stdout || ''}${r.stderr || ''}` };
 }
 const doc = (body) => `data:text/html,${encodeURIComponent(body)}`;

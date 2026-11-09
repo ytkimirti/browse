@@ -44,6 +44,7 @@ function browse(...args) {
       BROWSE_ENGINE: ENGINE,
       BROWSE_OUT: OUT,
       BROWSE_HEADFUL: "0",
+      BROWSE_VIDEO: "1",
       // If this run is killed before `finally`, the orphaned daemon holds a
       // headless browser for BROWSE_IDLE_MS. The 30min default is far too long
       // to leave lying around on a dev machine.

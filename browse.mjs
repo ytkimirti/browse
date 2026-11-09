@@ -687,12 +687,11 @@ const OUTPUT_FPS = (() => {
 // the session differently later - that is one ffmpeg call off the surviving webm.
 const REALTIME = process.env.BROWSE_REALTIME === "1";
 const KEEP_WEBM = process.env.BROWSE_KEEP_WEBM === "1";
-// Recording is on by default and is most of what browse is for. Off (BROWSE_VIDEO=0
-// / `browse --no-video`) is for the runs that only READ - assert a count, mint a
-// token, export storage state - where the browser-side encode and the ffmpeg
-// finalize buy a file nobody will watch. Screenshots, the transcript and the
-// network log are unaffected; only the video is.
-const VIDEO_ON = process.env.BROWSE_VIDEO !== "0";
+// Video is opt-in (BROWSE_VIDEO=1 / `browse --video`): the browser-side encode
+// and its ffmpeg cost about a core per open session, idle or not, and most runs
+// are checks nobody watches. Screenshots, the transcript and the network log
+// are recorded either way; only the video depends on this.
+const VIDEO_ON = process.env.BROWSE_VIDEO === "1";
 const CDP_ENDPOINT = process.env.BROWSE_CDP || "";
 // Chromium rewrites common new-tab links to stay in the current video flow.
 // Real popups remain opt-in footage; deliberate tabs are composed at close.
@@ -1503,22 +1502,22 @@ function popupSameTabInitScript() {
   }, true);
 }
 
-const HELP = `browse: drive a real browser with automatic session recording.
+const HELP = `browse: drive a real browser, logging every step (video with --video).
 
 Prefer 'ai task' for multistep browser goals: open the starting URL, give the full
-goal in one task, then close to save the recording. Browse observes the page,
+goal in one task, then close to save the session. Browse observes the page,
 asks TypeSafe for the next action, executes it and repeats without caller turns.
 Describe the outcome and supply text to type; no page inspection or scripted
 click sequence is needed from the calling agent. Read the returned outcome:
 a stopped task is partial progress. Inspect its recorded steps before resuming.
 Use individual commands for a known selector, an exact assertion, debugging,
-or an interaction outside the task action set. The browser + recording start
+or an interaction outside the task action set. The browser starts
 on your first command; reads and in-page actions (url, text, snapshot, click…)
 never start one and fail with no live session, so open first. TypeSafe
 credentials: see 'browse help --env'.
 
 Navigate / act (selectors are Playwright strings: text=, role=button[name="…"], css, xpath=…):
-  browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser + recording
+  browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser (+ video with --video)
   browse goto <url>                 navigate. open/goto/reload/goBack/goForward take --timeout <ms>
                                     (default 20000, and the client waits it out) — raise it for a dev
                                     server compiling a route on first hit. goBack/goForward FAIL when
@@ -1783,12 +1782,12 @@ Misc:
                                     (~reading time); [--for <sec>] [--sticky] [--color yellow|blue|green|red|neutral]
                                     [--pos top|bottom]; --clear removes a sticky one
   browse dir                        print THIS session's artifacts dir
-  browse close [--gif] [--keep-raw]  end the session, finalize the recording, print the mp4 path.
+  browse close [--gif] [--keep-raw]  end the session, finalize the video (with --video), print the paths.
                                     --gif also writes a looping recording.gif; --keep-raw keeps the
                                     raw .webm (BROWSE_KEEP_WEBM=1 too) so you can re-cut it yourself
 
 Parallel sessions (e.g. one browser per agent — fully isolated):
-  browse -s <name> <cmd> …          run <cmd> against the named session's own browser + recording.
+  browse -s <name> <cmd> …          run <cmd> against the named session's own browser.
                                     PREFER passing your own name: pick one per task (-s checkout-bug)
                                     on the first command and keep it on EVERY command incl. close.
                                     BROWSE_SESSION=<name> works too. With no -s the session name is
@@ -1830,12 +1829,12 @@ Launch flags (how the browser STARTS — put them before the command that opens 
 session; a live session accepts flags that match how it started and refuses the rest,
 naming each value that differs):
   --cdp <endpoint>                  attach to an existing Chromium browser over http(s)/ws(s).
-                                    Requires --no-video; existing contexts cannot start video capture.
+                                    Incompatible with --video; existing contexts cannot start video capture.
                                     No profile or browser-setting launch overrides. Bare open keeps
                                     the current page. close disconnects, retaining browser and tabs.
                                     Overlays are off; init, middleware, emulate and state --load are
                                     unavailable on a borrowed context. Screenshots and logs still work.
-  --headful / --headless            show the browser window while driving it (still records).
+  --headful / --headless            show the browser window while driving it.
                                     Headed with no profile, the engine defaults to chromium
   --camoufox / --chromium           pick the engine (default camoufox; chromium headed — see below)
   --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
@@ -1852,11 +1851,10 @@ naming each value that differs):
   --popups / --no-popups            let target=_blank open REAL popups, vs rewriting them into
                                     same-tab navigation so the recording stays one file
   --net / --no-net                  network logging (default on — see 'browse net')
-  --video / --no-video              record the session (default on — it is the point of the tool).
-                                    --no-video is for a run that only READS the page (assert a
-                                    count, mint a token, export state): no browser-side encode, no
-                                    ffmpeg finalize, no mp4. Screenshots, transcript.md and the
-                                    network log are unaffected
+  --video / --no-video              record a video, recording.mp4 (default off). Costs about a
+                                    core per open session, idle or not, plus an ffmpeg finalize
+                                    at close. Screenshots, transcript.md and the network log are
+                                    written either way
   --type-delay <ms>                 per-keystroke delay for fill/type (default 45, 0 = paste)
   --idle <ms>                       auto-close after this long idle (default 1800000, 0 = never)
   e.g. browse --headful --chromium -p google open https://accounts.google.com
@@ -1883,8 +1881,8 @@ Persistent profile (keep cookies + localStorage across close→open, e.g. stay l
   separate logins under one name. Log in on the engine you will drive with. A local -p with
   no engine flag (and no BROWSE_ENGINE) starts on the engine that profile was last used with.
 
-Artifacts (transcript.md, step screenshots, video) land in a per-session dir
-under ${join(BROWSE_HOME, "sessions")}/. On close, ffmpeg (if installed) trims the
+Artifacts (transcript.md, step screenshots, and the --video recording) land in a per-session dir
+under ${join(BROWSE_HOME, "sessions")}/. With --video, on close ffmpeg (if installed) trims the
 blank white lead-in and CUTS static "thinking" dead air (>= 2s with no on-screen
 change) out of the clip (BROWSE_REALTIME=1 preserves the entire unedited timeline;
 BROWSE_IDLE_MODE=speed keeps+fast-forwards static stretches instead,
@@ -1902,7 +1900,7 @@ ffmpeg is missing/fails, or with --keep-raw / BROWSE_KEEP_WEBM=1).`;
 const ENV_HELP = `browse — environment variables
 
 Every launch flag is also an env var (a flag on the command WINS over the env):
-  BROWSE_CDP=<endpoint>    --cdp (requires BROWSE_VIDEO=0; Chromium only)
+  BROWSE_CDP=<endpoint>    --cdp (no BROWSE_VIDEO=1; Chromium only)
   BROWSE_HEADFUL=1         --headful            BROWSE_ENGINE=camoufox|chromium  --camoufox/--chromium
   BROWSE_VIEWPORT=WxH      --viewport           BROWSE_CURSOR=0|1                --no-cursor/--cursor
   BROWSE_DEVICE_SCALE=1..3 --device-scale (Chromium; default 2, Camoufox stays at 1)
@@ -3426,7 +3424,7 @@ function validateDeviceScale(env) {
 function validateCdpLaunch(env, profile) {
   if (!env.BROWSE_CDP) return;
   if (!LAUNCH_OPTS["--cdp"].check(env.BROWSE_CDP)) throw new Error("--cdp wants an http(s) or ws(s) browser endpoint (endpoint hidden)");
-  if (env.BROWSE_VIDEO !== "0") throw new Error("--cdp requires explicit --no-video: an existing context cannot start Playwright video recording");
+  if (env.BROWSE_VIDEO === "1") throw new Error("--cdp cannot take --video: an existing context cannot start Playwright video recording");
   if (profile) throw new Error("--cdp cannot use a local persistent profile");
   if (env.BROWSE_ENGINE && env.BROWSE_ENGINE !== "chromium") throw new Error("--cdp requires Chromium; remove --camoufox");
   if (["BROWSE_HEADFUL", "BROWSE_VIEWPORT", "BROWSE_DEVICE_SCALE", "BROWSE_CURSOR", "BROWSE_KEYLOG", "BROWSE_POPUPS"].some((key) => env[key] !== undefined))
@@ -6669,11 +6667,11 @@ async function daemon() {
       });
     }
     if (cmd === "close") {
-      // Both flags are about a video. Accepting them on a --no-video session and
+      // Both flags are about a video. Accepting them on a session without one and
       // doing nothing is the silent drop every other flag check here rejects.
       if (!VIDEO_ON) {
         const dead = ["--gif", "--keep-raw"].find((f) => args.includes(f));
-        if (dead) throw new Error(`close: ${dead} is about the recording, and this session was started with --no-video`);
+        if (dead) throw new Error(`close: ${dead} is about the video, and this session was started without --video`);
       }
       return { __close: true, gif: args.includes("--gif"), keepRaw: KEEP_WEBM || args.includes("--keep-raw") };
     }
@@ -7451,7 +7449,7 @@ async function daemon() {
         // factor. See finalizeRecording / forcedIntervals.
         // Every mark here annotates a recording. With --no-video there is none, so
         // "speed: 8x from 12.3s" would confirm an effect that cannot exist.
-        if (!VIDEO_ON) throw new Error("speed: this session was started with --no-video, so there is no recording to fast-forward");
+        if (!VIDEO_ON) throw new Error("speed: this session was started without --video, so there is no recording to fast-forward");
         const a = String(args[0] ?? "").trim().toLowerCase();
         const t = (Date.now() - recStartMs) / 1000;
         const open = speedMarks.length && speedMarks[speedMarks.length - 1].factor > 1;
@@ -8187,9 +8185,9 @@ async function daemon() {
               : VIDEO_ON
                 ? "closed - recording flushed (no video captured)"
                 // Not a failure, and it must not read as one: the caller asked
-                // for this with --no-video. Name what IS there instead - and keep
+                // for no video (the default). Name what IS there instead - and keep
                 // the mock disclosure, which is about the SCREENSHOTS too.
-                : `closed - video was off (--no-video), so there is no mp4\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`),
+                : `closed - no video (start with --video for an mp4)\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`),
             ...(lastNotes ? { notes: lastNotes } : {}),
           };
           send(closeReply);

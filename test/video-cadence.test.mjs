@@ -7,7 +7,7 @@ import {recordingSource} from '../scripts/video.mjs';
 const ROOT=dirname(dirname(fileURLToPath(import.meta.url)));
 const dir=mkdtempSync(join(tmpdir(),'browse-cadence-'));
 symlinkSync(join(homedir(),'.browse/camoufox-pw'),join(dir,'camoufox-pw'));
-const env={...process.env,BROWSE_HOME:dir,BROWSE_OUT:join(dir,'out'),BROWSE_PW_BASE:join(homedir(),'.browse/package.json'),BROWSE_SESSION:'cadence',BROWSE_ENGINE:process.env.BROWSE_ENGINE||'chromium',BROWSE_REMOTE:'',BROWSE_PROFILE:'',BROWSE_HEADFUL:'0',BROWSE_VIDEO:'1',BROWSE_REALTIME:'1',BROWSE_KEEP_WEBM:'1',BROWSE_FPS:'30',BROWSE_IDLE_MODE:'cut'};
+const env={...process.env,BROWSE_HOME:dir,BROWSE_OUT:join(dir,'out'),BROWSE_PW_BASE:join(homedir(),'.browse/package.json'),BROWSE_SESSION:'cadence',BROWSE_VIDEO:'1',BROWSE_ENGINE:process.env.BROWSE_ENGINE||'chromium',BROWSE_REMOTE:'',BROWSE_PROFILE:'',BROWSE_HEADFUL:'0',BROWSE_VIDEO:'1',BROWSE_REALTIME:'1',BROWSE_KEEP_WEBM:'1',BROWSE_FPS:'30',BROWSE_IDLE_MODE:'cut'};
 let failed=0,checks=0;
 function check(name,ok,detail=''){checks++;failed+=!ok;console.log(`${ok?'PASS':'FAIL'} ${name}${ok?'':': '+detail}`)}
 function b(...args){const r=spawnSync(process.execPath,[join(ROOT,'browse.mjs'),...args],{env,cwd:dir,encoding:'utf8',timeout:60000});return {code:r.status,out:r.stdout||'',err:r.stderr||''}}

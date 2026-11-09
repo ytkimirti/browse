@@ -1,6 +1,6 @@
 # browse
 
-Drive a real browser one command at a time, and get a video of it.
+Drive a real browser one command at a time, and get a log of it: screenshots, transcript, network, and a video with `--video`.
 
 ```sh
 browse open http://127.0.0.1:3000
@@ -8,11 +8,11 @@ browse click 'text=Sign in'
 browse fill '#email' me@example.com
 browse press '#password' Enter
 browse wait 'text=Welcome'          # also an assertion: non-zero if it never shows
-browse close                        # prints the mp4 path
+browse close                        # prints the session dir
 ```
 
-Run one command, read the result, decide the next. The browser and the recording
-start on the first command and stay alive between them.
+Run one command, read the result, decide the next. The browser starts on the
+first command and stay alive between them.
 
 ## Install
 
@@ -52,7 +52,7 @@ This package has not been published to the npm registry.
 
 ```
 ~/.browse/sessions/<when>/
-  recording.mp4      cursor and keystrokes drawn in, dead air cut
+  recording.mp4      with --video: cursor and keystrokes drawn in, dead air cut
   transcript.md      what was run, what came back
   shots/             a screenshot per step
   network.jsonl      requests, credentials redacted

@@ -34,7 +34,7 @@ function browse(args, suffix='') {
 }
 const endpoint = `http://127.0.0.1:${port}`;
 try {
-  let r = browse(['--cdp', endpoint, 'open'], '-guard'); check('CDP refuses implicit recording', r.code === 1 && /requires explicit --no-video/.test(r.text), r.text);
+  let r = browse(['--cdp', endpoint, '--video', 'open'], '-guard'); check('CDP refuses --video', r.code === 1 && /cannot take --video/.test(r.text), r.text);
   r = browse(['--cdp', endpoint, '--no-video', '--camoufox', 'open'], '-engine'); check('CDP rejects Camoufox', r.code === 1 && /requires Chromium/.test(r.text), r.text);
   r = browse(['--cdp', endpoint, '--no-video', '-p', 'test-cdp', 'open'], '-profile'); check('CDP rejects local profile', r.code === 1 && /persistent profile/.test(r.text), r.text);
   r = browse(['--cdp', endpoint, '--no-video', 'open']); check('attach preserves current page', r.code === 0 && /(?:Owner|Other)/.test(r.text) && /attached/.test(r.text), r.text);

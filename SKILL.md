@@ -1,14 +1,13 @@
 ---
 name: browse
-description: Drive a real, recorded browser step by step with the local `browse` CLI, capturing every session as a video plus transcript, per-step screenshots and a network log. Use when the user wants a video/demo/walkthrough of a web app, wants a UI change verified or a frontend bug reproduced in a real browser, wants a local dev server driven end to end, wants the run recorded on a remote machine or a throwaway box instead of this one, or says "browse".
+description: Drive a real browser step by step with the local `browse` CLI, logging every session as a transcript, per-step screenshots and a network log, plus a video when asked. Use when the user wants a video/demo/walkthrough of a web app, wants a UI change verified or a frontend bug reproduced in a real browser, wants a local dev server driven end to end, wants the run recorded on a remote machine or a throwaway box instead of this one, or says "browse".
 ---
 
-# browse: recorded agentic browsing
+# browse: logged agentic browsing
 
 `browse` (on PATH; source `browse.mjs` in this repo) drives a persistent headless
 browser via a localhost daemon, one browser per session name. Opening a session
-spawns the browser with recording already on; every later command drives the same
-live session.
+spawns the browser; every later command drives the same live session.
 
 **`browse help` is the command and flag surface.** Bare `browse help` is a short
 index; `browse help <command>` (or `browse <command> --help`) prints one command
@@ -50,7 +49,7 @@ and returns the recorded steps and outcome.
    loop over many elements), drop to Playwright code with `run`. It is one
    opaque step with no cursor overlay, so keep actions a viewer should watch on
    the commands, and read the page with `eval`/`snapshot`, not `run`.
-6. **Finish the recording.** Wait for `close` to finish and verify the reported
+6. **Finish the session.** Wait for `close` to finish and verify the reported
    artifacts exist locally before handing them off or deleting the remote.
    A tool returning a running process handle is still working. Preserve the
    full tool result and wait on that handle; printing only its output loses the
@@ -71,7 +70,7 @@ after an action; a successful click only establishes that the browser acted.
 
 ## Start the app before the first command
 
-Recording starts the moment the browser spawns, so never fire `open` at a dead
+Screenshots and any video start the moment the browser spawns, so never fire `open` at a dead
 port. Start the dev server first, redirect its output to a log
 (`bun run dev > /tmp/dev.log 2>&1 &`), and wait until it really listens
 (`until curl -sf http://127.0.0.1:<port> >/dev/null; do sleep 1; done`, checking
@@ -101,18 +100,18 @@ is not blank, connection-refused, or a framework error overlay.
   Repeating matching flags on later commands is fine; one that differs from the
   live session is refused, so a wrong frame size means close and re-open.
 
-## Recording
+## Video
 
-For a quick check ("does X work?"), a `screenshot` plus `errors` is enough; the
-recording need not be the deliverable. A shot you only need to look at can be
-1x (`--scale css`, see help) instead of Retina; step shots already are. When the user wants a demo, or the moving
-interaction is the point, read `skill/recording.md` BEFORE the session starts,
-since the frame size is fixed the moment the browser spawns.
+Pass `--video` on the first command only when the user asks for a video,
+recording, demo or walkthrough (e.g. `/browse video ...`), or the moving
+interaction is the point. Then read `skill/recording.md` BEFORE the session
+starts, since the frame size is fixed the moment the browser spawns, and the
+video cannot be added to a live session later.
 
-A run can also be recorded not at all (`browse help launch`). Reach for
-that only when the session is a pure READ nobody will watch — asserting a count,
-minting a token, exporting state. If there is any chance the user will ask "show
-me" afterwards, keep the recording: it cannot be added later.
+Every other run is a check: step screenshots, a `screenshot` plus `errors`, and
+the transcript are the evidence. A shot you only need to look at can be 1x
+(`--scale css`, see help) instead of Retina; step shots already are. A video
+session holds about a core until `close`, so close it as soon as the work ends.
 
 ## Hand off artifacts
 
@@ -122,7 +121,7 @@ blocked, tell the user promptly and keep the task incomplete until the requested
 coverage is delivered or the user explicitly changes it.
 
 Each session gets `~/.browse/sessions/<timestamp>/` with `transcript.md`,
-`recording.mp4`, `browsed.log`, `network.jsonl`, `console.jsonl`, and auto per-step screenshots
+`recording.mp4` (with `--video`), `browsed.log`, `network.jsonl`, `console.jsonl`, and auto per-step screenshots
 under `shots/` (Read them as images to see what a step looked like). Give the user
 the bare `~/…` path that `close` printed, pasteable straight into their shell.
 
