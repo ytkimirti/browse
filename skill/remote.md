@@ -1,7 +1,7 @@
 # Driving a browser on another machine
 
-`browse --remote <sshhost>` runs the browser, the recording and ffmpeg on
-another machine and copies the artifacts back. Reach for it when the browser is
+`browse --remote <sshhost>` runs the browser (and, with `--video`, the
+recording and ffmpeg) on another machine and copies the artifacts back. Reach for it when the browser is
 the thing you cannot afford locally: RAM, CPU, battery, or a laptop already
 running several agents. `browse help remote` has the flag; `browse help --env` its env vars.
 
@@ -18,7 +18,7 @@ your RAM, or lend it yours with `ssh -R 3000:127.0.0.1:3000 <sshhost>` and keep
 that connection open for the whole session.
 
 Start the server there and confirm it listens *before* the first `browse`
-command, exactly as you would locally: recording starts the moment the browser
+command, exactly as you would locally: screenshots start the moment the browser
 spawns, and pointing it at a dead port records the failure.
 
 ## What to expect
@@ -29,7 +29,7 @@ spawns, and pointing it at a dead port records the failure.
 - **The engine will usually be chromium.** Camoufox is rarely installed on a
   server, and browse falls back and says so. If the site has a bot wall, that
   matters, see `skill/engines.md`.
-- **The mp4 only comes back on `close`.** Kill the session without closing and
+- **With `--video`, the mp4 only comes back on `close`.** Kill the session without closing and
   the recording stays on the remote (browse tells you where). Close it properly.
 - **The finalize runs on the remote's RAM, not yours.** A long session with many
   cuts is the heaviest thing browse does, and on a small machine the kernel can

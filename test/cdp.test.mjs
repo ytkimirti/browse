@@ -37,7 +37,7 @@ try {
   let r = browse(['--cdp', endpoint, '--video', 'open'], '-guard'); check('CDP refuses --video', r.code === 1 && /cannot take --video/.test(r.text), r.text);
   r = browse(['--cdp', endpoint, '--no-video', '--camoufox', 'open'], '-engine'); check('CDP rejects Camoufox', r.code === 1 && /requires Chromium/.test(r.text), r.text);
   r = browse(['--cdp', endpoint, '--no-video', '-p', 'test-cdp', 'open'], '-profile'); check('CDP rejects local profile', r.code === 1 && /persistent profile/.test(r.text), r.text);
-  r = browse(['--cdp', endpoint, '--no-video', 'open']); check('attach preserves current page', r.code === 0 && /(?:Owner|Other)/.test(r.text) && /attached/.test(r.text), r.text);
+  r = browse(['--cdp', endpoint, 'open']); check('attach preserves current page', r.code === 0 && /(?:Owner|Other)/.test(r.text) && /attached/.test(r.text), r.text);
   r = browse(['eval', '`${innerWidth}x${innerHeight}`']); check('attachment preserves viewport', r.code === 0 && /777x555/.test(r.text), r.text);
   r = browse(['target']); check('existing tabs listed', r.code === 0 && /Other/.test(r.text) && /Owner/.test(r.text), r.text);
   const ownerIndex = /^.*?(\d+)  Owner/m.exec(r.text)?.[1]; if (ownerIndex) browse(['target', ownerIndex]);
@@ -49,7 +49,7 @@ try {
   r = browse(['screenshot', 'borrowed']); check('borrowed screenshot works', r.code === 0 && existsSync(join(tmp, 'artifacts', 'borrowed.png')), r.text);
   r = browse(['--cdp', `${endpoint}?token=never-print-me`, '--no-video', 'url']); check('live launch error hides endpoint credentials', r.code === 1 && !/never-print-me/.test(r.text), r.text);
   r = browse(['open', '--cdp', `${endpoint}?token=never-print-me`]); check('misplaced endpoint hides credentials', r.code === 1 && !/never-print-me/.test(r.text), r.text);
-  r = browse(['close']); check('close disconnects', r.code === 0 && /video was off/.test(r.text), r.text);
+  r = browse(['close']); check('close disconnects', r.code === 0 && /closed - no video\n/.test(r.text) && !/--video/.test(r.text), r.text);
   check('CDP lifecycle never installed a local browser', !existsSync(join(tmp, 'no-browser-cache')));
   check('owner pages retained', !page.isClosed() && !other.isClosed());
   check('owner browser usable after disconnect', await page.evaluate('document.title') === 'Owner');

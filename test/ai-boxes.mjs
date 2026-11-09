@@ -52,7 +52,7 @@ async function test(host, index) {
     await box('exec', host, `chmod 600 /workspace/home/browse-ai/typesafe.env && chmod +x /workspace/home/browse-ai/bin/browse && setsid nohup node /workspace/home/browse-ai/${fixtureName} >/tmp/browse-ai-fixture.log 2>&1 </dev/null &`);
     const port = await box('exec', host, "for i in 1 2 3 4 5; do if test -s /tmp/browse-ai-fixture.log; then cat /tmp/browse-ai-fixture.log; exit 0; fi; sleep 1; done; exit 1");
     const match = /PORT (\d+)/.exec(port); if (!match) throw new Error('fixture did not start');
-    expect('open fixture', await browse('--chromium','--viewport','1280x800','open',`http://127.0.0.1:${match[1]}`), r=>r.code === 0);
+    expect('open fixture', await browse('--chromium','--video','--viewport','1280x800','open',`http://127.0.0.1:${match[1]}`), r=>r.code === 0);
     expect('matching runtime build', await browse('version'), r=>r.code === 0 && r.out.includes(localVersion));
     if (taskMode) {
       const goal = 'Open the catalog, open Desk lamp details, choose Express delivery, enter the supplied email, then submit the request.';

@@ -48,7 +48,7 @@ function browse(...args) {
     encoding: "utf8",
     env: {
       ...process.env,
-      BROWSE_ENGINE: ENGINE,
+      BROWSE_ENGINE: ENGINE, BROWSE_VIDEO: "1",
       BROWSE_OUT: OUT,
       BROWSE_HEADFUL: "0",
       BROWSE_IDLE_MS: "120000",

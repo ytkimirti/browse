@@ -1517,7 +1517,7 @@ never start one and fail with no live session, so open first. TypeSafe
 credentials: see 'browse help --env'.
 
 Navigate / act (selectors are Playwright strings: text=, role=button[name="…"], css, xpath=…):
-  browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser (+ video with --video)
+  browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser
   browse goto <url>                 navigate. open/goto/reload/goBack/goForward take --timeout <ms>
                                     (default 20000, and the client waits it out) — raise it for a dev
                                     server compiling a route on first hit. goBack/goForward FAIL when
@@ -1881,7 +1881,7 @@ Persistent profile (keep cookies + localStorage across close→open, e.g. stay l
   separate logins under one name. Log in on the engine you will drive with. A local -p with
   no engine flag (and no BROWSE_ENGINE) starts on the engine that profile was last used with.
 
-Artifacts (transcript.md, step screenshots, and the --video recording) land in a per-session dir
+Artifacts (transcript.md, step shots, the --video recording) land in a per-session dir
 under ${join(BROWSE_HOME, "sessions")}/. With --video, on close ffmpeg (if installed) trims the
 blank white lead-in and CUTS static "thinking" dead air (>= 2s with no on-screen
 change) out of the clip (BROWSE_REALTIME=1 preserves the entire unedited timeline;
@@ -2676,6 +2676,10 @@ async function spawnRemoteDaemon(remotePort, spawnId) {
     // browse was pointed at. BROWSE_BIND=0.0.0.0 is the way back for another
     // container runtime; the start-up error names it.
     BROWSE_BIND: process.env.BROWSE_BIND || (upstashBox() ? "0.0.0.0" : HOST),
+    // Video is off unless asked for. Say so explicitly: a box image carries an
+    // older browse whose default was on, and it would record a core's worth of
+    // video nobody requested.
+    BROWSE_VIDEO: process.env.BROWSE_VIDEO === "1" ? "1" : "0",
     ...(PROFILE ? { BROWSE_PROFILE: PROFILE } : {}), ...LAUNCH_ENV,
   };
   const assigns = Object.entries(env).map(([k, v]) => `${k}=${shq(v)}`).join(" ");
@@ -8187,7 +8191,7 @@ async function daemon() {
                 // Not a failure, and it must not read as one: the caller asked
                 // for no video (the default). Name what IS there instead - and keep
                 // the mock disclosure, which is about the SCREENSHOTS too.
-                : `closed - no video (start with --video for an mp4)\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`),
+                : `closed - no video${CDP_ENDPOINT ? "" : " (start with --video for an mp4)"}\n  dir:  ${tildePath(OUT)} (screenshots, transcript.md, network.jsonl)\n  net:  browse net --dir ${tildePath(OUT)} (the request log is still queryable)${mocks}`),
             ...(lastNotes ? { notes: lastNotes } : {}),
           };
           send(closeReply);

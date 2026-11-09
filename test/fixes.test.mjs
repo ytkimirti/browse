@@ -36,7 +36,7 @@ function browseIn(session, out, extraEnv, args, ms = 180000) {
   const r = spawnSync(BIN, ["-s", session, ...args], {
     encoding: "utf8",
     env: {
-      ...process.env, BROWSE_ENGINE: ENGINE, BROWSE_OUT: out,
+      ...process.env, BROWSE_ENGINE: ENGINE, BROWSE_OUT: out, BROWSE_VIDEO: "1",
       BROWSE_HEADFUL: "0", BROWSE_IDLE_MS: "120000", ...extraEnv,
     },
     timeout: ms,
@@ -714,16 +714,14 @@ try {
       /\d+ cookies? across \d+ domains? \+ localStorage for \d+ origins?/.test(r.out), r.out);
   }
 
-  /* ------------------------------------------------------------ --no-video */
-  // Agents were faking this with BROWSE_FFMPEG=/usr/bin/false, which still pays
-  // for the browser-side encode and then merely fails to convert it.
-  console.log("\n--no-video");
+  /* ------------------------------------------------- no video (the default) */
+  console.log("\nno video by default");
   {
     const NV = `${SESSION}-novideo`, NVOUT = mkdtempSync(join(tmpdir(), "browse-novid-"));
-    const nv = (...args) => browseIn(NV, NVOUT, {}, args);
+    const nv = (...args) => browseIn(NV, NVOUT, { BROWSE_VIDEO: undefined }, args);
     try {
-      const opened = nv("--no-video", "open", `${BASE}/ui`);
-      check("a --no-video session opens", opened.code === 0, `exit ${opened.code} · ${opened.err}`);
+      const opened = nv("open", `${BASE}/ui`);
+      check("a session with no video flag opens", opened.code === 0, `exit ${opened.code} · ${opened.err}`);
       const shot = nv("screenshot", "still.png");
       check("...and still writes screenshots", shot.code === 0 && existsSync(join(NVOUT, "still.png")),
         `exit ${shot.code} · ${shot.out}${shot.err}`);
@@ -731,13 +729,13 @@ try {
       // not accept and do nothing.
       const sp = nv("speed", "4");
       check("...but speed refuses, instead of annotating a video that will not exist",
-        sp.code === 1 && /no-video/.test(sp.err), `exit ${sp.code} · ${sp.err}`);
+        sp.code === 1 && /without --video/.test(sp.err), `exit ${sp.code} · ${sp.err}`);
       const gif = nv("close", "--gif");
-      check("...and close --gif refuses too", gif.code === 1 && /no-video/.test(gif.err),
+      check("...and close --gif refuses too", gif.code === 1 && /without --video/.test(gif.err),
         `exit ${gif.code} · ${gif.err}`);
       const c = nv("close", 120000);
       check("close says the video was off, not that something failed",
-        c.code === 0 && /video was off/.test(c.out) && !/ffmpeg/.test(c.out), `exit ${c.code} · ${c.out}${c.err}`);
+        c.code === 0 && /closed - no video \(start with --video/.test(c.out) && !/ffmpeg/.test(c.out), `exit ${c.code} · ${c.out}${c.err}`);
       check("...and wrote no mp4", !existsSync(join(NVOUT, "recording.mp4")), readdirSync(NVOUT).join(" "));
       check("...and no leftover empty one either",
         !readdirSync(NVOUT).some((f) => f.endsWith(".mp4")), readdirSync(NVOUT).join(" "));

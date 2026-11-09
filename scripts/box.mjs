@@ -575,7 +575,7 @@ A session, end to end:
   browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && npm i'
   browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && setsid nohup npm run dev >/tmp/dev.log 2>&1 &'
   browse open http://127.0.0.1:3000     # 127.0.0.1 is the BOX's
-  browse close                          # the mp4 lands here
+  browse close                          # the artifacts land here
   browse box down                       # gone — $BROWSE_REMOTE says which one
 
 Costs: CPU seconds while it runs, and the image's storage (~0.6GB, cents a month)

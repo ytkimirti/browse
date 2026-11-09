@@ -12,7 +12,7 @@ browse close                        # prints the session dir
 ```
 
 Run one command, read the result, decide the next. The browser starts on the
-first command and stay alive between them.
+first command and stays alive between them.
 
 ## Install
 
@@ -62,7 +62,7 @@ This package has not been published to the npm registry.
 
 A browser, a dev server and ffmpeg are the heaviest things an agent runs.
 `browse box` moves all three onto a disposable [Upstash
-Box](https://upstash.com/docs/box) and brings the mp4 back here. Two lines,
+Box](https://upstash.com/docs/box) and brings the artifacts back here. Two lines,
 once:
 
 ```sh
@@ -107,7 +107,7 @@ with `browse run`.
 Scope accessibility snapshots to a region, keep controls with compact output,
 and use snapshot element references directly in actions. Deliberately opened
 tabs join the recording while active; popup footage stays excluded until selected.
-Existing Chromium browsers can be attached over CDP with explicit video opt-out,
+Existing Chromium browsers can be attached over CDP (no video),
 keeping their tabs open when browse disconnects. See help for flags and limitations.
 
 `browse help` is an index, `browse help <command>` one command in full, `browse help --all`

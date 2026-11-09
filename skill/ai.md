@@ -7,7 +7,7 @@ the changed page before deciding again. The calling agent resumes when the task
 finishes or stops. Help defines the commands, limits and configuration.
 
 For an autonomous demonstration, open the starting URL, give one outcome-oriented
-task, then close the recording. Let the task choose the interactions. Do not
+task, then close the session. Let the task choose the interactions. Do not
 replace the goal with caller-authored clicks, selectors or page scripts. The loop
 follows visible dialogs, waits for UI transitions and remembers visited views.
 
@@ -23,10 +23,10 @@ from choosing the next action. A partial flow, a visible submit button or a plan
 to act is insufficient. Verify consequential outcomes independently when the
 page does not establish them.
 
-A stopped task preserves its executed steps, screenshots and recording. Inspect
+A stopped task preserves its executed steps, screenshots and transcript (and video with `--video`). Inspect
 those before resuming; already performed submissions must not be replayed. Cancel
 the invoking command to stop the loop. Another command on the same browser session
-is rejected while the task is running. Close the session to finalize the video.
+is rejected while the task is running. Close the session to finalize its artifacts.
 
 Task mode operates on visible controls in the active tab and selected frame.
 It can scroll to reveal more controls and select native dropdown options.
@@ -52,7 +52,7 @@ DOM labels and nearby visible text leave the browser for TypeSafe. Assertion
 requests send visible text from the selected region. Scope private pages to the
 minimum relevant region. Input values and the fill payload are excluded from the
 model request, but a page that renders sensitive data as ordinary text can still
-include it. The usual screenshots and recording show the resulting page.
+include it. The usual screenshots show the resulting page.
 
 Prefer deterministic assertions for exact copy, counts, network responses and
 UI state. AI assertions judge visible text probabilistically; they do not inspect
