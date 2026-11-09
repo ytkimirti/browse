@@ -64,7 +64,7 @@ What a box changes on top of `--remote`:
   the page then renders and never hydrates. See `skill/troubleshooting.md`.
 - **The app runs on the box**, and `127.0.0.1` is the box's. Confirm the server
   is listening *there* with `browse box exec <box> 'curl -sf http://127.0.0.1:<port>'`
-  before the first `browse` command, because recording starts the moment the
+  before the first `browse` command, because screenshots start the moment the
   browser spawns.
 - **`browse box exec`, never `ssh`.** A box's ssh gateway drops the output and
   the exit status and kills whatever the command left running, so an

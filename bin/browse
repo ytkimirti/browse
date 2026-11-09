@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# browse — drive a REAL recorded browser step by step (see SKILL.md at the repo
-# root). Every session is captured as a video with an animated cursor +
-# keystroke overlay; on close, static "agent thinking" dead air is cut out into
-# a shareable recording.mp4 (bracket a visibly-progressing wait with
-# `browse speed <n>` … `browse speed off` to fast-forward it instead).
+# browse — drive a REAL browser step by step (see SKILL.md at the repo root).
+# Every session logs a transcript, step screenshots and network; with --video it
+# is also captured with an animated cursor + keystroke overlay, and on close
+# static "agent thinking" dead air is cut out into a shareable recording.mp4
+# (bracket a visibly-progressing wait with `browse speed <n>` … `browse speed off`
+# to fast-forward it instead).
 #
 # Source lives in browse.mjs at the repo root. Everything browse owns — the
 # Playwright npm install, sessions, profiles — lives under ~/.browse (override

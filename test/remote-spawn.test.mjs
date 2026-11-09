@@ -207,11 +207,22 @@ try {
     remote({ FAKE_REMOTE_SHELL: zsh }, "-s", `${SESSION}-zsh`, "close");
   } else console.log("  skip zsh login shell (no zsh here)");
 
+  // A remote browse from before video went opt-in records unless told not to.
+  // The client has to send its own default, not leave the far side to pick one.
+  const OLD = join(STORE, "video-on-browse");
+  writeFileSync(OLD, `#!/bin/sh\nexport BROWSE_VIDEO="\${BROWSE_VIDEO-1}"\nexec ${quote(BIN)} "$@"\n`, { mode: 0o755 });
+  const old = { BROWSE_REMOTE_BIN: OLD, BROWSE_VIDEO: undefined };
+  r = remote(old, "-s", `${SESSION}-oldvid`, "open", "about:blank");
+  check("a remote whose own default is video on opens", r.code === 0, `${r.code} ${r.err}`);
+  r = remote(old, "-s", `${SESSION}-oldvid`, "--video", "url");
+  check("…and started without video, as the client asked", r.code !== 0 && /video/i.test(r.err), `${r.code} ${r.out}\n${r.err}`);
+  remote(old, "-s", `${SESSION}-oldvid`, "close");
+
   r = remote({}, "close");
   check("close on the remote session exits 0", r.code === 0 && /closed/.test(r.out), `${r.code} ${r.out}\n${r.err}`);
 } finally {
   remote({}, "close");
-  for (const s of ["f", "stale", "race", "zsh"]) remote({}, "-s", `${SESSION}-${s}`, "close");
+  for (const s of ["f", "stale", "race", "zsh", "oldvid"]) remote({}, "-s", `${SESSION}-${s}`, "close");
   rmSync(STORE, { recursive: true, force: true });
 }
 

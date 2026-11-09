@@ -1546,7 +1546,7 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
                                     matches --url, or just pause N ms. This is also your ASSERTION:
                                     it exits non-zero if the thing never happens, and --text reports
                                     what the element said instead.
-  browse speed [factor|off]         fast-forward the recording from here (e.g. 'speed 10') until
+  browse speed [factor|off]         (--video) fast-forward the recording from here (e.g. 'speed 10') until
                                     'speed off' — for a long but visibly-progressing wait (spinner,
                                     deploy log). Dead "thinking" time is cut automatically; this is
                                     for waits you still want SHOWN, just faster (badged "Nx" — the
@@ -1641,7 +1641,7 @@ Tabs, frames, emulation, saved logins:
   browse target                     list tabs (index, title, url, * = active)
   browse target <n>                 switch to a tab · popups are switched to AUTOMATICALLY
   browse target new [url]           open a deliberate tab, recorded while active
-  browse target record on|off       include/exclude the active tab from now. Popups start excluded.
+  browse target record on|off       (--video) include/exclude the active tab from now. Popups start excluded.
                                     Selected tabs are stitched in active-tab order at close, before
                                     dead-air cuts, speed regions and chapters. Raw sources survive failures.
   browse target close               close the active secondary tab; recorded footage is retained
@@ -3428,7 +3428,7 @@ function validateDeviceScale(env) {
 function validateCdpLaunch(env, profile) {
   if (!env.BROWSE_CDP) return;
   if (!LAUNCH_OPTS["--cdp"].check(env.BROWSE_CDP)) throw new Error("--cdp wants an http(s) or ws(s) browser endpoint (endpoint hidden)");
-  if (env.BROWSE_VIDEO === "1") throw new Error("--cdp cannot take --video: an existing context cannot start Playwright video recording");
+  if (env.BROWSE_VIDEO === "1") throw new Error("--cdp cannot record video (an existing context cannot start Playwright video recording): drop --video, or pass --no-video over an exported BROWSE_VIDEO=1");
   if (profile) throw new Error("--cdp cannot use a local persistent profile");
   if (env.BROWSE_ENGINE && env.BROWSE_ENGINE !== "chromium") throw new Error("--cdp requires Chromium; remove --camoufox");
   if (["BROWSE_HEADFUL", "BROWSE_VIEWPORT", "BROWSE_DEVICE_SCALE", "BROWSE_CURSOR", "BROWSE_KEYLOG", "BROWSE_POPUPS"].some((key) => env[key] !== undefined))
@@ -4992,12 +4992,8 @@ async function daemon() {
   }
   logDaemon(`engine ${engine}${engine === "camoufox" ? ` (${camouOpts.executable_path})` : ""}`);
   // recordVideo on the CONTEXT ⇒ the whole session is captured; flushed on close.
-  // Undefined when video is off: recording is the default and the point of the
-  // tool, but a session whose only job is to READ the page (assert a count, mint
-  // a token, dump some state) pays a browser-side encode and an ffmpeg finalize
-  // for a file nobody watches. Agents were already faking it with
-  // BROWSE_FFMPEG=/usr/bin/false, which still records the .webm and then just
-  // fails to convert it — a worse version of this with a misleading close.
+  // Undefined unless --video: the browser-side encode and ffmpeg finalize cost
+  // about a core per open session for a file most runs never need.
   const recordVideo = VIDEO_ON ? { dir: VIDEO_DIR, size: VIEWPORT } : undefined;
   let browser = null, context;
 
@@ -7451,7 +7447,7 @@ async function daemon() {
         // recording clock. `browse speed <n>` (n>=2) opens/re-opens the region;
         // `browse speed off` closes it; bare `browse speed` uses the default
         // factor. See finalizeRecording / forcedIntervals.
-        // Every mark here annotates a recording. With --no-video there is none, so
+        // Every mark here annotates a recording. Without --video there is none, so
         // "speed: 8x from 12.3s" would confirm an effect that cannot exist.
         if (!VIDEO_ON) throw new Error("speed: this session was started without --video, so there is no recording to fast-forward");
         const a = String(args[0] ?? "").trim().toLowerCase();
