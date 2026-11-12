@@ -527,15 +527,15 @@ async function buildImage(size) {
 
 const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
 
-A session, end to end (shell state does not survive between agent tool calls, so
-set BROWSE_REMOTE or pass --remote <host> again on every call):
-  export BROWSE_REMOTE=$(browse box up)
-  browse box push $BROWSE_REMOTE ./my-app
-  browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && npm i'
-  browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && setsid nohup npm run dev >/tmp/dev.log 2>&1 &'
-  browse open http://127.0.0.1:3000     # 127.0.0.1 is the BOX's
-  browse close                          # the artifacts land here
-  browse box down                       # deletes the box in $BROWSE_REMOTE
+A session, end to end. 'up' prints <host>; repeat it in every later call (shell
+variables do not survive between agent tool calls):
+  browse box up
+  browse box push <host> ./my-app
+  browse box exec <host> 'cd ${WORK}/my-app && npm i'
+  browse box exec <host> 'cd ${WORK}/my-app && setsid nohup npm run dev >/tmp/dev.log 2>&1 &'
+  browse --remote <host> -s app open http://localhost:3000   # the BOX's localhost
+  browse --remote <host> -s app close                         # the artifacts land here
+  browse box down <host>
 
   up [--ttl <sec>] [--size medium|small] [--name <n>] [--snapshot <id>]
                               make a box from the warm image (~13s) and print its --remote host.
@@ -544,7 +544,8 @@ set BROWSE_REMOTE or pass --remote <host> again on every call):
                               only: medium 10GB, small 5GB (too small for an app's node_modules)
   down [box]                  DELETE it. No argument: the box in $BROWSE_REMOTE, else the only
                               one up; it refuses to guess between several
-  exec <box> <cmd…>           run a command on the box and print its output. Detach anything
+  exec <box> <cmd…>           run a command on the box and print its output (ssh into a box
+                              relays nothing back, so use exec). Detach anything
                               long-running ('setsid nohup <cmd> >/tmp/x.log 2>&1 &') and poll its
                               log. 'pkill -f <pattern>' here kills exec's own shell: go by port or pid
   push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}; skips .git, node_modules

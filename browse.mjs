@@ -1497,7 +1497,7 @@ const HELP = `browse: drive a real browser from the shell, one command at a time
 
 Rules:
 - Pass -s <task-name> on every command, close included: one browser per name.
-- Start the app and wait until it answers before 'open'. Use localhost, not 127.0.0.1 (Next dev).
+- Start the app and wait until it answers before 'open'. Open a Next dev server as localhost.
 - Read the page with 'snapshot' (what a user sees); keep 'eval' for state the page does not render.
 - 'wait' on a selector, --text or --url, never on ms. It doubles as the assertion: it exits 1.
 - stdout is only the result. Page errors, dialogs, downloads and tips arrive on stderr.
@@ -1629,7 +1629,8 @@ Run Playwright code in the session (raw CDP, HAR replay, WebSockets, loops over 
                                     with page, context, browser, frame, cdp(method, params),
                                     cdp.session() (chromium), console and require. The value or
                                     return prints as JSON. --timeout defaults to 60000. globalThis
-                                    keeps state between runs. On camoufox, page.evaluate cannot see
+                                    keeps state between runs. --file is read here, but the code runs
+                                    where the browser does: use absolute paths. On camoufox, page.evaluate cannot see
                                     page globals; prefix 'mw:' (page.evaluate("mw:window.app")).
     e.g.  browse run 'await context.routeFromHAR("/tmp/api.har", {url: "**/api/**"})'
           browse run 'await cdp("Network.enable"); await cdp("Network.setBlockedURLs", {urls: ["*.mp4"]})'
@@ -1637,7 +1638,7 @@ Run Playwright code in the session (raw CDP, HAR replay, WebSockets, loops over 
 
 Misc:
   browse eval <js expression>       evaluate JS in the page, print the result
-  browse toast <text…>              (--video) a caption for context the viewer cannot see
+  browse toast <text…>              an on-page caption (demos) for context the viewer cannot see
                                     [--for <sec>] [--sticky] [--color yellow|blue|green|red|neutral]
                                     [--pos top|bottom]; --clear removes a sticky one
   browse dir                        print this session's artifacts dir
@@ -1664,13 +1665,14 @@ Run the browser on another machine:
 Launch flags (only on the command that STARTS the session; a live one refuses different values):
   --cdp <endpoint>                  attach to a running Chromium over http(s)/ws(s). No --video,
                                     init, middleware, emulate or state --load; close leaves it open.
-  --headful / --headless            show the browser window (headed defaults to chromium)
+  --headful / --headless            show the browser window (headed with no -p defaults to chromium)
   --camoufox / --chromium           engine (default camoufox, which clears bot walls). chromium is
                                     needed for emulate tz/locale/cpu/net, PDF and cdp() in run
   --viewport <WxH>                  page and video frame size (default 1280x800)
   --device-scale <number>           chromium pixel density (1..3, default 2)
   --cursor / --no-cursor            on-page cursor overlay (default on)
-  --keylog / --no-keylog            keystroke overlay (default on). Turn both off on a bot-walled site
+  --keylog / --no-keylog            keystroke overlay (default on). On a bot-walled site pass
+                                    --no-cursor --no-keylog
   --popups / --no-popups            real popups for target=_blank, vs same-tab navigation
   --net / --no-net                  network logging (default on)
   --video / --no-video              record recording.mp4 (default off; about a core until close)
@@ -1685,10 +1687,11 @@ Persistent profile (stay logged in across close → open):
   browse profiles [name]            list profiles with their engines and sites holding a live cookie
                                     (a cookie is not proof of a login)
   browse -p <name> clear            delete a profile (--chromium / --camoufox: just that half)
-  A profile is stored PER ENGINE: log in on the engine you will drive with.
+  A profile is stored PER ENGINE: log in on the engine you will drive with. With no engine flag,
+  a profile reopens on the engine it was last used with.
 
 Artifacts, one dir per session under ${join(BROWSE_HOME, "sessions")}/:
-transcript.md, shots/ (one per step), network.jsonl, console.jsonl, browsed.log, and with --video
+transcript.md, shots/ (one per acting step), network.jsonl, console.jsonl, browsed.log, and with --video
 recording.mp4 (dead air cut, a chapter per action; BROWSE_REALTIME=1 keeps the full timeline).`;
 
 
@@ -4639,7 +4642,7 @@ function camoufoxLaunchOptions() {
     `print(json.dumps(launch_options(headless=${HEADFUL ? "False" : "True"},humanize=0.5,main_world_eval=True,config={'showcursor':False},` +
     `window=(${VIEWPORT.width},${VIEWPORT.height}),` +
     `screen=Screen(min_width=${VIEWPORT.width},min_height=${VIEWPORT.height}),i_know_what_im_doing=True)))`;
-  // camoufox is a Python package but this skill is global, so a project venv is
+  // camoufox is a Python package but browse is global, so a project venv is
   // no good. `uv tool install camoufox` is the normal way in, and its venv
   // python is not on PATH — look there before falling back to a system python
   // that happened to pip-install it.

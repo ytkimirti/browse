@@ -102,10 +102,9 @@ case "${CMD:-help}" in
   help|version)
     exec node "$REPO_ROOT/browse.mjs" "$@" ;;
 esac
-# …nor may `browse <command> --help` (or `browse ai <sub> --help`), the same help.
+# …nor may `browse <command> --help`, the same help.
 if [[ -n "$CMD" ]]; then
   _h="${_argv[$((CMD_AT + 1))]:-}"
-  [[ "$CMD" == "ai" && -n "$_h" && "$_h" != -* ]] && _h="${_argv[$((CMD_AT + 2))]:-}"
   [[ "$_h" == "--help" ]] && exec node "$REPO_ROOT/browse.mjs" "$@"
 fi
 
@@ -238,6 +237,10 @@ fi
 
 if [[ "$CMD" == "install" ]]; then
   shift "$((CMD_AT + 1))"
+  if [[ $# -gt 0 ]]; then
+    echo "browse: 'install' takes no arguments (it no longer links an agent skill)" >&2
+    exit 1
+  fi
   BIN_DIR="${BROWSE_BIN_DIR:-$HOME/.local/bin}"
   mkdir -p "$BIN_DIR"
   ln -sfn "$SCRIPT_DIR/browse" "$BIN_DIR/browse"
