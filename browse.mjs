@@ -1628,9 +1628,10 @@ Run Playwright code in the session (raw CDP, HAR replay, WebSockets, loops over 
                                     an async function in the daemon (not the page; that is eval)
                                     with page, context, browser, frame, cdp(method, params),
                                     cdp.session() (chromium), console and require. The value or
-                                    return prints as JSON. --timeout defaults to 60000. globalThis
-                                    keeps state between runs. --file is read here, but the code runs
-                                    where the browser does: use absolute paths. On camoufox,
+                                    return prints (plain data as JSON). --timeout defaults to
+                                    60000. globalThis keeps state between runs. --file is read
+                                    here, but the code runs where the browser does: use absolute
+                                    paths. On camoufox,
                                     page.evaluate cannot see page globals; prefix 'mw:'
                                     (page.evaluate("mw:window.app")) to read them.
     e.g.  browse run 'await context.routeFromHAR("/tmp/api.har", {url: "**/api/**"})'
@@ -1685,15 +1686,15 @@ Launch flags (before the command, on the one that STARTS the session; a live one
 Persistent profile (stay logged in across close → open):
   browse -p <name> <cmd> …          a persistent profile, on EVERY command (BROWSE_PROFILE=<name>).
                                     One live browser per profile. No -p = a clean throwaway context.
-                                    Log in once with --headful, close, then reuse it.
+                                    Log in once headed (--headful needs a display), close, reuse.
   browse profiles [name]            list profiles with their engines and sites holding a live cookie
                                     (a cookie is not proof of a login)
   browse -p <name> clear            delete a profile (--chromium / --camoufox: just that half)
   A profile is stored PER ENGINE: log in on the engine you will drive with. Locally, with no engine
   flag, a profile reopens on the engine it was last used with; --remote defaults to camoufox.
 
-Artifacts: transcript.md, shots/, network.jsonl, console.jsonl, recording.mp4 (--video)
-and browsed.log, in one dir per session under ${join(BROWSE_HOME, "sessions")}/.
+Artifacts per session: transcript.md, shots/, network.jsonl, console.jsonl, browsed.log,
+recording.mp4 (--video), in one dir per session under ${join(BROWSE_HOME, "sessions")}/.
 shots/ holds one per acting step; the mp4 has dead air cut and a chapter per action
 (BROWSE_REALTIME=1 keeps the full timeline).`;
 

@@ -533,7 +533,7 @@ variables do not survive between agent tool calls):
   browse box push <host> ./app
   browse box exec <host> 'cd ${WORK}/app && npm i'
   browse box exec <host> 'cd ${WORK}/app && setsid nohup npm run dev >/tmp/dev.log 2>&1 &'
-  browse box exec <host> 'until curl -sf localhost:3000 >/dev/null; do sleep 1; done'
+  browse box exec <host> 'timeout 120 sh -c "until curl -s localhost:3000 >/dev/null; do sleep 1; done" || tail /tmp/dev.log'
   browse --remote <host> -s app open http://localhost:3000   # the BOX's localhost
   browse --remote <host> -s app close                         # the artifacts land here
   browse box down <host>
