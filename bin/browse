@@ -238,7 +238,7 @@ fi
 if [[ "$CMD" == "install" ]]; then
   shift "$((CMD_AT + 1))"
   if [[ $# -gt 0 ]]; then
-    echo "browse: 'install' takes no arguments (it no longer links an agent skill)" >&2
+    echo "browse: 'install' takes no arguments" >&2
     exit 1
   fi
   BIN_DIR="${BROWSE_BIN_DIR:-$HOME/.local/bin}"

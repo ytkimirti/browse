@@ -530,9 +530,10 @@ const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
 A session, end to end. 'up' prints <host>; repeat it in every later call (shell
 variables do not survive between agent tool calls):
   browse box up
-  browse box push <host> ./my-app
-  browse box exec <host> 'cd ${WORK}/my-app && npm i'
-  browse box exec <host> 'cd ${WORK}/my-app && setsid nohup npm run dev >/tmp/dev.log 2>&1 &'
+  browse box push <host> ./app
+  browse box exec <host> 'cd ${WORK}/app && npm i'
+  browse box exec <host> 'cd ${WORK}/app && setsid nohup npm run dev >/tmp/dev.log 2>&1 &'
+  browse box exec <host> 'until curl -sf localhost:3000 >/dev/null; do sleep 1; done'
   browse --remote <host> -s app open http://localhost:3000   # the BOX's localhost
   browse --remote <host> -s app close                         # the artifacts land here
   browse box down <host>
@@ -545,11 +546,12 @@ variables do not survive between agent tool calls):
   down [box]                  DELETE it. No argument: the box in $BROWSE_REMOTE, else the only
                               one up; it refuses to guess between several
   exec <box> <cmd…>           run a command on the box and print its output (ssh into a box
-                              relays nothing back, so use exec). Detach anything
-                              long-running ('setsid nohup <cmd> >/tmp/x.log 2>&1 &') and poll its
-                              log. 'pkill -f <pattern>' here kills exec's own shell: go by port or pid
-  push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}; skips .git, node_modules
-                              and .next)
+                              relays nothing back). Detach anything long-running
+                              ('setsid nohup <cmd> >/tmp/x.log 2>&1 &') and poll its log.
+                              'pkill -f <pattern>' here kills exec's own shell: kill by port or pid
+  push <box> <path…> [--to <dir>]
+                              copy files or dirs in (default ${WORK}; skips .git,
+                              node_modules and .next)
   pull <box> <remote> [local]       copy one file out
   url <box> <port>            public https URL for a port (the server must listen on 0.0.0.0)
   ls                          boxes and images on the account
@@ -558,7 +560,8 @@ variables do not survive between agent tool calls):
   image [--size medium]       rebuild the warm image; re-run after a browse update
   install <box>               reinstall browse on a box and prove a daemon starts there
 
-<box> is a box id or the '<id>@…' host, so $BROWSE_REMOTE works. An idle box bills nothing.
+<box> is a box id or the '<id>@…' host, so $BROWSE_REMOTE works. Costs: CPU seconds while it
+runs, plus the warm image's storage (cents a month); an idle box bills nothing.
 `;
 
 /** Pull `--name value` out of the args, leaving the positionals behind. */

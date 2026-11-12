@@ -233,7 +233,7 @@ console.log("\nbrowse box");
     `${r.code} ${r.out.slice(0, 120)}`);
   check("…and says a box is deleted, not parked", /DELETE it/.test(r.out), r.out.slice(0, 200));
   check("…and says what the standing cost is", /storage/.test(r.out) && /CPU seconds/.test(r.out), r.out.slice(0, 200));
-  check("…and hands the host to browse --remote", /BROWSE_REMOTE=\$\(browse box up\)/.test(r.out), r.out.slice(0, 200));
+  check("…and hands the host to browse --remote", /browse --remote <host> -s \S+ open/.test(r.out), r.out.slice(0, 200));
   check("…and documents where the key is kept",
     /^\s*key \[<key>\]/m.test(r.out) && /box\.json/.test(r.out), r.out.slice(0, 300));
 

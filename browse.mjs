@@ -1501,11 +1501,11 @@ Rules:
 - Read the page with 'snapshot' (what a user sees); keep 'eval' for state the page does not render.
 - 'wait' on a selector, --text or --url, never on ms. It doubles as the assertion: it exits 1.
 - stdout is only the result. Page errors, dialogs, downloads and tips arrive on stderr.
-- Add --video on the first command only when a video or demo is asked for.
+- Put --video before the first command, and only when a video or demo is asked for.
 - 'close' prints the session dir (transcript.md, shots/, network.jsonl): hand the user that path.
 
 Navigate / act (selectors are Playwright strings: text=, role=button[name="…"], css, xpath=…):
-  browse open [url]                 open the app (default ${APP_DEFAULT}); starts the browser
+  browse open [url]                 open the app (default ${APP_DEFAULT}; pass localhost for Next)
   browse goto <url>                 navigate. open/goto/reload/goBack/goForward take --timeout <ms>
                                     (default 20000); raise it for a dev server's first compile.
                                     goBack/goForward FAIL when there is nowhere to go. A url that
@@ -1515,8 +1515,8 @@ Navigate / act (selectors are Playwright strings: text=, role=button[name="…"]
   browse rightclick <selector>      right-click it (the app's context menu)
   browse fill <selector> <value>    clear an input and type the value, key by key
   browse type <selector> <text>     type without clearing, key by key
-  browse press [selector] <key>     e.g. press "input[name=todo]" Enter · press Escape · press "Meta+k"
-                                    (no selector = the key goes to the page)
+  browse press [selector] <key>     e.g. press "input[name=todo]" Enter · press Escape
+                                    (no selector = the key goes to the page, e.g. "Meta+k")
   browse check|uncheck <selector>   toggle a checkbox
   browse hover <selector>
   browse selectOption <selector> <value>
@@ -1581,7 +1581,7 @@ Tabs, frames, emulation, saved logins:
   --dialog "accept:my answer") on the command that triggers one.
   Downloads are saved to downloads/ in the session dir; the path is reported on stderr.
 
-Network (every request is logged to network.jsonl; queries work after close and never start a browser):
+Network (every request lands in network.jsonl; queries work after close, never start a browser):
   browse net [pattern] [flags]      pattern = url substring, or /regex/i. Bare patterns hide static
                                     assets (the count hidden is said); --all-types shows them.
     --host <d1,d2>  (alias -d)      domains incl. subdomains; '!cdn.foo.com' excludes
@@ -1630,8 +1630,9 @@ Run Playwright code in the session (raw CDP, HAR replay, WebSockets, loops over 
                                     cdp.session() (chromium), console and require. The value or
                                     return prints as JSON. --timeout defaults to 60000. globalThis
                                     keeps state between runs. --file is read here, but the code runs
-                                    where the browser does: use absolute paths. On camoufox, page.evaluate cannot see
-                                    page globals; prefix 'mw:' (page.evaluate("mw:window.app")).
+                                    where the browser does: use absolute paths. On camoufox,
+                                    page.evaluate cannot see page globals; prefix 'mw:'
+                                    (page.evaluate("mw:window.app")) to read them.
     e.g.  browse run 'await context.routeFromHAR("/tmp/api.har", {url: "**/api/**"})'
           browse run 'await cdp("Network.enable"); await cdp("Network.setBlockedURLs", {urls: ["*.mp4"]})'
   Actions inside run get no cursor overlay and count as one step; prefer commands on video.
@@ -1657,12 +1658,13 @@ Parallel sessions:
 
 Run the browser on another machine:
   browse --remote <sshhost> <cmd>   drive a browser on <sshhost> over ssh, on EVERY command incl.
-                                    close (BROWSE_REMOTE=<host> works too). 127.0.0.1 is THAT
-                                    machine: run the dev server there, or 'ssh -R 3000:127.0.0.1:3000'.
+                                    close (BROWSE_REMOTE=<host> works too). localhost is THAT
+                                    machine: run the dev server there, or lend yours with
+                                    'ssh -R 3000:127.0.0.1:3000 <sshhost>'.
                                     Artifacts are copied back; printed paths are local.
   browse box <cmd> …                disposable Upstash Boxes to be that host: 'browse box help'
 
-Launch flags (only on the command that STARTS the session; a live one refuses different values):
+Launch flags (before the command, on the one that STARTS the session; a live one refuses changes):
   --cdp <endpoint>                  attach to a running Chromium over http(s)/ws(s). No --video,
                                     init, middleware, emulate or state --load; close leaves it open.
   --headful / --headless            show the browser window (headed with no -p defaults to chromium)
@@ -1681,18 +1683,19 @@ Launch flags (only on the command that STARTS the session; a live one refuses di
   Every flag is also an env var; rarer knobs are env-only: 'browse help --env'.
 
 Persistent profile (stay logged in across close → open):
-  browse -p <name> <cmd> …          use a persistent profile, on EVERY command (BROWSE_PROFILE=<name>).
+  browse -p <name> <cmd> …          a persistent profile, on EVERY command (BROWSE_PROFILE=<name>).
                                     One live browser per profile. No -p = a clean throwaway context.
                                     Log in once with --headful, close, then reuse it.
   browse profiles [name]            list profiles with their engines and sites holding a live cookie
                                     (a cookie is not proof of a login)
   browse -p <name> clear            delete a profile (--chromium / --camoufox: just that half)
-  A profile is stored PER ENGINE: log in on the engine you will drive with. With no engine flag,
-  a profile reopens on the engine it was last used with.
+  A profile is stored PER ENGINE: log in on the engine you will drive with. Locally, with no engine
+  flag, a profile reopens on the engine it was last used with; --remote defaults to camoufox.
 
-Artifacts, one dir per session under ${join(BROWSE_HOME, "sessions")}/:
-transcript.md, shots/ (one per acting step), network.jsonl, console.jsonl, browsed.log, and with --video
-recording.mp4 (dead air cut, a chapter per action; BROWSE_REALTIME=1 keeps the full timeline).`;
+Artifacts: transcript.md, shots/, network.jsonl, console.jsonl, recording.mp4 (--video)
+and browsed.log, in one dir per session under ${join(BROWSE_HOME, "sessions")}/.
+shots/ holds one per acting step; the mp4 has dead air cut and a chapter per action
+(BROWSE_REALTIME=1 keeps the full timeline).`;
 
 
 /** `browse help --env`. The knobs above have flags because they are the ones you
