@@ -36,7 +36,7 @@ try {
   check("help --all, exit 0", all.code === 0 && all.err === "", `${all.code} ${all.err}`);
   const index = browse("help");
   check("help, exit 0", index.code === 0 && index.err === "", `${index.code} ${index.err}`);
-  check("the index is a small fraction of the full help", index.out.length < 5000 && all.out.length > 5 * index.out.length,
+  check("the index is a small fraction of the full help", index.out.length < 4000 && all.out.length > 4 * index.out.length,
     `index ${index.out.length} bytes, all ${all.out.length}`);
   check("the index says how to get one command, everything and the env",
     /browse help <command\|topic>/.test(index.out) && /browse <command> --help/.test(index.out) &&
@@ -45,6 +45,8 @@ try {
     index.out.split("\n").filter((l) => [...l].length > 100).join("\n"));
   check("the index lists usages, not descriptions",
     /wait <selector\|ms> \[--gone\]/.test(index.out) && !/hold until an element appears/.test(index.out), index.out);
+  check("the rules come first, inside what '| head -15' shows",
+    /^Rules:$/m.test(index.out.split("\n").slice(0, 15).join("\n")) && /-s <task-name>/.test(index.out.split("\n").slice(0, 15).join("\n")), index.out);
   check("-h and --help print the index too", browse("-h").out === index.out && browse("--help").out === index.out);
   check("help --env still prints the env vars", /BROWSE_NET_SECRETS/.test(browse("help", "--env").out));
 
@@ -74,8 +76,8 @@ try {
   check("…including the --json record fields",
     /i \(the #\), t \(s into recording\), at, ms, method, url, type, reqHeaders,\s+reqBody, status, ok, resHeaders, mime, size, resBody, error, mock, mockVia/.test(net.out), net.out);
   check("net --help matches help net", browse("net", "--help").out === net.out);
-  const task = browse("ai", "task", "--help");
-  check("ai task --help prints the AI section", task.code === 0 && /--max-steps/.test(task.out) && task.out === browse("help", "ai", "task").out, task.out);
+  const ai = browse("ai", "--help");
+  check("ai is gone: ai --help fails, exit 1", ai.code === 1 && /no command or topic 'ai'/.test(ai.err), `${ai.code} ${ai.err}`);
   check("a command whose rules live in a neighbouring entry gets them too",
     /default 20000/.test(browse("help", "reload").out) && /default 20000/.test(browse("help", "open").out));
   check("help help is the index", browse("help", "help").out === index.out);

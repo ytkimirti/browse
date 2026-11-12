@@ -9,7 +9,7 @@
   "bugs": { "url": "https://github.com/ytkimirti/browse/issues" },
   "keywords": ["browser", "automation", "playwright", "cli", "recording", "agent", "screencast"],
   "bin": { "browse": "bin/browse" },
-  "files": ["bin/", "browse.mjs", "scripts/", "skill/", "SKILL.md", "README.md"],
+  "files": ["bin/", "browse.mjs", "scripts/", "README.md"],
   "engines": { "node": ">=18" },
   "os": ["darwin", "linux"],
   "scripts": {

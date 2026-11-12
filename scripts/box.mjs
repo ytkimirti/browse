@@ -527,60 +527,37 @@ async function buildImage(size) {
 
 const HELP = `browse box — disposable Upstash Boxes for 'browse --remote'
 
-  up [--ttl <sec>] [--size medium|small] [--name <n>] [--snapshot <id>]
-                              make a box from the warm image and print its --remote host.
-                              ~13s, nothing to install, and the browse on it is pulled up to date
-                              first (an image is as old as the day it was taken), then proven by
-                              starting a daemon on it; a box that cannot is deleted, with the error.
-                              Builds the image first if there isn't one yet (~6 min, once). The
-                              box also deletes itself after --ttl (default ${TTL_DEFAULT}s) if you
-                              never call down.
-                              --size picks the DISK and nothing else (same CPU and RAM
-                              either way): medium is 10GB, small is 5GB — of which the warm
-                              image already uses ~2.5GB, so 'small' does not fit an app's
-                              node_modules. Each box gets a unique name; --name overrides it
-  down [box]                  DELETE it. With no argument: the box in $BROWSE_REMOTE, else the
-                              only browse box up. It REFUSES to guess between several — box.json
-                              is shared by every process here, so guessing deletes the box
-                              another agent is recording on
-  image [--size medium]       build the warm image: a box, browse installed on it, snapshot
-                              taken, box thrown away. Re-run after a browse update
-  ls                          boxes and images on the account
-  key [<key>]                 save the Box API key 0600 in ~/.browse/box.json, so it does not
-                              have to be exported into every process. With no argument it reads
-                              stdin, which keeps it out of 'ps' and your shell history.
-                              UPSTASH_BOX_API_KEY still wins when set
-
-  exec <box> <cmd…>           run a command on the box and show its output. This is how you
-                              install and start a dev server there — ssh into a box relays
-                              nothing back. Leave something RUNNING with 'setsid nohup <cmd>
-                              >/tmp/x.log 2>&1 &'. Note a 'pkill -f <pattern>' in here matches
-                              exec's OWN shell (the pattern is in its command line) and kills
-                              the command that is doing the killing — go by port or pid file
-  push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}; skips .git, node_modules
-                              and .next). Sent in requests under the API's 10 MiB cap; a bigger
-                              file goes in parts, joined and sha256-checked on the box.
-  pull <box> <remote> [local]       copy one file out
-  url <box> <port>            public https URL for a port, to hand someone who wants to click
-                              around the app themselves. The server must be listening on
-                              0.0.0.0, not 127.0.0.1, or the URL answers 502
-  install <box>               (re)install browse on a box, e.g. to refresh the image builder, and
-                              prove a daemon starts there (image runs the same check)
-
-<box> is a box id or the '<id>@…' host you pass to browse --remote, so $BROWSE_REMOTE works.
-
-A session, end to end:
+A session, end to end (shell state does not survive between agent tool calls, so
+set BROWSE_REMOTE or pass --remote <host> again on every call):
   export BROWSE_REMOTE=$(browse box up)
   browse box push $BROWSE_REMOTE ./my-app
   browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && npm i'
   browse box exec $BROWSE_REMOTE 'cd ${WORK}/my-app && setsid nohup npm run dev >/tmp/dev.log 2>&1 &'
   browse open http://127.0.0.1:3000     # 127.0.0.1 is the BOX's
   browse close                          # the artifacts land here
-  browse box down                       # gone — $BROWSE_REMOTE says which one
+  browse box down                       # deletes the box in $BROWSE_REMOTE
 
-Costs: CPU seconds while it runs, and the image's storage (~0.6GB, cents a month)
-between sessions. A box you forget still bills nothing once idle, and expires by
-itself at the TTL.
+  up [--ttl <sec>] [--size medium|small] [--name <n>] [--snapshot <id>]
+                              make a box from the warm image (~13s) and print its --remote host.
+                              Builds the image first if there is none (~6 min, once). The box
+                              deletes itself after --ttl (default ${TTL_DEFAULT}s). --size is the disk
+                              only: medium 10GB, small 5GB (too small for an app's node_modules)
+  down [box]                  DELETE it. No argument: the box in $BROWSE_REMOTE, else the only
+                              one up; it refuses to guess between several
+  exec <box> <cmd…>           run a command on the box and print its output. Detach anything
+                              long-running ('setsid nohup <cmd> >/tmp/x.log 2>&1 &') and poll its
+                              log. 'pkill -f <pattern>' here kills exec's own shell: go by port or pid
+  push <box> <path…> [--to <dir>]   copy files or dirs in (default ${WORK}; skips .git, node_modules
+                              and .next)
+  pull <box> <remote> [local]       copy one file out
+  url <box> <port>            public https URL for a port (the server must listen on 0.0.0.0)
+  ls                          boxes and images on the account
+  key [<key>]                 save the Box API key in ~/.browse/box.json (no argument: read stdin).
+                              UPSTASH_BOX_API_KEY wins when set
+  image [--size medium]       rebuild the warm image; re-run after a browse update
+  install <box>               reinstall browse on a box and prove a daemon starts there
+
+<box> is a box id or the '<id>@…' host, so $BROWSE_REMOTE works. An idle box bills nothing.
 `;
 
 /** Pull `--name value` out of the args, leaving the positionals behind. */

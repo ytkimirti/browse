@@ -15,7 +15,7 @@ try {
   check('npm pack succeeds', packed.status === 0, packed.stderr);
   if (packed.status !== 0) throw new Error('packing failed');
   const pkg = JSON.parse(packed.stdout)[0]; const files = pkg.files.map((f) => f.path);
-  for (const path of ['browse.mjs','bin/browse','scripts/box.mjs','SKILL.md','skill/recording.md','package.json','README.md']) check(`package includes ${path}`, files.includes(path));
+  for (const path of ['browse.mjs','bin/browse','scripts/box.mjs','package.json','README.md']) check(`package includes ${path}`, files.includes(path));
   check('package excludes secrets, tests and worktrees', !files.some((path) => /(^|\/)\.env|\.claude|node_modules|^test\//.test(path)), files.join('\n'));
   const prefix = join(tmp, 'install');
   const installed = run('npm', ['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', prefix, join(tmp, pkg.filename)]);

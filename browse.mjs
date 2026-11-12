@@ -37,7 +37,7 @@
  * (text=, role=…[name="…"], css, xpath=…), so there is nothing new to learn.
  *
  * Layout (github.com/ytkimirti/browse):
- *   <repo>/browse.mjs                this file (+ SKILL.md next to it)
+ *   <repo>/browse.mjs                this file
  *   <repo>/bin/browse                launcher (symlink it onto your PATH) —
  *                                    installs deps on first run and points
  *                                    BROWSE_PW_BASE at the data home
@@ -101,8 +101,6 @@
  */
 
 import http from "node:http";
-import { parseAI, aiConfig, runAI } from "./scripts/ai.mjs";
-import { parseTask, runTask } from "./scripts/ai-task.mjs";
 import { runtimeBuild } from "./scripts/build.mjs";
 import { loadRecordingPlaywright } from "./scripts/video.mjs";
 import net from "node:net";
@@ -1016,13 +1014,6 @@ function logLabel(cmd, args) {
   // An init script is arbitrary page code the same way a middleware handler is
   // (seeding a token into localStorage is a normal use), so its source stays out
   // of the transcript too - the flags are enough to follow what happened.
-  if (cmd === "ai") {
-    try {
-      const o = args[0] === "task" ? parseTask(args) : parseAI(args);
-      return `ai ${o.action} ${JSON.stringify(o.description ?? o.goal)}${o.action === "fill" ? " <value>" : ""}` +
-        `${o.scope !== "body" ? ` --scope ${JSON.stringify(o.scope)}` : ""}${o.dryRun ? " --dry-run" : ""}`;
-    } catch { return "ai <invalid arguments>"; }
-  }
   if (cmd === "init") {
     const flag = args.find((a) => a === "--clear" || a === "--remove" || a === "--file");
     if (flag === "--remove") return `init --remove ${args[args.indexOf("--remove") + 1] ?? ""}`.trim();
@@ -1502,397 +1493,204 @@ function popupSameTabInitScript() {
   }, true);
 }
 
-const HELP = `browse: drive a real browser, logging every step (video with --video).
+const HELP = `browse: drive a real browser from the shell, one command at a time. Every step is logged.
 
-Prefer 'ai task' for multistep browser goals: open the starting URL, give the full
-goal in one task, then close to save the session. Browse observes the page,
-asks TypeSafe for the next action, executes it and repeats without caller turns.
-Describe the outcome and supply text to type; no page inspection or scripted
-click sequence is needed from the calling agent. Read the returned outcome:
-a stopped task is partial progress. Inspect its recorded steps before resuming.
-Use individual commands for a known selector, an exact assertion, debugging,
-or an interaction outside the task action set. The browser starts
-on your first command; reads and in-page actions (url, text, snapshot, click…)
-never start one and fail with no live session, so open first. TypeSafe
-credentials: see 'browse help --env'.
+Rules:
+- Pass -s <task-name> on every command, close included: one browser per name.
+- Start the app and wait until it answers before 'open'. Use localhost, not 127.0.0.1 (Next dev).
+- Read the page with 'snapshot' (what a user sees); keep 'eval' for state the page does not render.
+- 'wait' on a selector, --text or --url, never on ms. It doubles as the assertion: it exits 1.
+- stdout is only the result. Page errors, dialogs, downloads and tips arrive on stderr.
+- Add --video on the first command only when a video or demo is asked for.
+- 'close' prints the session dir (transcript.md, shots/, network.jsonl): hand the user that path.
 
 Navigate / act (selectors are Playwright strings: text=, role=button[name="…"], css, xpath=…):
-  browse open [url]                 open the app (default ${APP_DEFAULT}) — starts the browser
+  browse open [url]                 open the app (default ${APP_DEFAULT}); starts the browser
   browse goto <url>                 navigate. open/goto/reload/goBack/goForward take --timeout <ms>
-                                    (default 20000, and the client waits it out) — raise it for a dev
-                                    server compiling a route on first hit. goBack/goForward FAIL when
-                                    there is nowhere to go. A landing url that looks like a sign-in
-                                    wall is called out inline, here and after a click.
+                                    (default 20000); raise it for a dev server's first compile.
+                                    goBack/goForward FAIL when there is nowhere to go. A url that
+                                    looks like a sign-in wall is called out, here and after a click.
   browse click <selector>           click an element
   browse dblclick <selector>        double-click an element
-  browse rightclick <selector>      right-click it — opens the app's context menu
-  browse fill <selector> <value>    clear an input and type the value into it (key by key, like a person)
-  browse type <selector> <text>     type into an element without clearing it (key by key)
-  browse press [selector] <key>     e.g. browse press "input[name=todo]" Enter · browse press Escape
-                                    (no selector = the key goes to the page: Escape, Tab, "Meta+k")
+  browse rightclick <selector>      right-click it (the app's context menu)
+  browse fill <selector> <value>    clear an input and type the value, key by key
+  browse type <selector> <text>     type without clearing, key by key
+  browse press [selector] <key>     e.g. press "input[name=todo]" Enter · press Escape · press "Meta+k"
+                                    (no selector = the key goes to the page)
   browse check|uncheck <selector>   toggle a checkbox
   browse hover <selector>
   browse selectOption <selector> <value>
   browse setInputFiles <selector> <path…>   attach file(s) to a file input
-  browse drag <from> <to>           press on <from>, carry it to <to>, release (shown on video)
+  browse drag <from> <to>           press on <from>, carry it to <to>, release
   browse scroll <n|-n|top|bottom|<selector>> [--x <n>]
-                                    smooth-scroll (an instant jump reads as a cut on video);
-                                    a selector scrolls that element into view
+                                    smooth-scroll; a selector scrolls that element into view
   browse reload | goBack | goForward
   browse wait <selector|ms> [--gone] [--text <s>] [--not-text <s>] [--url <pattern>] [--timeout <ms>]
-                                    hold until an element appears (or --gone: disappears), until it
-                                    SAYS something (--text "Complete", case-insensitive substring of
-                                    its visible text; --not-text for the reverse), until a navigation
-                                    matches --url, or just pause N ms. This is also your ASSERTION:
-                                    it exits non-zero if the thing never happens, and --text reports
-                                    what the element said instead.
-  browse speed [factor|off]         (--video) fast-forward the recording from here (e.g. 'speed 10') until
-                                    'speed off' — for a long but visibly-progressing wait (spinner,
-                                    deploy log). Dead "thinking" time is cut automatically; this is
-                                    for waits you still want SHOWN, just faster (badged "Nx" — the
-                                    badge needs an ffmpeg built with drawtext/libfreetype, which
-                                    homebrew's core bottle is NOT; without it the stretch is still
-                                    sped up but unlabelled, so it reads as a jump cut. 'browse speed'
-                                    says so once per session when that is the case). Bare 'browse speed'
-                                    opens a region at the default factor (${IDLE.speed}x); 'speed off' with
-                                    nothing open is an error. A 'toast' inside the region is
-                                    fast-forwarded with it, so show captions OUTSIDE it.
-  Every command in this section that takes a SELECTOR, except drag and scroll, takes --timeout <ms>,
-  written LAST: raise it for a control that is still rendering, lower it to fail fast. A selector
-  spanning controls and non-controls is refused (text=Pause must not click prose instead of the
-  Pause button). When several controls match and the first is covered, browse gives up after
-  ${AMBIGUOUS_MS}ms and lists every match with what is on top of it. click/dblclick/rightclick/hover
-  also take --position <x,y> after the selector, before --timeout: pixels from the padding-box
-  top-left. Out-of-bounds positions fail. Use rect to inspect the element first.
+                                    until an element appears (--gone: disappears), its visible text
+                                    contains --text (case-insensitive; --not-text the reverse), or a
+                                    navigation matches --url. Exits non-zero if that never happens,
+                                    and --text reports what the element said instead.
+  browse speed [factor|off]         (--video) fast-forward the recording until 'speed off', for a
+                                    long wait you still want shown (default ${IDLE.speed}x). Dead time
+                                    is cut anyway. A toast inside the region is sped up too.
+  Every command here that takes a SELECTOR, except drag and scroll, takes --timeout <ms>, written
+  LAST. A selector spanning controls and prose is refused. When several controls match and the
+  first is covered, browse gives up after ${AMBIGUOUS_MS}ms and lists every match with what is on top of
+  it: scope the selector (role=dialog >> …) instead of raising the timeout. click/dblclick/
+  rightclick/hover also take --position <x,y> (pixels from the element's top-left) before --timeout.
 
-AI tasks (preferred for multistep goals):
-  browse ai task <goal>                delegate the whole goal using fresh DOM observations
-    --max-steps <n>                    at most n actions (default 12, max 50)
-    --task-timeout <ms>                total budget (default 120000, max 600000)
-    --timeout <ms>                     per API/action budget (default 10000, max 60000)
-    --value <name=text>                supply literal input text; repeatable, values stay local
-    --until <selector>                 finish when this selector is visible (completion condition)
-    --scope <selector>                observe/act inside one region (default body)
-    Double-quoted strings in the goal are also available as literal input values.
-    Chooses click, fill, Enter, native select, scroll, wait, done, or blocked.
-    Reconsiders rejected proposals and stale decisions before execution; never retries
-    an action with an unknown outcome. Stops when blocked, uncertain or over budget.
-    Each action is recorded. Completion without --until is a model judgment (p>=0.8).
-    Page text, goal, controls and history go to TypeSafe; supplied --value contents do not.
-  browse ai click|hover <description>   choose a real element with TypeSafe, then act once
-  browse ai fill <description> <value>  choose an input; value is not sent to TypeSafe or transcript
-  browse ai assert <condition>          probabilistic check of visible text; exits 1 below p=0.8
-    --scope <selector>                 limit DOM context (default body, exactly one match)
-    --timeout <ms>                     API and action timeout each (default 10000, max 60000)
-    --dry-run                          report chosen target without acting
-    One API call; no retries. Requires p>=0.8; refuses ambiguous or changed targets.
-    Sends element labels/context or assertion text to TypeSafe. Max 200 elements or
-    12000 assertion characters; requests capped at 24000 bytes. Narrow scope on overflow.
-    Input values and cookies are excluded; text rendered elsewhere on the page may contain them.
-    Open a page first. For a single known target, a selector avoids an API call.
-    API timing/tokens are reported in output.
-    Key comes from TYPESAFE_API_KEY, a credential file or .env; help --env for precedence.
-
-Observe / diagnose (for individual actions or a stopped task):
+Observe / diagnose:
   browse snapshot [selector] [--compact] [--refs] [--timeout <ms>]
                                     accessibility tree of one region, or the page. --compact keeps
-                                    controls and their ancestor context. --refs labels elements @eN
-                                    for later selector arguments. References belong to this snapshot,
-                                    tab and frame; refresh after navigation, replacement or a new snapshot.
-                                    --timeout defaults to 4000ms. Truncated output suggests a narrower scope.
+                                    controls and their context. --refs labels elements @eN for
+                                    later selectors, valid until the next snapshot or navigation.
   browse text [selector]            visible text (whole page if no selector)
   browse title | url                page title / current URL
   browse content                    raw HTML (truncated)
-  browse rect <selector>            JSON geometry for the first match: top-page bounding box, frame-local
-                                    viewport clipping and center hit-test. Does not scroll or change state.
-                                    Center coverage is a sample, not proof the whole element is unobscured.
-  browse errors [console filters]    console + page errors; takes console's archive and filter options (help console)
+  browse rect <selector>            JSON geometry and a center hit-test for the first match
+  browse errors [console filters]   console + page errors; takes console's filters (help console)
   browse console [--dir <session-dir>] [--level log,warn] [--grep <pat>] [--since <#>] [--last <n>|--all] [--json] [--ungroup]
-                                    every console message the page logged, in order, with its # —
-                                    the log/info/warn sibling of 'errors' (which is only the alarm).
-                                    console.jsonl persists the full history; --dir reads it after close
-                                    without launching a browser. Without --dir, a live session is required.
-                                    Consecutive duplicates group with their count and last #; --ungroup
-                                    keeps each event separate. --since <#> reads after that baseline.
-                                    --json returns complete selected records without text truncation.
-                                    Captured from the first command, so a log fired during page load
-                                    is there; past 5000 messages the OLDEST are dropped and the count
-                                    is reported. --last defaults to 40 (--all for every one), a very
-                                    long line is cut with a note, and object arguments are resolved to
-                                    real JSON on both engines. A %c-styled log keeps its CSS arguments
-                                    on chromium; firefox/camoufox applies the styling and drops them.
+                                    every console message, numbered, from the first command on.
+                                    --dir reads a closed session's console.jsonl. --last defaults
+                                    to 40. Repeats are grouped; --ungroup splits them.
   browse screenshot [name|path] [--full] [--sel <selector>] [--pad <px>] [--after <selector>] [--text <substring>] [--timeout <ms>] [--hide <css>] [--scale css]
-                                    save a screenshot into the session dir. --full captures the whole
-                                    scrollable page (without moving it, so the recording is untouched),
-                                    --sel shoots one element, and a name ending in .pdf prints a PDF.
-                                    --sel crops to the element's BORDER box, so a caption, ring or
-                                    badge that overflows it comes back sliced: --pad <px> keeps that
-                                    many pixels around it (clamped to the viewport, and it says so).
-                                    --after waits for a visible match, optionally containing --text,
-                                    immediately before capture in the same command (default timeout 10000).
-                                    It removes the agent round trip, but does not freeze a transient state.
-                                    --text/--timeout require --after. --hide is a repeatable CSS selector,
-                                    hidden only during the image capture and disclosed in the result.
-                                    These capture options do not apply to PDF output. --scale css saves
-                                    1x (one pixel per CSS pixel) on a Retina session. A name with a '/'
-                                    is a path: written there, relative to your cwd.
+                                    save a screenshot into the session dir (a name with '/' is a
+                                    path; .pdf prints a PDF on chromium). --full: whole page.
+                                    --sel: one element's border box, --pad <px> around it. --after:
+                                    wait for a match (with --text) right before the capture.
+                                    --hide: CSS to hide during the capture. --scale css: 1x pixels.
 
 Tabs, frames, emulation, saved logins:
   browse target                     list tabs (index, title, url, * = active)
-  browse target <n>                 switch to a tab · popups are switched to AUTOMATICALLY
+  browse target <n>                 switch to a tab; popups are switched to automatically
   browse target new [url]           open a deliberate tab, recorded while active
-  browse target record on|off       (--video) include/exclude the active tab from now. Popups start excluded.
-                                    Selected tabs are stitched in active-tab order at close, before
-                                    dead-air cuts, speed regions and chapters. Raw sources survive failures.
-  browse target close               close the active secondary tab; recorded footage is retained
+  browse target record on|off       (--video) include/exclude the active tab from now on
+  browse target close               close the active secondary tab
   browse target "iframe#checkout"   scope later element commands into that iframe
   browse target top                 leave the iframe scope
   browse emulate <k=v …>            viewport=390x844 dark=1 geo=41.0,29.0 tz=Europe/Istanbul
-                                    locale=tr-TR cpu=4 net=3g|slow3g|4g|2g|offline · 'off' resets all
-                                    (net=3g makes loading states actually visible in a demo).
-                                    viewport= is for CHECKING a layout, not for recording one: the
-                                    video frame is fixed when the browser starts, so a smaller page
-                                    records anchored top-left in a field of grey. To RECORD phone-
-                                    shaped, start the session with --viewport 390x844 instead.
-  browse state --save <file>        write this session's cookies + localStorage to a file (a bare
-                                    name lands in ${join(BROWSE_HOME, "state")}/)
+                                    locale=tr-TR cpu=4 net=3g|slow3g|4g|2g|offline · 'off' resets.
+                                    tz, locale, cpu and net need --chromium. To RECORD phone-shaped,
+                                    start with --viewport 390x844 instead.
+  browse state --save <file>        save cookies + localStorage (a bare name lands in
+                                    ${join(BROWSE_HOME, "state")}/)
   browse state --load <file> [--clean]
-                                    replay them into the LIVE session (keeps recording) + reload,
-                                    so a later session skips the login flow. MERGES onto what is
-                                    already there (right for restoring one login); --clean wipes
-                                    cookies + that origin's localStorage first, which is what you
-                                    want when switching between two accounts
-  Dialogs (alert/confirm/prompt) are auto-accepted and reported on stderr; put
-  --dialog dismiss (or --dialog "accept:my answer") on the command that triggers one.
-  Downloads are saved to downloads/ in the session dir and their path is reported on stderr.
-  stdout carries only a command's result. Notes, tips, the step shot, new page errors,
-  dialogs and downloads go to stderr, so '| tail -1' and '$(…)' get just the result.
+                                    load them into the live session and reload. Merges; --clean
+                                    wipes cookies + that origin's localStorage first.
+  Dialogs are auto-accepted and reported on stderr; put --dialog dismiss (or
+  --dialog "accept:my answer") on the command that triggers one.
+  Downloads are saved to downloads/ in the session dir; the path is reported on stderr.
 
-Network (every request of the session is logged to network.jsonl by default — works
-while the browser is live AND after close; queries never spawn a browser):
-  browse net [pattern] [flags]      pattern = url substring, or /regex/i
-    --host <d1,d2>  (alias -d)      filter by domain: 'upstash.com' also matches its subdomains,
-                                    'localhost' matches any port, '.foo.com' = subdomains only,
-                                    '!segment.io' excludes (mix: --host "upstash.com,!cdn.upstash.com")
+Network (every request is logged to network.jsonl; queries work after close and never start a browser):
+  browse net [pattern] [flags]      pattern = url substring, or /regex/i. Bare patterns hide static
+                                    assets (the count hidden is said); --all-types shows them.
+    --host <d1,d2>  (alias -d)      domains incl. subdomains; '!cdn.foo.com' excludes
     --method get,post               filter by method            --type xhr,fetch,document,script,image,…
     --status 5xx | 404 | ">=400"    filter by status            --failed      network errors + status >= 400
-    --since <#>                     only requests after entry # (each row shows its #, e.g. --since 42
-                                    right after a click shows only what that click triggered)
+    --since <#>                     only entries after # (note the last # before an action)
     --last <n>                      keep the last n matches (default 30) · --all for everything
-    --grep <pat>                    match anywhere in the entry (headers, request/response bodies, url)
+    --grep <pat>                    match anywhere in the entry (headers, bodies, url)
     --full                          headers + bodies            --body        just the bodies
-    --json                          raw JSON lines, pipe to jq for anything the flags don't cover. Fields:
+    --json                          raw JSON lines for jq. Fields:
                                     i (the #), t (s into recording), at, ms, method, url, type, reqHeaders,
                                     reqBody, status, ok, resHeaders, mime, size, resBody, error, mock, mockVia
     --stats                         counts by status / type / host
-    --all-types                     a bare PATTERN hides static assets (script, stylesheet, image,
-                                    font, media, manifest, texttrack) so app calls aren't buried in
-                                    bundle chunks; this shows them. How many were hidden is always
-                                    said (on stderr for --json), and if ONLY assets matched they are
-                                    shown rather than leaving you with an empty result.
-    --dir <session dir>             query an OLD session's log  --file        print the log's path
-  e.g. browse net -d api.upstash.com --failed --full · browse net --json | jq 'select(.ms>500)'
-  Secret VALUES are hashed (sha256 prefix + length), so you can tell tokens apart and see one
-  rotate without it landing in the log: headers, query params and form/JSON/HTML fields whose
-  name looks secret (token, secret, password, session, bypass, auth, signature, cookie, api key…),
-  plus JWTs, bearer tokens and common API-key shapes anywhere. BROWSE_NET_SECRETS=1 keeps
-  everything verbatim; BROWSE_NET=0 turns logging off entirely.
+    --dir <session dir>             query a closed session's log  --file        print the log's path
+  Secret VALUES are hashed (sha256 prefix + length): secret-named headers, params and fields, JWTs,
+  bearer tokens and API-key shapes. BROWSE_NET_SECRETS=1 keeps them; BROWSE_NET=0 stops logging.
 
 Intercept requests (mock an API, block an asset, rewrite a response):
   browse middleware <pattern> '<playwright route handler>'
-                                    pattern is a Playwright glob matched against the FULL url, so
-                                    lead with ** (e.g. '**/api/user'). The handler is real JS run in
-                                    the daemon with the real Route, and answers it with
-                                    fulfill / abort / continue / fallback:
+                                    glob on the FULL url (lead with **); the handler gets the real
+                                    Route and answers with fulfill / abort / continue / fallback:
     mock      browse middleware '**/api/user' 'route => route.fulfill({json: {id: 1}})'
     block     browse middleware '**/*.png'    'route => route.abort()'
     rewrite   browse middleware '**/api/config' 'async route => {
                 const res = await route.fetch(); const json = await res.json();
                 await route.fulfill({response: res, json: {...json, debug: true}}); }'
-    inspect   browse middleware '**/api/**' 'route => { console.log(route.request().url()); return route.fallback(); }'
-  browse middleware                 list the patterns + how many requests each MATCHED
+  browse middleware                 list the patterns + how many requests each matched
   browse middleware <pattern> --remove · browse middleware --clear
-  A rule only affects requests made after it exists — register before 'open', or 'reload' after.
-  Registering the same pattern REPLACES that rule (no accidental duplicates); newer rules run
-  first. Rules cover the whole context (every tab and frame) and live only for this session.
-  A handler that answers nothing is passed through untouched and says so once, rather than
-  hanging the request. One that throws aborts its request and reports on your next command.
-  console.* from a handler is written VERBATIM to browsed.log in the session dir — it is not
-  redacted, so don't log request headers. Handler source is never printed or written to the
-  transcript. 'browse net' marks what a rule answered: ⟨mock|block|continue <pattern>⟩.
+  Rules affect only later requests: register before 'open', or 'reload' after. The same pattern
+  replaces its rule. Never rewrite a dev server's HTML document: Next/Vite reload forever.
+  console.* in a handler goes unredacted to browsed.log. 'net' marks what a rule answered.
 
 Run code BEFORE every page load (stub a global, pre-seed consent/localStorage, freeze a clock):
   browse init '<js>' [--label <name>] · browse init --file <path> · browse init --stub <name>
-                                    Playwright addInitScript: runs on every document and frame,
-                                    before the page's own scripts, for the life of the session — it
-                                    survives reloads and hard navigations, which an 'eval' cannot.
-                                    Applies from the NEXT navigation: 'browse reload' to apply it here.
-  browse init                       list the registered scripts (#, label, size — never the source)
+                                    addInitScript: runs before the page's scripts on every document,
+                                    for the whole session. Applies from the NEXT navigation.
+  browse init                       list the registered scripts
   browse init --remove <#> · browse init --clear
-  --stub clipboard          a working navigator.clipboard (headless denies the real one with
-                            NotAllowedError, so a "Copy" button never reaches its "Copied!" state and
-                            it cannot be photographed). Keeps what was written: 'browse eval
-                            "window.__clipboard"'. Registers itself labelled, because a "Copied!"
-                            shot taken with a faked clipboard has to be legible as one in the transcript
-  Use it for what must exist before app JS runs (window.gtag stub, consent flag, feature toggle).
-  Use 'middleware' when the thing to change is a REQUEST, not page state.
+  --stub clipboard          a working navigator.clipboard (headless denies the real one, so
+                            "Copied!" never shows). What was written: eval "window.__clipboard"
 
-Run Playwright code in the session (what no command covers: raw CDP, HAR replay, WebSockets, loops):
+Run Playwright code in the session (raw CDP, HAR replay, WebSockets, loops over elements):
   browse run '<code>' [--timeout <ms>] · browse run --file <path> [--timeout <ms>]
-                                    runs in the daemon, NOT the page (that is 'eval'), as an async
-                                    function with these in scope: page (active tab), context, browser
-                                    (null on a -p profile), frame (the 'target' iframe, else the main
-                                    frame), cdp(method, params) and cdp.session() (Chromium only; one
-                                    session per tab, shared with 'emulate'), console, require.
-                                    One expression prints its value; a body prints what it returns;
-                                    a function expression is called with page first. console.*
-                                    lines print before the value; nothing at all prints 'ok - <page>'.
-                                    Values print as JSON when they are plain data.
-                                    --timeout (default 60000) bounds the whole script; actions inside
-                                    keep Playwright's 12s (25s for navigation) unless the code passes
-                                    {timeout}. A script past it keeps running in the background.
-                                    Synchronous code (execSync, a busy loop) blocks the whole session
-                                    and no timeout can stop it. console.* from a listener that fires
-                                    after the run returned goes to browsed.log (unredacted);
-                                    globalThis keeps state between runs. --file is read on THIS
-                                    machine; the code runs where the browser does, where relative
-                                    paths resolve from the dir the session started in and require()
-                                    from browse's install, so give it absolute paths. Close tabs with
-                                    'target close' and the session with 'close', not from the code.
-                                    Dialogs are answered by browse (--dialog picks how), not by the
-                                    code. Detaching cdp.session() drops that tab's 'emulate'
-                                    overrides. On a borrowed --cdp browser, what the code changes
-                                    stays in it. On camoufox, page.evaluate runs in an isolated world
-                                    that cannot see the page's globals; prefix a string with 'mw:'
-                                    (page.evaluate("mw:window.app")) to read them. eval and init
-                                    already run in the page's world.
-    e.g.  browse run 'for (const a of await page.getByRole("link").all()) console.log(await a.getAttribute("href"))'
-          browse run 'await context.routeFromHAR("/tmp/api.har", {url: "**/api/**"})'
+                                    an async function in the daemon (not the page; that is eval)
+                                    with page, context, browser, frame, cdp(method, params),
+                                    cdp.session() (chromium), console and require. The value or
+                                    return prints as JSON. --timeout defaults to 60000. globalThis
+                                    keeps state between runs. On camoufox, page.evaluate cannot see
+                                    page globals; prefix 'mw:' (page.evaluate("mw:window.app")).
+    e.g.  browse run 'await context.routeFromHAR("/tmp/api.har", {url: "**/api/**"})'
           browse run 'await cdp("Network.enable"); await cdp("Network.setBlockedURLs", {urls: ["*.mp4"]})'
-          browse run 'globalThis.ws = []; (await cdp.session()).on("Network.webSocketFrameReceived", (e) => ws.push(e.response.payloadData)); await cdp("Network.enable")'
-          browse run 'ws.splice(0)'
-  Actions inside run get no cursor glide, ripple or key overlay; each run is one step (one
-  screenshot, one chapter) and its code never reaches the transcript. In a recording, prefer the
-  action commands; use run for what they cannot do.
+  Actions inside run get no cursor overlay and count as one step; prefer commands on video.
 
 Misc:
   browse eval <js expression>       evaluate JS in the page, print the result
-  browse toast <text…>              show a NOTE caption on the page (demo videos) — ONLY for context the
-                                    viewer can't see on screen, not to narrate actions. Auto-dismisses
-                                    (~reading time); [--for <sec>] [--sticky] [--color yellow|blue|green|red|neutral]
+  browse toast <text…>              (--video) a caption for context the viewer cannot see
+                                    [--for <sec>] [--sticky] [--color yellow|blue|green|red|neutral]
                                     [--pos top|bottom]; --clear removes a sticky one
-  browse dir                        print THIS session's artifacts dir
-  browse close [--gif] [--keep-raw]  end the session, finalize the video (with --video), print the paths.
-                                    --gif also writes a looping recording.gif; --keep-raw keeps the
-                                    raw .webm (BROWSE_KEEP_WEBM=1 too) so you can re-cut it yourself
+  browse dir                        print this session's artifacts dir
+  browse close [--gif] [--keep-raw]  end the session and print the paths. With --video: --gif also
+                                    writes recording.gif, --keep-raw keeps the raw .webm
 
-Parallel sessions (e.g. one browser per agent — fully isolated):
-  browse -s <name> <cmd> …          run <cmd> against the named session's own browser.
-                                    PREFER passing your own name: pick one per task (-s checkout-bug)
-                                    on the first command and keep it on EVERY command incl. close.
-                                    BROWSE_SESSION=<name> works too. With no -s the session name is
-                                    derived from the calling agent (auto-unique per agent, stable
-                                    across its commands) — "default" for a plain human terminal. That
-                                    is a collision safety net, not the intended path: subagents of the
-                                    SAME agent session, and two browsers under one agent, still need
-                                    their own -s <name>.
+Parallel sessions:
+  browse -s <name> <cmd> …          drive the named session's own browser (BROWSE_SESSION=<name>).
+                                    Without -s the name derives from the calling agent; subagents
+                                    and second browsers still need their own.
   browse sessions                   list live sessions (name, port, artifacts dir)
   browse whoami                     print the session name these commands resolve to
   browse setup                      install/repair deps (playwright, chromium, camoufox link)
-  browse install [<skills-dir>…]    put this clone on PATH, link it in as an agent skill, then
-                                    setup. No dirs = ~/.claude/skills and ~/.agents/skills
+  browse install                    put this clone on PATH, then setup
   browse version                    print the version
 
-Run the browser on another machine (keeps Chromium, ffmpeg and the dev server off
-this one — see 'browse help --env' for the auth + install knobs):
-  browse --remote <sshhost> <cmd>   drive a browser on <sshhost> over ssh. Put it before the
-                                    command, on EVERY command incl. close (BROWSE_REMOTE=<host>
-                                    works too). <sshhost> is anything ssh takes: a ~/.ssh/config
-                                    name, user@host, or an Upstash Box (<box-id>@us-east-1.box.
-                                    upstash.com — it authenticates with the Box API key).
-                                    The remote needs 'browse' on its PATH and nothing else: no
-                                    inbound port, no daemon of its own, nothing running until
-                                    your first command.
-                                    Artifacts are recorded THERE and copied back as the replies
-                                    name them, so every path printed is one you can open HERE.
-                                    'browse open' means 127.0.0.1 ON THAT MACHINE — run the dev
-                                    server there too, or lend it this one with
-                                    'ssh -R 3000:127.0.0.1:3000 <sshhost>'.
-                                    'profiles', 'clear' and 'setup' read that machine's disk,
-                                    so they run there; 'net' copies its log down first.
-  browse box <cmd> …                disposable Upstash Boxes to be that <sshhost>: makes one in
-                                    ~13s, copies files onto it, runs its dev server, deletes it
-                                    when you are done. Needs a Box API key and nothing else —
-                                    'browse box help'.
+Run the browser on another machine:
+  browse --remote <sshhost> <cmd>   drive a browser on <sshhost> over ssh, on EVERY command incl.
+                                    close (BROWSE_REMOTE=<host> works too). 127.0.0.1 is THAT
+                                    machine: run the dev server there, or 'ssh -R 3000:127.0.0.1:3000'.
+                                    Artifacts are copied back; printed paths are local.
+  browse box <cmd> …                disposable Upstash Boxes to be that host: 'browse box help'
 
-Launch flags (how the browser STARTS — put them before the command that opens the
-session; a live session accepts flags that match how it started and refuses the rest,
-naming each value that differs):
-  --cdp <endpoint>                  attach to an existing Chromium browser over http(s)/ws(s).
-                                    Incompatible with --video; existing contexts cannot start video capture.
-                                    No profile or browser-setting launch overrides. Bare open keeps
-                                    the current page. close disconnects, retaining browser and tabs.
-                                    Overlays are off; init, middleware, emulate and state --load are
-                                    unavailable on a borrowed context. Screenshots and logs still work.
-  --headful / --headless            show the browser window while driving it.
-                                    Headed with no profile, the engine defaults to chromium
-  --camoufox / --chromium           pick the engine (default camoufox; chromium headed — see below)
-  --viewport <WxH>                  recording frame size (default 1280x800). This is the one to
-                                    use to RECORD phone-shaped; 'browse emulate viewport=' only
-                                    resizes the page inside an already-fixed frame
-  --device-scale <number>           Chromium pixel density (1..3, default 2). Native Retina
-                                    screenshots: twice the pixels, same CSS layout. Video
-                                    keeps the viewport dimensions. Does not emulate macOS fonts.
-  --cursor / --no-cursor            animated on-page cursor overlay — the real macOS pointer,
-                                    at its real size (BROWSE_CURSOR_SCALE to enlarge it)
-  --keylog / --no-keylog            keystroke overlay — both default ON on both engines. Each is
-                                    a script injected into every page, so on camoufox they are
-                                    also a fingerprint: turn both off for a stealth run
-  --popups / --no-popups            let target=_blank open REAL popups, vs rewriting them into
-                                    same-tab navigation so the recording stays one file
-  --net / --no-net                  network logging (default on — see 'browse net')
-  --video / --no-video              record a video, recording.mp4 (default off). Costs about a
-                                    core per open session, idle or not, plus an ffmpeg finalize
-                                    at close. Screenshots, transcript.md and the network log are
-                                    written either way
+Launch flags (only on the command that STARTS the session; a live one refuses different values):
+  --cdp <endpoint>                  attach to a running Chromium over http(s)/ws(s). No --video,
+                                    init, middleware, emulate or state --load; close leaves it open.
+  --headful / --headless            show the browser window (headed defaults to chromium)
+  --camoufox / --chromium           engine (default camoufox, which clears bot walls). chromium is
+                                    needed for emulate tz/locale/cpu/net, PDF and cdp() in run
+  --viewport <WxH>                  page and video frame size (default 1280x800)
+  --device-scale <number>           chromium pixel density (1..3, default 2)
+  --cursor / --no-cursor            on-page cursor overlay (default on)
+  --keylog / --no-keylog            keystroke overlay (default on). Turn both off on a bot-walled site
+  --popups / --no-popups            real popups for target=_blank, vs same-tab navigation
+  --net / --no-net                  network logging (default on)
+  --video / --no-video              record recording.mp4 (default off; about a core until close)
   --type-delay <ms>                 per-keystroke delay for fill/type (default 45, 0 = paste)
   --idle <ms>                       auto-close after this long idle (default 1800000, 0 = never)
-  e.g. browse --headful --chromium -p google open https://accounts.google.com
-  Every flag is also an env var (BROWSE_HEADFUL=1, BROWSE_ENGINE=chromium, …), and the
-  rarer knobs are env-only — 'browse help --env' lists them all.
+  Every flag is also an env var; rarer knobs are env-only: 'browse help --env'.
 
-Persistent profile (keep cookies + localStorage across close→open, e.g. stay logged in):
-  browse -p <name> <cmd> …          drive on a persistent profile (own user-data dir). Prefix
-                                    EVERY command with the same -p <name>. BROWSE_PROFILE=<name>
-                                    works too. One live BROWSER at a time per profile (tabs are
-                                    unlimited — see 'browse target'); a second session on the
-                                    same profile can't share the locked dir.
-                                    No -p = throwaway clean context (the default).
-  browse profiles [name]            list the persistent profiles, with the engine(s) each has data
-                                    under, its size, when it was last written, and how many sites
-                                    still hold a live cookie. With a NAME: every one of those sites
-                                    and when its cookie expires, with no browser and no recording.
-                                    A cookie means the site was visited, not that you are signed in.
-                                    Hosts and expiries only; cookie values are never read.
-  browse -p <name> clear            delete a profile (both engines' dirs; --chromium / --camoufox
-                                    clears just that half). Close it first if it's open.
-  A profile is stored PER ENGINE — a Firefox profile and a Chromium user-data dir are
-  incompatible formats, so 'browse --camoufox -p x' and 'browse --chromium -p x' are two
-  separate logins under one name. Log in on the engine you will drive with. A local -p with
-  no engine flag (and no BROWSE_ENGINE) starts on the engine that profile was last used with.
+Persistent profile (stay logged in across close → open):
+  browse -p <name> <cmd> …          use a persistent profile, on EVERY command (BROWSE_PROFILE=<name>).
+                                    One live browser per profile. No -p = a clean throwaway context.
+                                    Log in once with --headful, close, then reuse it.
+  browse profiles [name]            list profiles with their engines and sites holding a live cookie
+                                    (a cookie is not proof of a login)
+  browse -p <name> clear            delete a profile (--chromium / --camoufox: just that half)
+  A profile is stored PER ENGINE: log in on the engine you will drive with.
 
-Artifacts (transcript.md, step shots, the --video recording) land in a per-session dir
-under ${join(BROWSE_HOME, "sessions")}/. With --video, on close ffmpeg (if installed) trims the
-blank white lead-in and CUTS static "thinking" dead air (>= 2s with no on-screen
-change) out of the clip (BROWSE_REALTIME=1 preserves the entire unedited timeline;
-BROWSE_IDLE_MODE=speed keeps+fast-forwards static stretches instead,
-=keep leaves it). A region you bracket with 'browse speed <n>' … 'browse speed
-off' is instead fast-forwarded at n× — badged "n×" top-right — so a
-visibly-progressing wait still shows. Time spent on an excluded popup is cut too.
-Deliberate tabs and tabs selected with target record on are recorded while active. It writes a shareable recording.mp4 with a chapter per
-acting command (reads don't get one, and neighbours closer than a quarter second
-merge into 'first (+N more)') plus a poster.jpg; the temp raw .webm is then deleted (kept only if
-ffmpeg is missing/fails, or with --keep-raw / BROWSE_KEEP_WEBM=1).`;
+Artifacts, one dir per session under ${join(BROWSE_HOME, "sessions")}/:
+transcript.md, shots/ (one per step), network.jsonl, console.jsonl, browsed.log, and with --video
+recording.mp4 (dead air cut, a chapter per action; BROWSE_REALTIME=1 keeps the full timeline).`;
+
 
 /** `browse help --env`. The knobs above have flags because they are the ones you
  *  reach for by hand; these are set once in a shell profile or a wrapper, so a
@@ -1921,14 +1719,6 @@ Env-only (set once in a shell profile — no flag):
                            mirror dir, which 'close' and 'dir' print)
   BROWSE_PORT              pin the control port (default: any free port — but with --remote it is
                            derived from the session name, and this overrides that)
-  TYPESAFE_API_KEY         TypeSafe key, used only by 'ai'; sent over the existing SSH tunnel
-                          for remote sessions, never saved in browse artifacts
-  TYPESAFE_ENV_FILE        explicitly select a credential file; no other files tried when set
-                           Otherwise read the caller's .env, then ~/.browse/typesafe.env
-                           (under BROWSE_HOME when set). TYPESAFE_API_KEY always wins.
-                           Store the user-wide key in typesafe.env with owner-only mode 0600:
-                           TYPESAFE_API_KEY=<your-key>. Only this named key is read.
-  TYPESAFE_API_URL         loopback HTTP test server override; production endpoint is fixed
   BROWSE_APP_URL           default URL for 'browse open' (default http://127.0.0.1:3000)
   BROWSE_WIDTH / _HEIGHT   viewport one dimension at a time (BROWSE_VIEWPORT sets both)
   BROWSE_LOCALE            locale chromium reports in navigator.language and Accept-Language
@@ -1974,7 +1764,7 @@ Env-only (set once in a shell profile — no flag):
  *  `--flag` with a two-space gap before its description; anything else at two
  *  spaces is a NOTE, printed with every lookup into that section. */
 const HELP_SECTION_TOPICS = [
-  ["Navigate", ["act", "navigate"]], ["AI tasks", ["ai"]], ["Observe", ["observe", "diagnose"]],
+  ["Navigate", ["act", "navigate"]], ["Observe", ["observe", "diagnose"]],
   ["Tabs", ["tabs", "frames", "emulation", "dialogs", "downloads"]], ["Network", ["net", "network"]],
   ["Intercept", ["middleware", "intercept", "mock"]], ["Run code BEFORE", ["init"]],
   ["Run Playwright", ["run", "code", "playwright"]], ["Misc", ["misc"]],
@@ -2010,7 +1800,7 @@ function helpModel() {
   return { intro, sections };
 }
 /** Every name an entry answers to: `check|uncheck`, `reload | goBack | goForward`,
- *  `ai click|hover` (as `ai click`), `--headful / --headless`, `-p <name> clear`. */
+ *  `--headful / --headless`, `-p <name> clear`. */
 function helpNames(usage) {
   const names = [];
   for (const part of usage.split(/\s+[|·/]\s+/)) {
@@ -2023,7 +1813,6 @@ function helpNames(usage) {
     }
     const heads = w[0].split("|").filter((x) => /^[a-z]/i.test(x));
     names.push(...heads);
-    if (heads[0] === "ai" && w[1]) names.push(...w[1].split("|").map((x) => `ai ${x}`));
   }
   return names;
 }
@@ -2073,9 +1862,7 @@ function helpIndex() {
   });
   return `${intro}
 
-Commands by topic. 'browse help <command|topic>' prints the full usage, flags and caveats,
-e.g. 'browse help wait' or 'browse help net'; 'browse <command> --help' does the same.
-Launch flags answer to their name without dashes ('browse help viewport').
+Before a command's first use: 'browse help <command|topic>' or 'browse <command> --help'.
 'browse help --all' prints everything, 'browse help --env' the env vars.
 
 ${rows.join("\n")}`;
@@ -3139,7 +2926,6 @@ const MAX_TIMER_MS = 2_147_483_647;
  *  i.e. the flag help offers for a slow first compile could not actually be used
  *  past two minutes. Plus a margin for the browser to answer afterwards. */
 function postTimeout(cmd, args) {
-  if (cmd === "ai") return args[0] === "task" ? parseTask(args).taskTimeout + 30000 : 2 * parseAI(args).timeout + 30000;
   const i = args.indexOf("--timeout");
   // `browse wait 130000` carries its duration as a bare argument, with no flag to
   // find - and it was the one form that still died client-side at 120s while the
@@ -3347,7 +3133,7 @@ const RETIRED = Object.assign(Object.create(null), {
  *  next to RETIRED because both exist for the same reason; `browse help` is the
  *  user-facing list and this is the machine one. */
 const DAEMON_COMMANDS = new Set([
-  ...MUTATING, ...PAGE_METHODS, "ai", "open", "snapshot", "text", "title", "url",
+  ...MUTATING, ...PAGE_METHODS, "open", "snapshot", "text", "title", "url",
   "content", "errors", "console", "rect", "screenshot", "wait", "scroll", "eval", "run", "toast", "speed", "init",
   "target", "emulate", "state", "middleware", "dir", "close",
 ]);
@@ -3581,14 +3367,13 @@ async function client(argv) {
     process.stderr.write(`browse: '${CAMOU_SUFFIX}' is reserved — that dir is profile '${base}' on camoufox. Use \`-p ${base} --camoufox\`.\n`);
     return 1;
   }
-  // `browse wait --help` asks about `wait`, `browse ai task --help` about `ai
-  // task`. Only right after the command: later, `--help` is a value
-  // (`fill '#q' --help` types it) or an unknown flag, never a hijack.
-  const sub = cmd === "ai" && argv[1] && !argv[1].startsWith("-") ? 1 : 0;
-  const cmdHelp = !!cmd && !cmd.startsWith("-") && cmd !== "help" && argv[1 + sub] === "--help";
+  // `browse wait --help` asks about `wait`. Only right after the command:
+  // later, `--help` is a value (`fill '#q' --help` types it) or an unknown
+  // flag, never a hijack.
+  const cmdHelp = !!cmd && !cmd.startsWith("-") && cmd !== "help" && argv[1] === "--help";
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h" || cmdHelp) {
     const rest = cmdHelp ? [] : argv.slice(1);
-    const words = cmdHelp ? argv.slice(0, 1 + sub) : rest.filter((a) => !["--env", "--all", "--help"].includes(a));
+    const words = cmdHelp ? argv.slice(0, 1) : rest.filter((a) => !["--env", "--all", "--help"].includes(a));
     if (rest.includes("--env") || words[0] === "env") { process.stdout.write(ENV_HELP + "\n"); return 0; }
     if (rest.includes("--all")) { process.stdout.write(HELP + "\n"); return 0; }
     if (!words.length || words[0] === "help" || !words.join("").trim()) { process.stdout.write(helpIndex() + "\n"); return 0; }
@@ -3910,12 +3695,6 @@ async function client(argv) {
   if (live && refuseLaunch(live)) return 1;
   if ((cmd === "console" || cmd === "errors") && !(await findDaemon()))
     throw new Error(`no live session '${SESSION}'; read saved evidence with '${cmd} --dir <session-dir>'`);
-  let ai;
-  if (cmd === "ai") {
-    (argv[1] === "task" ? parseTask : parseAI)(argv.slice(1));
-    ai = aiConfig();
-    if (!(await findDaemon())) throw new Error("ai: open a page in this session first");
-  }
   // `init` and `run` are checked, and their --file read, BEFORE a browser starts: as the first
   // command it would otherwise launch the session and then fail, leaving a live
   // session that refuses the launch flags of the retry.
@@ -3943,7 +3722,7 @@ async function client(argv) {
   // fileSource. Absolute, so the label names the file the caller meant.
   const args = argv.slice(1).map((a, i, all) => ((cmd === "init" || cmd === "run") && all[i - 1] === "--file" ? resolve(a) : a));
   if (CLOSERS.has(cmd)) writeFileSync(runFile(SESSION), JSON.stringify({ ...d, phase: "closing" }));
-  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(ai ? { ai } : {}), ...(fileSource != null ? { fileSource } : {}), ...(d.spawned ? { starter: true } : {}) }, postTimeout(cmd, args));
+  const res = await post(d.port, { cmd, args, hold: !!REMOTE, ...(fileSource != null ? { fileSource } : {}), ...(d.spawned ? { starter: true } : {}) }, postTimeout(cmd, args));
   // Which browser and which login this session got, said once, when it starts.
   // Landing signed out on the wrong engine's half of a profile was invisible.
   // A discarded remote session still holds this side's tunnel and run file.
@@ -5712,9 +5491,9 @@ async function daemon() {
   });
 
   let idleT = null;
-  let activeTask = null, commandCount = 0, runsActive = 0;
+  let commandCount = 0, runsActive = 0;
   function armIdle() {
-    if (!IDLE_MS || activeTask || runsActive) return;
+    if (!IDLE_MS || runsActive) return;
     clearTimeout(idleT);
     idleT = setTimeout(async () => {
       // A client-initiated close may already be running: closeSession() would
@@ -5760,8 +5539,8 @@ async function daemon() {
     return slug ? "-" + slug : "";
   }
 
-  // `step` numbers transcript entries, one per command (and per ai task
-  // action), so no two entries share a number; a step shot takes its entry's.
+  // `step` numbers transcript entries, one per command, so no two entries
+  // share a number; a step shot takes its entry's.
   async function autoShot(cmd, args) {
     const name = `step-${String(step).padStart(2, "0")}-${cmd}${shotSlug(cmd, args)}.png`;
     // Playwright defaults to caret:"hide", which briefly writes
@@ -6599,7 +6378,7 @@ async function daemon() {
   }
 
   /** Does this command resolve anything inside the frame scope? */
-  const usesFrame = (cmd, args) => ELEMENT_TARGETED.has(cmd) || ["snapshot", "text", "rect", "scroll", "eval", "run", "ai"].includes(cmd)
+  const usesFrame = (cmd, args) => ELEMENT_TARGETED.has(cmd) || ["snapshot", "text", "rect", "scroll", "eval", "run"].includes(cmd)
     || (cmd === "wait" && !/^\d+$/.test(String(args[0] ?? "")) && !args.includes("--url"))
     || (cmd === "screenshot" && (args.includes("--sel") || args.includes("--after")));
   /** A scope persists until `target` changes it or its frame is gone. Gone is
@@ -6626,13 +6405,13 @@ async function daemon() {
   }
 
   let dispatchedCommands = 0;
-  async function dispatch(cmd, args, ai, signal, fileSource) {
+  async function dispatch(cmd, args, fileSource) {
     const firstCommand = dispatchedCommands++ === 0;
     const stripped = takeDialogFlag(args);
     const armed = stripped !== args;
     try {
       if (activeFrameChain.length && usesFrame(cmd, stripped)) await checkFrameScope();
-      return await dispatchCmd(cmd, stripped, ai, signal, firstCommand, fileSource);
+      return await dispatchCmd(cmd, stripped, firstCommand, fileSource);
     } catch (e) {
       throw withCrashCause(e);
     } finally {
@@ -6640,32 +6419,9 @@ async function daemon() {
     }
   }
 
-  async function dispatchCmd(cmd, args, ai, signal, firstCommand = false, fileSource) {
+  async function dispatchCmd(cmd, args, firstCommand = false, fileSource) {
     if (CDP_ENDPOINT && (["init", "middleware", "emulate"].includes(cmd) || (cmd === "state" && args.includes("--load"))))
       throw new Error(`${cmd}: unavailable on a borrowed CDP context; launch a browse-owned session for persistent scripts, interception or emulation`);
-    if (cmd === "ai") {
-      const options = { ...(args[0] === "task" ? parseTask(args) : parseAI(args)), clearWithKeys: USING_CAMOUFOX };
-      if (!ai?.key) throw new Error("ai: missing TypeSafe credentials; update the client");
-      const config = aiConfig({ TYPESAFE_API_KEY: ai.key, TYPESAFE_API_URL: ai.endpoint });
-      if (options.action === "task") return runTask({
-        target: () => activeFrame ?? page, now,
-        beforeAction: async (element, action) => {
-          await cursorGlideTo(element);
-          if (action !== "hover") await cursorClickFx();
-        },
-        record: async (line, at, action) => {
-          if (action !== "wait") stepMarks.push({ t: at, cmd: `ai task ${action}` });
-          step++;
-          const shot = await autoShot("ai-task", [action]);
-          logTranscript(`### ${step} · ai task\n${transcriptBody(line)}${shot ? `\n[${shot}]` : ""}\n\n`);
-          return shot;
-        },
-      }, options, config, signal);
-      return runAI(activeFrame ?? page, options, config, async (element, action) => {
-        await cursorGlideTo(element);
-        if (action !== "hover") await cursorClickFx();
-      });
-    }
     if (cmd === "close") {
       // Both flags are about a video. Accepting them on a session without one and
       // doing nothing is the silent drop every other flag check here rejects.
@@ -7990,7 +7746,7 @@ async function daemon() {
         cdp.session = () => emuCdp("cdp()", runPage);
         const frame = activeFrame ? await frameForEval("run") : page.mainFrame();
         // A long run is not idleness: the idle timer must not close the session
-        // under it (ai task does the same).
+        // under it.
         clearTimeout(idleT);
         runsActive++;
         const ran = Promise.resolve().then(async () => {
@@ -8134,34 +7890,22 @@ async function daemon() {
     req.setEncoding("utf8");
     req.on("data", (c) => (body += c));
     req.on("end", async () => {
-      let cmd = "?", args = [], hold = false, ai, fileSource, starter = false;
-      try { ({ cmd, args = [], hold = false, ai, fileSource, starter = false } = JSON.parse(body)); } catch { /* ignore */ }
+      let cmd = "?", args = [], hold = false, fileSource, starter = false;
+      try { ({ cmd, args = [], hold = false, fileSource, starter = false } = JSON.parse(body)); } catch { /* ignore */ }
       const send = (obj) => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obj)); };
-      let ownsTask = false, ownsCommand = false, taskTimer;
+      let ownsCommand = false;
       const asides = [];
       const firstRequest = requestsSeen++ === 0;
       try {
-        if (activeTask) throw new Error("an AI task is running; cancel its invoking command before issuing another browser command");
         // Timestamped BEFORE the command so the chapter lands on the moment the
         // viewer sees it start, but only PUSHED after it succeeds - a chapter
         // pointing at a command that threw points at nothing on screen.
         if (closeReply && CLOSERS.has(cmd)) { send(closeReply); return; }
         if (closing && !CLOSERS.has(cmd)) throw new Error("session is finalizing; wait for close to finish before issuing browser commands");
-        const task = cmd === "ai" && args[0] === "task";
-        if (task && commandCount) throw new Error("another browser command is still running; wait before starting an AI task");
         commandCount++; ownsCommand = true;
-        if (task) {
-          const options = parseTask(args);
-          activeTask = new AbortController(); ownsTask = true;
-          const controller = activeTask;
-          clearTimeout(idleT);
-          taskTimer = setTimeout(() => controller.abort(), options.taskTimeout);
-          res.on("close", () => { if (!res.writableEnded) controller.abort(); });
-        }
         const stepAt = now();
-        const out = await asideStore.run(asides, () => dispatch(cmd, args, ai, activeTask?.signal, fileSource));
-        const aiReadOnly = cmd === "ai" && (task || args[0] === "assert" || parseAI(args).dryRun);
-        if (!CHAPTERLESS.has(cmd) && !aiReadOnly) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
+        const out = await asideStore.run(asides, () => dispatch(cmd, args, fileSource));
+        if (!CHAPTERLESS.has(cmd)) stepMarks.push({ t: stepAt, cmd: logLabel(cmd, args).slice(0, 64) });
         // Collapse any middleware faults raised since the last command into the
         // notes queue, so they ride out on this reply like every other note.
         mwFlushThrows();
@@ -8209,7 +7953,7 @@ async function daemon() {
         }
         step++;
         let shot = null;
-        if (MUTATING.has(cmd) || cmd === "open" || cmd === "scroll" || cmd === "run" || (cmd === "ai" && !aiReadOnly)) shot = await autoShot(cmd, cmd === "ai" ? [args[0]] : cmd === "run" ? [] : args);
+        if (MUTATING.has(cmd) || cmd === "open" || cmd === "scroll" || cmd === "run") shot = await autoShot(cmd, cmd === "run" ? [] : args);
         const result = out;
         // Everything that is not the answer rides in `notes`, which the client
         // prints on stderr: the step shot, the command's own remarks, new page
@@ -8266,7 +8010,6 @@ async function daemon() {
         send({ ok: false, error: msg });
       } finally {
         if (ownsCommand) commandCount--;
-        if (ownsTask) { clearTimeout(taskTimer); activeTask = null; armIdle(); }
       }
     });
   });

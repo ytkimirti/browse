@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# browse — drive a REAL browser step by step (see SKILL.md at the repo root).
+# browse — drive a REAL browser step by step (`browse help`).
 # Every session logs a transcript, step screenshots and network; with --video it
 # is also captured with an animated cursor + keystroke overlay, and on close
 # static "agent thinking" dead air is cut out into a shareable recording.mp4
@@ -225,10 +225,8 @@ camoufox_pw_ready() {
 }
 
 # `browse install` — the first thing you run after cloning: put the CLI on PATH,
-# link this clone in as an agent skill, then install the deps. One clone is both
-# the CLI and the skill, so `git pull` updates them together and a symlink keeps
-# that true. Idempotent; re-run it after adding another agent.
-# `install` links THIS clone into THIS machine's PATH and skill dirs, so a
+# then install the deps. A symlink, so `git pull` updates it. Idempotent.
+# `install` links THIS clone into THIS machine's PATH, so a
 # --remote alongside it is meaningless — and, since install ends by running
 # `setup`, honouring it would download a browser here for a session meant to run
 # over there. That is the exact trap `browse --remote <host> setup` was fixed for.
@@ -248,23 +246,6 @@ if [[ "$CMD" == "install" ]]; then
     *":$BIN_DIR:"*) ;;
     *) echo "browse: ! $BIN_DIR is not on your PATH — add it, or 'browse' won't be found" ;;
   esac
-  # Skills live in a per-agent directory. With no argument, link into the two
-  # that cover everything on this machine: Claude Code's, and ~/.agents/skills,
-  # which the agents that read AGENTS.md share. Name dirs to override — a
-  # project's own ./.agents/skills, say.
-  DIRS=("$@")
-  [[ ${#DIRS[@]} -eq 0 ]] && DIRS=("$HOME/.claude/skills" "$HOME/.agents/skills")
-  for d in "${DIRS[@]}"; do
-    mkdir -p "$d"
-    # -n so an existing link is REPLACED rather than linked inside it. A real
-    # directory there is someone else's install: say so instead of clobbering.
-    if [[ -d "$d/browse" && ! -L "$d/browse" ]]; then
-      echo "browse: ! $d/browse is a real directory, not a link — left alone"
-    else
-      ln -sfn "$REPO_ROOT" "$d/browse"
-      echo "browse: ✓ $d/browse (skill)"
-    fi
-  done
   echo "browse: installing deps…"
   set -- setup
 fi

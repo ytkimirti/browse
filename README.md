@@ -23,13 +23,10 @@ git clone https://github.com/ytkimirti/browse.git ~/browse
 ~/browse/bin/browse install
 ```
 
-`install` puts `browse` on your PATH (`~/.local/bin`), links the clone in as an
-agent skill for Claude Code (`~/.claude/skills`) and for anything that reads
-`~/.agents/skills`, then downloads Playwright and a browser. Name directories to
-link somewhere else instead, a project's own `./.agents/skills` say. Needs Node
-18+, and re-running it is safe.
+`install` puts `browse` on your PATH (`~/.local/bin`), then downloads Playwright
+and a browser. Needs Node 18+, and re-running it is safe. `git pull` updates it.
+Agents need no skill: `browse help` opens with the rules they need.
 
-One clone is both the CLI and the skill, so `git pull` updates them together.
 Playwright dependencies land in `~/.browse`; browser binaries go to Playwright's
 shared cache, so one you already downloaded for another project is reused.
 
@@ -42,9 +39,8 @@ npm install -g /tmp/ytkimirti-browse-0.1.0.tgz
 browse install
 ```
 
-The package includes the CLI and agent skill. Installation runs no lifecycle
-scripts and downloads no browser automatically; `browse install` links the skill
-and performs setup. `browse help` and `browse version` work before setup.
+Installation runs no lifecycle scripts and downloads no browser automatically;
+`browse install` performs setup. `browse help` and `browse version` work before setup.
 Use `npm run test:package` to verify the packed file list and a fresh local install.
 This package has not been published to the npm registry.
 
@@ -73,30 +69,6 @@ browse box up       # first run bakes a reusable image (~6 min); every one after
 `up` prints the host to pass as `--remote`, and `browse box help` shows a whole
 session end to end. `browse box down` deletes it. Nothing is billed once the box
 is gone, and the image that makes `up` fast costs cents a month.
-
-## Delegate a task to TypeSafe
-
-Give browse a goal. It observes the DOM, chooses and records an action, then
-repeats until the goal is complete or a step/time limit is reached:
-
-```sh
-browse -s demo open https://example.com
-browse -s demo ai task 'Click Learn more and stop once the Example Domains page is loaded.'
-browse -s demo close
-```
-
-Set `TYPESAFE_API_KEY` or keep it in the caller's `.env`. `browse help ai` documents
-task mode, individual semantic actions, assertions, scopes and limits. AI commands report
-latency and tokens, decline uncertain matches and retain normal session evidence.
-Tasks send the goal, visible controls, page text and action history to TypeSafe.
-Text entry uses quoted strings from the goal or supplied named values. Exact selectors
-remain the fastest, free option when you already know the target.
-
-Run `node test/ai.test.mjs` and `node test/ai-task.test.mjs` for isolated browser
-integration checks with a fake provider; set `BROWSE_ENGINE=camoufox` to verify that engine separately.
-`node test/ai-boxes.mjs` prints the explicit opt-in for live tests on two disposable
-Boxes, including real API calls, recordings, timings and teardown. Add `--task`
-to exercise complete multistep goals.
 
 ## Beyond the basics
 

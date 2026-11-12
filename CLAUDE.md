@@ -1,19 +1,19 @@
 # browse
 
-`browse` is a deterministic, agent browser CLI plus agent skill: the fewest commands and least context needed to drive a real browser, verify UI behavior, diagnose failures, and produce recorded proof.
+`browse` is a deterministic agent browser CLI: the fewest commands and least context needed to drive a real browser, verify UI behavior, diagnose failures, and produce recorded proof.
 
 ## Before changing the command surface
 
-Read `SKILL.md`, run `browse help`, and read `browse.mjs`. Verify Playwright APIs, flags, and selector syntax against the installed package or official docs rather than recalling them.
+Run `browse help` and read `browse.mjs`. Verify Playwright APIs, flags, and selector syntax against the installed package or official docs rather than recalling them.
 
 ## Product boundaries
 
-- Ordinary commands act once and return. Explicit `ai task` owns a bounded observe-act loop over a user goal, choosing only concrete DOM actions and supplied text values. Keep generated code and arbitrary tool execution outside that loop.
+- Commands act once and return. The calling agent owns the loop; browse has no AI of its own.
 - Recording is a core capability. Every change must account for video, cursor/key overlays, step screenshots, transcripts, chapters, dead-air processing, tabs, and teardown.
 - Redaction of network logs stays on by default. Credentials never surface without an explicit flag.
 - Add a command only when it beats existing commands or `eval` as a primitive. Not every Playwright method needs a wrapper.
-- General scripting and workflow orchestration stay in the shell. The bounded DOM loop in `ai task` is the explicit exception.
-- Beyond bounded DOM tasks, keep AI extraction, scheduling, CAPTCHA services, managed credentials and cloud fleets out of scope unless the user explicitly widens it.
+- General scripting and workflow orchestration stay in the shell.
+- Keep AI decisions, extraction, scheduling, CAPTCHA services, managed credentials and cloud fleets out of scope unless the user explicitly widens it.
 - Connect to remote browsers over provider-neutral CDP.
 - Output stays concise and agent-readable. Machine-readable output is a separate explicit mode.
 
@@ -27,6 +27,6 @@ Read `SKILL.md`, run `browse help`, and read `browse.mjs`. Verify Playwright API
 
 - Every new command and every bug fix gets integration coverage, testing success and failure output including exit status.
 - Test Chromium and Camoufox separately where behavior is engine-dependent; fail loudly when a feature cannot work on an engine.
-- `browse help` (and `browse help --env`) is the single source of truth for commands, flags, defaults and env vars. `SKILL.md` and `skill/*.md` carry only what help cannot state: when to reach for something, hazards, judgment. Never restate a flag, a default or a syntax rule there; point at help instead.
+- `browse help` is the only agent-facing doc; there is no skill. Agents skim it with `| head -30` or `| grep`, so the bare index opens with the working rules, and each entry leads with its usage line. Add a sentence only when an agent would otherwise get it wrong; keep `browse help` under ~60 lines.
 - Update docs only for behavior that exists.
 - Bounded output must say it was truncated and offer a continuation or narrower query.
